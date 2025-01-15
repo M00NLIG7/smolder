@@ -1,0 +1,8 @@
+[package]
+name = "smolder-tools"
+version = "0.1.0"
+edition = "2021"
+authors = ["M00NLIG7"]
+description = "Smolder tools - Part of the Smolder SMB toolkit"
+repository = "https://github.com/M00NLIG7/smolder"
+license = "MIT"
