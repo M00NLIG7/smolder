@@ -1,0 +1,17 @@
+[package]
+name = "smolder"
+version = "0.1.0"
+edition = "2021"
+authors = ["M00NLIG7"]
+description = "A pure Rust SMB protocol implementation for security testing"
+repository = "https://github.com/M00NLIG7/smolder"
+license = "MIT"
+keywords = ["smb", "security", "pentest", "network", "protocol"]
+categories = ["network-programming", "security"]
+
+[workspace]
+members = [
+    "smolder-core",
+    "smolder-proto",
+    "smolder-tools",
+]
