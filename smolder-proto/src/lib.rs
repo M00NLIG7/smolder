@@ -1,4 +1,4 @@
-//! Smolder proto crate
+//! Smolder tools crate
 //! 
 //! Copyright (c) 2025 M00NLIG7
 
@@ -8,3 +8,5 @@
 pub mod prelude {
     //! Common types and traits
 }
+
+pub mod smb;
