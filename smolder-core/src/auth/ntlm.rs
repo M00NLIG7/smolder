@@ -12,8 +12,9 @@ use smolder_proto::smb::smb2::utf16le;
 use smolder_proto::smb::smb2::NegotiateResponse;
 
 use super::spnego::{
-    encode_neg_token_init_ntlm, encode_neg_token_resp_ntlm, extract_mech_token,
-    parse_neg_token_resp,
+    encode_neg_token_init_ntlm, encode_neg_token_resp, encode_neg_token_resp_ntlm,
+    extract_mech_token, ntlm_mech_types, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE,
+    NEG_STATE_REJECT,
 };
 use super::{AuthError, AuthProvider};
 
@@ -24,6 +25,7 @@ const NTLM_MESSAGE_AUTHENTICATE: u32 = 3;
 const WINDOWS_TICK: u64 = 10_000_000;
 const SEC_TO_UNIX_EPOCH: u64 = 11_644_473_600;
 const MIC_PRESENT_FLAG: u32 = 0x0000_0002;
+const NTLM_VERSION: [u8; 8] = [6, 1, 0, 0, 0, 0, 0, 0x0f];
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -44,14 +46,27 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-enum AvId {
-    Eol = 0x0000,
-    NbComputerName = 0x0001,
-    NbDomainName = 0x0002,
-    Flags = 0x0006,
-    Timestamp = 0x0007,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AvId(u16);
+
+impl AvId {
+    const EOL: Self = Self(0x0000);
+    #[cfg(test)]
+    const NB_COMPUTER_NAME: Self = Self(0x0001);
+    #[cfg(test)]
+    const NB_DOMAIN_NAME: Self = Self(0x0002);
+    #[cfg(test)]
+    const DNS_COMPUTER_NAME: Self = Self(0x0003);
+    #[cfg(test)]
+    const DNS_DOMAIN_NAME: Self = Self(0x0004);
+    const FLAGS: Self = Self(0x0006);
+    const TIMESTAMP: Self = Self(0x0007);
+    #[cfg(test)]
+    const SINGLE_HOST: Self = Self(0x0008);
+    #[cfg(test)]
+    const TARGET_NAME: Self = Self(0x0009);
+    #[cfg(test)]
+    const CHANNEL_BINDINGS: Self = Self(0x000a);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +102,7 @@ struct AuthenticateMessage {
     workstation: Vec<u8>,
     encrypted_random_session_key: Vec<u8>,
     flags: NegotiateFlags,
+    version: [u8; 8],
     mic: [u8; 16],
 }
 
@@ -94,6 +110,7 @@ struct AuthenticateMessage {
 enum NtlmState {
     Initial,
     WaitingForChallenge { negotiate_message: Vec<u8> },
+    WaitingForCompletion { flags: NegotiateFlags },
     Complete,
 }
 
@@ -172,12 +189,12 @@ impl NtlmAuthenticator {
         NegotiateFlags::UNICODE
             | NegotiateFlags::REQUEST_TARGET
             | NegotiateFlags::SIGN
-            | NegotiateFlags::ALWAYS_SIGN
             | NegotiateFlags::NTLM
+            | NegotiateFlags::ALWAYS_SIGN
             | NegotiateFlags::EXTENDED_SESSIONSECURITY
-            | NegotiateFlags::TARGET_INFO
+            | NegotiateFlags::VERSION
             | NegotiateFlags::_128
-            | NegotiateFlags::_56
+            | NegotiateFlags::KEY_EXCH
     }
 }
 
@@ -207,10 +224,25 @@ impl AuthProvider for NtlmAuthenticator {
                     "challenge received before initial token was sent",
                 ))
             }
+            NtlmState::WaitingForCompletion { flags } => {
+                let parsed = parse_neg_token_resp(incoming)?;
+                if matches!(parsed.neg_state, Some(NEG_STATE_REJECT)) {
+                    return Err(AuthError::InvalidToken("authentication was rejected"));
+                }
+
+                let session_key = self.session_key.ok_or(AuthError::InvalidState(
+                    "session key missing during completion",
+                ))?;
+                let mech_list_mic = mech_list_mic(session_key, *flags);
+                self.state = NtlmState::Complete;
+                return Ok(encode_neg_token_resp(
+                    Some(NEG_STATE_ACCEPT_COMPLETE),
+                    None,
+                    Some(&mech_list_mic),
+                ));
+            }
             NtlmState::Complete => {
-                return Err(AuthError::InvalidState(
-                    "next token requested after authentication completed",
-                ))
+                return Err(AuthError::InvalidState("authentication already finished"))
             }
         };
 
@@ -227,20 +259,28 @@ impl AuthProvider for NtlmAuthenticator {
         let token = encode_neg_token_resp_ntlm(&authenticate.encode());
 
         self.session_key = Some(session_key);
-        self.state = NtlmState::Complete;
+        self.state = NtlmState::WaitingForCompletion {
+            flags: authenticate.flags,
+        };
         Ok(token)
     }
 
     fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
+        if matches!(self.state, NtlmState::Complete) {
+            return Ok(());
+        }
+
         if incoming.is_empty() {
+            self.state = NtlmState::Complete;
             return Ok(());
         }
 
         let parsed = parse_neg_token_resp(incoming)?;
-        if matches!(parsed.neg_state, Some(2)) {
+        if matches!(parsed.neg_state, Some(NEG_STATE_REJECT)) {
             return Err(AuthError::InvalidToken("authentication was rejected"));
         }
 
+        self.state = NtlmState::Complete;
         Ok(())
     }
 
@@ -251,17 +291,37 @@ impl AuthProvider for NtlmAuthenticator {
 
 impl NegotiateMessage {
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32);
+        let payload_offset = 40u32;
+        let mut out = Vec::with_capacity(40);
         out.extend_from_slice(NTLMSSP_SIGNATURE);
         out.extend_from_slice(&NTLM_MESSAGE_NEGOTIATE.to_le_bytes());
         out.extend_from_slice(&self.flags.bits().to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&payload_offset.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&payload_offset.to_le_bytes());
+        out.extend_from_slice(&version_bytes(self.flags));
         out
+    }
+
+    #[cfg(test)]
+    fn decode(message: &[u8]) -> Result<Self, AuthError> {
+        if message.len() < 40 {
+            return Err(AuthError::InvalidToken("negotiate message too short"));
+        }
+        if &message[..8] != NTLMSSP_SIGNATURE {
+            return Err(AuthError::InvalidToken("missing NTLMSSP signature"));
+        }
+        if read_u32(message, 8)? != NTLM_MESSAGE_NEGOTIATE {
+            return Err(AuthError::InvalidToken("unexpected NTLM message type"));
+        }
+
+        Ok(Self {
+            flags: NegotiateFlags::from_bits(read_u32(message, 12)?)
+                .ok_or(AuthError::InvalidToken("unsupported NTLM negotiate flags"))?,
+        })
     }
 }
 
@@ -336,7 +396,7 @@ impl AuthenticateMessage {
             out.extend_from_slice(&buffer.offset.to_le_bytes());
         }
         out.extend_from_slice(&self.flags.bits().to_le_bytes());
-        out.extend_from_slice(&[0; 8]);
+        out.extend_from_slice(&self.version);
         out.extend_from_slice(&self.mic);
         for buffer in buffers {
             out.extend_from_slice(buffer);
@@ -364,6 +424,7 @@ impl AuthenticateMessage {
         let encrypted_random_session_key = read_security_buffer(message, 52)?.unwrap_or(&[]);
         let flags = NegotiateFlags::from_bits(read_u32(message, 60)?)
             .ok_or(AuthError::InvalidToken("unsupported NTLM negotiate flags"))?;
+        let version = read_array::<8>(message, 64)?;
         let mic = read_array::<16>(message, 72)?;
 
         Ok(Self {
@@ -374,6 +435,7 @@ impl AuthenticateMessage {
             workstation: workstation.to_vec(),
             encrypted_random_session_key: encrypted_random_session_key.to_vec(),
             flags,
+            version,
             mic,
         })
     }
@@ -404,7 +466,9 @@ fn build_authenticate_message(
         timestamp,
         &target_info,
     );
-    let session_key = hmac_md5(&response_key_nt, &nt_response[..16]);
+    let key_exchange_key = hmac_md5(&response_key_nt, &nt_response[..16]);
+    let (encrypted_random_session_key, session_key) =
+        encrypt_random_session_key(negotiated_flags, key_exchange_key);
     let lm_challenge_response = if use_mic {
         vec![0; 24]
     } else {
@@ -421,8 +485,9 @@ fn build_authenticate_message(
         domain_name: utf16le(&credentials.domain),
         user_name: utf16le(&credentials.username),
         workstation: utf16le(&credentials.workstation),
-        encrypted_random_session_key: Vec::new(),
+        encrypted_random_session_key,
         flags: negotiated_flags,
+        version: version_bytes(negotiated_flags),
         mic: [0; 16],
     };
 
@@ -443,9 +508,83 @@ fn default_authenticate_flags() -> NegotiateFlags {
         | NegotiateFlags::ALWAYS_SIGN
         | NegotiateFlags::NTLM
         | NegotiateFlags::EXTENDED_SESSIONSECURITY
-        | NegotiateFlags::TARGET_INFO
+        | NegotiateFlags::VERSION
         | NegotiateFlags::_128
-        | NegotiateFlags::_56
+        | NegotiateFlags::KEY_EXCH
+}
+
+fn version_bytes(flags: NegotiateFlags) -> [u8; 8] {
+    if flags.contains(NegotiateFlags::VERSION) {
+        NTLM_VERSION
+    } else {
+        [0; 8]
+    }
+}
+
+fn encrypt_random_session_key(
+    flags: NegotiateFlags,
+    key_exchange_key: [u8; 16],
+) -> (Vec<u8>, [u8; 16]) {
+    if flags.contains(NegotiateFlags::KEY_EXCH) {
+        let exported_session_key: [u8; 16] = random();
+        (
+            rc4k(&key_exchange_key, &exported_session_key),
+            exported_session_key,
+        )
+    } else {
+        (Vec::new(), key_exchange_key)
+    }
+}
+
+fn mech_list_mic(exported_session_key: [u8; 16], flags: NegotiateFlags) -> [u8; 16] {
+    ntlm_message_signature(exported_session_key, flags, &ntlm_mech_types())
+}
+
+fn ntlm_message_signature(
+    exported_session_key: [u8; 16],
+    flags: NegotiateFlags,
+    message: &[u8],
+) -> [u8; 16] {
+    let sign_key = sign_key(exported_session_key, flags);
+    let mut checksum = hmac_md5_concat(&sign_key, &[&0u32.to_le_bytes(), message]);
+    let mut checksum8 = checksum[..8].to_vec();
+    if flags.contains(NegotiateFlags::KEY_EXCH) {
+        checksum8 = rc4k(&seal_key(exported_session_key, flags), &checksum8);
+    }
+
+    checksum[..8].copy_from_slice(&checksum8);
+
+    let mut signature = [0u8; 16];
+    signature[..4].copy_from_slice(&1u32.to_le_bytes());
+    signature[4..12].copy_from_slice(&checksum[..8]);
+    signature[12..].copy_from_slice(&0u32.to_le_bytes());
+    signature
+}
+
+fn sign_key(exported_session_key: [u8; 16], flags: NegotiateFlags) -> [u8; 16] {
+    if !flags.contains(NegotiateFlags::EXTENDED_SESSIONSECURITY) {
+        return [0; 16];
+    }
+
+    md5_concat(&[
+        &exported_session_key,
+        b"session key to client-to-server signing key magic constant\0",
+    ])
+}
+
+fn seal_key(exported_session_key: [u8; 16], flags: NegotiateFlags) -> [u8; 16] {
+    let base_key = if flags.contains(NegotiateFlags::_128) {
+        exported_session_key.as_slice()
+    } else if flags.contains(NegotiateFlags::_56) {
+        &exported_session_key[..7]
+    } else {
+        &exported_session_key[..5]
+    };
+
+    md5_concat(&[
+        base_key,
+        b"session key to client-to-server sealing key magic constant\0",
+    ])
 }
 
 fn ntowfv2(credentials: &NtlmCredentials) -> [u8; 16] {
@@ -508,11 +647,11 @@ fn lmv2_response(
 fn encode_target_info(target_info: &[AvPair]) -> Vec<u8> {
     let mut out = Vec::new();
     for pair in target_info {
-        out.extend_from_slice(&(pair.av_id as u16).to_le_bytes());
+        out.extend_from_slice(&pair.av_id.0.to_le_bytes());
         out.extend_from_slice(&(pair.value.len() as u16).to_le_bytes());
         out.extend_from_slice(&pair.value);
     }
-    out.extend_from_slice(&(AvId::Eol as u16).to_le_bytes());
+    out.extend_from_slice(&AvId::EOL.0.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out
 }
@@ -525,7 +664,7 @@ fn parse_target_info(bytes: &[u8]) -> Result<Vec<AvPair>, AuthError> {
         let av_id = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
         let len = usize::from(u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]));
         offset += 4;
-        if av_id == AvId::Eol as u16 {
+        if av_id == AvId::EOL.0 {
             return Ok(pairs);
         }
         if offset + len > bytes.len() {
@@ -534,14 +673,10 @@ fn parse_target_info(bytes: &[u8]) -> Result<Vec<AvPair>, AuthError> {
         let value = bytes[offset..offset + len].to_vec();
         offset += len;
 
-        let av_id = match av_id {
-            0x0001 => AvId::NbComputerName,
-            0x0002 => AvId::NbDomainName,
-            0x0006 => AvId::Flags,
-            0x0007 => AvId::Timestamp,
-            _ => continue,
-        };
-        pairs.push(AvPair { av_id, value });
+        pairs.push(AvPair {
+            av_id: AvId(av_id),
+            value,
+        });
     }
 
     Err(AuthError::InvalidToken("target info missing terminator"))
@@ -549,7 +684,7 @@ fn parse_target_info(bytes: &[u8]) -> Result<Vec<AvPair>, AuthError> {
 
 fn with_mic_present_flag(target_info: &[AvPair]) -> Vec<AvPair> {
     let mut output = target_info.to_vec();
-    if let Some(pair) = output.iter_mut().find(|pair| pair.av_id == AvId::Flags) {
+    if let Some(pair) = output.iter_mut().find(|pair| pair.av_id == AvId::FLAGS) {
         let mut flags = if pair.value.len() >= 4 {
             u32::from_le_bytes([pair.value[0], pair.value[1], pair.value[2], pair.value[3]])
         } else {
@@ -561,7 +696,7 @@ fn with_mic_present_flag(target_info: &[AvPair]) -> Vec<AvPair> {
     }
 
     output.push(AvPair {
-        av_id: AvId::Flags,
+        av_id: AvId::FLAGS,
         value: MIC_PRESENT_FLAG.to_le_bytes().to_vec(),
     });
     output
@@ -570,7 +705,7 @@ fn with_mic_present_flag(target_info: &[AvPair]) -> Vec<AvPair> {
 fn target_info_timestamp(target_info: &[AvPair]) -> Option<u64> {
     target_info
         .iter()
-        .find(|pair| pair.av_id == AvId::Timestamp && pair.value.len() == 8)
+        .find(|pair| pair.av_id == AvId::TIMESTAMP && pair.value.len() == 8)
         .map(|pair| {
             u64::from_le_bytes([
                 pair.value[0],
@@ -657,6 +792,43 @@ fn hmac_md5_concat(key: &[u8], payloads: &[&[u8]]) -> [u8; 16] {
     out
 }
 
+fn md5_concat(payloads: &[&[u8]]) -> [u8; 16] {
+    let mut md5 = Md5::new();
+    for payload in payloads {
+        md5.update(payload);
+    }
+
+    let digest = md5.finalize();
+    let mut out = [0; 16];
+    out.copy_from_slice(&digest);
+    out
+}
+
+fn rc4k(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut state = [0u8; 256];
+    for (index, value) in state.iter_mut().enumerate() {
+        *value = index as u8;
+    }
+
+    let mut j = 0usize;
+    for i in 0..state.len() {
+        j = (j + usize::from(state[i]) + usize::from(key[i % key.len()])) & 0xff;
+        state.swap(i, j);
+    }
+
+    let mut i = 0usize;
+    j = 0;
+    let mut out = Vec::with_capacity(data.len());
+    for byte in data {
+        i = (i + 1) & 0xff;
+        j = (j + usize::from(state[i])) & 0xff;
+        state.swap(i, j);
+        let k = state[(usize::from(state[i]) + usize::from(state[j])) & 0xff];
+        out.push(*byte ^ k);
+    }
+    out
+}
+
 fn current_windows_timestamp() -> u64 {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -669,11 +841,14 @@ fn current_windows_timestamp() -> u64 {
 mod tests {
     use smolder_proto::smb::smb2::{Dialect, GlobalCapabilities, NegotiateResponse, SigningMode};
 
-    use super::super::spnego::{encode_neg_token_resp_ntlm, extract_mech_token};
+    use super::super::spnego::{
+        encode_neg_token_resp_ntlm, extract_mech_token, parse_neg_token_resp,
+        NEG_STATE_ACCEPT_COMPLETE,
+    };
     use super::{
         current_windows_timestamp, nt_hash, target_info_timestamp, AuthProvider,
-        AuthenticateMessage, AvId, AvPair, ChallengeMessage, NegotiateFlags, NtlmAuthenticator,
-        NtlmCredentials,
+        AuthenticateMessage, AvId, AvPair, ChallengeMessage, NegotiateFlags, NegotiateMessage,
+        NtlmAuthenticator, NtlmCredentials, NTLM_VERSION,
     };
 
     #[test]
@@ -694,11 +869,33 @@ mod tests {
             server_challenge: [1, 2, 3, 4, 5, 6, 7, 8],
             target_info: vec![
                 AvPair {
-                    av_id: AvId::NbComputerName,
+                    av_id: AvId::NB_COMPUTER_NAME,
                     value: vec![b'S', 0, b'R', 0, b'V', 0],
                 },
                 AvPair {
-                    av_id: AvId::Timestamp,
+                    av_id: AvId::DNS_COMPUTER_NAME,
+                    value: vec![b's', 0, b'r', 0, b'v', 0],
+                },
+                AvPair {
+                    av_id: AvId::DNS_DOMAIN_NAME,
+                    value: vec![
+                        b'e', 0, b'x', 0, b'a', 0, b'm', 0, b'p', 0, b'l', 0, b'e', 0,
+                    ],
+                },
+                AvPair {
+                    av_id: AvId::SINGLE_HOST,
+                    value: vec![0x11; 8],
+                },
+                AvPair {
+                    av_id: AvId::TARGET_NAME,
+                    value: vec![b'c', 0, b'i', 0, b'f', 0, b's', 0],
+                },
+                AvPair {
+                    av_id: AvId::CHANNEL_BINDINGS,
+                    value: vec![0x22; 16],
+                },
+                AvPair {
+                    av_id: AvId::TIMESTAMP,
                     value: 1_337u64.to_le_bytes().to_vec(),
                 },
             ],
@@ -709,6 +906,43 @@ mod tests {
 
         assert_eq!(decoded.server_challenge, challenge.server_challenge);
         assert_eq!(decoded.target_info, challenge.target_info);
+    }
+
+    #[test]
+    fn authenticator_initial_token_matches_samba_flag_profile() {
+        let negotiate = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
+            server_guid: [0; 16],
+            capabilities: GlobalCapabilities::empty(),
+            max_transact_size: 0,
+            max_read_size: 0,
+            max_write_size: 0,
+            system_time: 0,
+            server_start_time: 0,
+            security_buffer: Vec::new(),
+        };
+        let mut auth = NtlmAuthenticator::new(NtlmCredentials::new("alice", "password"));
+
+        let initial = auth
+            .initial_token(&negotiate)
+            .expect("initial token should build");
+        let negotiate = extract_mech_token(&initial).expect("should extract NTLM token");
+        let negotiate = NegotiateMessage::decode(&negotiate).expect("type1 should decode");
+
+        assert_eq!(
+            negotiate.flags,
+            NegotiateFlags::UNICODE
+                | NegotiateFlags::REQUEST_TARGET
+                | NegotiateFlags::SIGN
+                | NegotiateFlags::NTLM
+                | NegotiateFlags::ALWAYS_SIGN
+                | NegotiateFlags::EXTENDED_SESSIONSECURITY
+                | NegotiateFlags::VERSION
+                | NegotiateFlags::_128
+                | NegotiateFlags::KEY_EXCH
+        );
     }
 
     #[test]
@@ -744,20 +978,21 @@ mod tests {
                 | NegotiateFlags::ALWAYS_SIGN
                 | NegotiateFlags::EXTENDED_SESSIONSECURITY
                 | NegotiateFlags::TARGET_INFO
+                | NegotiateFlags::VERSION
                 | NegotiateFlags::_128
-                | NegotiateFlags::_56,
+                | NegotiateFlags::KEY_EXCH,
             server_challenge: [8, 7, 6, 5, 4, 3, 2, 1],
             target_info: vec![
                 AvPair {
-                    av_id: AvId::NbComputerName,
+                    av_id: AvId::NB_COMPUTER_NAME,
                     value: vec![b'S', 0, b'E', 0, b'R', 0, b'V', 0, b'E', 0, b'R', 0],
                 },
                 AvPair {
-                    av_id: AvId::NbDomainName,
+                    av_id: AvId::NB_DOMAIN_NAME,
                     value: vec![b'D', 0, b'O', 0, b'M', 0, b'A', 0, b'I', 0, b'N', 0],
                 },
                 AvPair {
-                    av_id: AvId::Timestamp,
+                    av_id: AvId::TIMESTAMP,
                     value: 9_999u64.to_le_bytes().to_vec(),
                 },
             ],
@@ -782,8 +1017,62 @@ mod tests {
         );
         assert_eq!(authenticate.lm_challenge_response, vec![0; 24]);
         assert!(!authenticate.nt_challenge_response.is_empty());
+        assert_eq!(authenticate.encrypted_random_session_key.len(), 16);
+        assert_eq!(authenticate.version, NTLM_VERSION);
         assert_ne!(authenticate.mic, [0; 16]);
         assert!(auth.session_key().is_some());
+    }
+
+    #[test]
+    fn authenticator_allows_final_empty_spnego_leg() {
+        let credentials = NtlmCredentials::new("alice", "password");
+        let mut auth = NtlmAuthenticator::new(credentials)
+            .with_client_challenge([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11])
+            .with_timestamp(5_000);
+        let negotiate = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
+            server_guid: [0; 16],
+            capabilities: GlobalCapabilities::empty(),
+            max_transact_size: 0,
+            max_read_size: 0,
+            max_write_size: 0,
+            system_time: 0,
+            server_start_time: 0,
+            security_buffer: Vec::new(),
+        };
+        auth.initial_token(&negotiate)
+            .expect("initial token should build");
+
+        let challenge = ChallengeMessage {
+            flags: NegotiateFlags::UNICODE
+                | NegotiateFlags::NTLM
+                | NegotiateFlags::SIGN
+                | NegotiateFlags::ALWAYS_SIGN
+                | NegotiateFlags::EXTENDED_SESSIONSECURITY
+                | NegotiateFlags::TARGET_INFO
+                | NegotiateFlags::VERSION
+                | NegotiateFlags::_128
+                | NegotiateFlags::KEY_EXCH,
+            server_challenge: [8, 7, 6, 5, 4, 3, 2, 1],
+            target_info: vec![AvPair {
+                av_id: AvId::TIMESTAMP,
+                value: 9_999u64.to_le_bytes().to_vec(),
+            }],
+        };
+        auth.next_token(&encode_neg_token_resp_ntlm(&challenge.encode_for_test()))
+            .expect("challenge response should build");
+
+        let final_spnego = vec![0xa1, 0x07, 0x30, 0x05, 0xa0, 0x03, 0x0a, 0x01, 0x00];
+        let final_token = auth
+            .next_token(&final_spnego)
+            .expect("final leg should be acknowledged");
+
+        let parsed = parse_neg_token_resp(&final_token).expect("completion token should parse");
+        assert_eq!(parsed.neg_state, Some(NEG_STATE_ACCEPT_COMPLETE));
+        assert_eq!(parsed.response_token, None);
+        assert_eq!(parsed.mech_list_mic.as_ref().map(Vec::len), Some(16));
     }
 
     #[test]
@@ -794,7 +1083,7 @@ mod tests {
     #[test]
     fn target_info_timestamp_extracts_value() {
         let target_info = vec![AvPair {
-            av_id: AvId::Timestamp,
+            av_id: AvId::TIMESTAMP,
             value: 42u64.to_le_bytes().to_vec(),
         }];
 

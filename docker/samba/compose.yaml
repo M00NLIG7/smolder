@@ -1,0 +1,13 @@
+services:
+  samba:
+    image: crazymax/samba:latest
+    container_name: smolder-samba
+    environment:
+      TZ: UTC
+      SAMBA_WORKGROUP: WORKGROUP
+      SAMBA_LOG_LEVEL: "1"
+    ports:
+      - "1445:445"
+    volumes:
+      - ./data:/data
+      - ./share:/samba/share

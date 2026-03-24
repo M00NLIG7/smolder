@@ -4,15 +4,18 @@ use super::AuthError;
 
 const SPNEGO_OID: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
 const NTLM_OID: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a];
+pub(crate) const NEG_STATE_ACCEPT_COMPLETE: u8 = 0;
+pub(crate) const NEG_STATE_REJECT: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NegTokenResp {
     pub(crate) neg_state: Option<u8>,
     pub(crate) response_token: Option<Vec<u8>>,
+    pub(crate) mech_list_mic: Option<Vec<u8>>,
 }
 
 pub(crate) fn encode_neg_token_init_ntlm(mech_token: &[u8]) -> Vec<u8> {
-    let mech_types = encode_sequence(&encode_tlv(0x06, NTLM_OID));
+    let mech_types = ntlm_mech_types();
     let neg_token_init = encode_sequence(
         &[
             encode_explicit(0, &mech_types),
@@ -31,8 +34,31 @@ pub(crate) fn encode_neg_token_init_ntlm(mech_token: &[u8]) -> Vec<u8> {
     )
 }
 
+pub(crate) fn ntlm_mech_types() -> Vec<u8> {
+    encode_sequence(&encode_tlv(0x06, NTLM_OID))
+}
+
 pub(crate) fn encode_neg_token_resp_ntlm(response_token: &[u8]) -> Vec<u8> {
-    let neg_token_resp = encode_sequence(&encode_explicit(2, &encode_tlv(0x04, response_token)));
+    encode_neg_token_resp(None, Some(response_token), None)
+}
+
+pub(crate) fn encode_neg_token_resp(
+    neg_state: Option<u8>,
+    response_token: Option<&[u8]>,
+    mech_list_mic: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut fields = Vec::new();
+    if let Some(neg_state) = neg_state {
+        fields.extend_from_slice(&encode_explicit(0, &encode_tlv(0x0a, &[neg_state])));
+    }
+    if let Some(response_token) = response_token {
+        fields.extend_from_slice(&encode_explicit(2, &encode_tlv(0x04, response_token)));
+    }
+    if let Some(mech_list_mic) = mech_list_mic {
+        fields.extend_from_slice(&encode_explicit(3, &encode_tlv(0x04, mech_list_mic)));
+    }
+
+    let neg_token_resp = encode_sequence(&fields);
     encode_explicit(1, &neg_token_resp)
 }
 
@@ -96,6 +122,7 @@ pub(crate) fn parse_neg_token_resp(token: &[u8]) -> Result<NegTokenResp, AuthErr
 
     let mut neg_state = None;
     let mut response_token = None;
+    let mut mech_list_mic = None;
     let mut fields = seq_content;
     while !fields.is_empty() {
         let (tag, content, rest) = read_tlv(fields)?;
@@ -114,6 +141,13 @@ pub(crate) fn parse_neg_token_resp(token: &[u8]) -> Result<NegTokenResp, AuthErr
                 }
                 response_token = Some(value.to_vec());
             }
+            0xa3 => {
+                let (octet_tag, value, octet_rest) = read_tlv(content)?;
+                if octet_tag != 0x04 || !octet_rest.is_empty() {
+                    return Err(AuthError::InvalidToken("invalid mechListMIC field"));
+                }
+                mech_list_mic = Some(value.to_vec());
+            }
             _ => {}
         }
         fields = rest;
@@ -122,6 +156,7 @@ pub(crate) fn parse_neg_token_resp(token: &[u8]) -> Result<NegTokenResp, AuthErr
     Ok(NegTokenResp {
         neg_state,
         response_token,
+        mech_list_mic,
     })
 }
 
@@ -195,8 +230,8 @@ fn read_length(input: &[u8]) -> Result<(usize, &[u8]), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_neg_token_init_ntlm, encode_neg_token_resp_ntlm, extract_mech_token,
-        parse_neg_token_resp,
+        encode_neg_token_init_ntlm, encode_neg_token_resp, encode_neg_token_resp_ntlm,
+        extract_mech_token, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE,
     };
 
     #[test]
@@ -225,5 +260,15 @@ mod tests {
         let extracted = extract_mech_token(&token).expect("token should parse");
 
         assert_eq!(extracted, b"NTLMSSP\0auth");
+    }
+
+    #[test]
+    fn response_parser_extracts_mech_list_mic() {
+        let token = encode_neg_token_resp(Some(NEG_STATE_ACCEPT_COMPLETE), None, Some(b"mic"));
+
+        let parsed = parse_neg_token_resp(&token).expect("token should parse");
+        assert_eq!(parsed.neg_state, Some(NEG_STATE_ACCEPT_COMPLETE));
+        assert_eq!(parsed.response_token, None);
+        assert_eq!(parsed.mech_list_mic, Some(b"mic".to_vec()));
     }
 }

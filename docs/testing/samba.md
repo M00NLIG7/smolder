@@ -5,7 +5,10 @@ Smolder now has two layers of SMB verification:
 - packet-level unit tests in `smolder-proto`
 - async session-engine tests in `smolder-core`
 
-This document adds the first live interoperability gate against a real Samba server: `NEGOTIATE`.
+This document adds two live interoperability gates against a real Samba server:
+
+- `NEGOTIATE`
+- `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT`
 
 ## Why Start With `NEGOTIATE`
 
@@ -16,7 +19,7 @@ This document adds the first live interoperability gate against a real Samba ser
 - dialect ordering and capability bits must be accepted by Samba
 - the response must parse cleanly back into Smolder's typed wire model
 
-This gate is intentionally narrow. Session setup and authentication are not wired up yet, so the live test stops before `SESSION_SETUP`.
+The second gate exercises NTLMv2 session setup and confirms that Smolder can bind to a real share.
 
 ## Running The Live Test
 
@@ -35,14 +38,49 @@ cargo test -p smolder-core --test samba_negotiate -- --nocapture
 
 If `SMOLDER_SAMBA_HOST` is unset, the test exits early and reports that it was skipped.
 
+To run the authenticated tree-connect path, also set:
+
+```bash
+export SMOLDER_SAMBA_USERNAME=smolder
+export SMOLDER_SAMBA_PASSWORD=smolderpass
+export SMOLDER_SAMBA_SHARE=share
+export SMOLDER_SAMBA_DOMAIN=WORKGROUP
+```
+
 ## Recommended Local Target
 
-Use a real Samba server, not a mock. The test only needs a TCP listener that speaks SMB2 and accepts `NEGOTIATE`.
+Use a real Samba server, not a mock.
 
 For local development, either:
 
 - point to an existing Samba instance
 - run a disposable Samba container or VM configured to listen on port `445`
+
+The repo now includes a pinned Docker Compose target at [docker/samba/compose.yaml](/Users/cmagana/Projects/smolder/docker/samba/compose.yaml) with config in [docker/samba/data/config.yml](/Users/cmagana/Projects/smolder/docker/samba/data/config.yml). It exposes Samba on `127.0.0.1:1445`.
+
+Bring it up with:
+
+```bash
+docker compose -f docker/samba/compose.yaml up -d
+```
+
+Then point the tests at it:
+
+```bash
+SMOLDER_SAMBA_HOST=127.0.0.1 \
+SMOLDER_SAMBA_PORT=1445 \
+SMOLDER_SAMBA_USERNAME=smolder \
+SMOLDER_SAMBA_PASSWORD=smolderpass \
+SMOLDER_SAMBA_SHARE=share \
+SMOLDER_SAMBA_DOMAIN=WORKGROUP \
+cargo test -p smolder-core --test samba_negotiate -- --nocapture
+```
+
+Shut it down with:
+
+```bash
+docker compose -f docker/samba/compose.yaml down -v
+```
 
 ## Current Limits
 
@@ -58,9 +96,9 @@ The live negotiate test currently sends:
 
 Once authentication is implemented, add live tests in this order:
 
-1. `SESSION_SETUP`
-2. `TREE_CONNECT`
-3. `CREATE`
-4. `CLOSE`
+1. `CREATE`
+2. `CLOSE`
+3. `READ`
+4. `WRITE`
 
 After those pass consistently, the next step is wiring a repeatable Samba `selftest` / `smbtorture` harness for the product surface Smolder actually exposes.
