@@ -45,10 +45,18 @@ pub enum Command {
     Create = 0x0005,
     /// `CLOSE`
     Close = 0x0006,
+    /// `FLUSH`
+    Flush = 0x0007,
     /// `READ`
     Read = 0x0008,
     /// `WRITE`
     Write = 0x0009,
+    /// `QUERY_DIRECTORY`
+    QueryDirectory = 0x000e,
+    /// `QUERY_INFO`
+    QueryInfo = 0x0010,
+    /// `SET_INFO`
+    SetInfo = 0x0011,
 }
 
 impl TryFrom<u16> for Command {
@@ -63,8 +71,12 @@ impl TryFrom<u16> for Command {
             0x0004 => Ok(Self::TreeDisconnect),
             0x0005 => Ok(Self::Create),
             0x0006 => Ok(Self::Close),
+            0x0007 => Ok(Self::Flush),
             0x0008 => Ok(Self::Read),
             0x0009 => Ok(Self::Write),
+            0x000e => Ok(Self::QueryDirectory),
+            0x0010 => Ok(Self::QueryInfo),
+            0x0011 => Ok(Self::SetInfo),
             _ => Err(ProtocolError::InvalidField {
                 field: "command",
                 reason: "unknown SMB2 command",

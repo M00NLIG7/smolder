@@ -5,9 +5,10 @@ use tracing::{trace, trace_span, Instrument};
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
     CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Header, MessageId,
-    NegotiateRequest, NegotiateResponse, ReadRequest, ReadResponse, SessionId, SessionSetupRequest,
-    SessionSetupResponse, SessionSetupSecurityMode, SigningMode, TreeConnectRequest,
-    TreeConnectResponse, TreeId, WriteRequest, WriteResponse,
+    NegotiateRequest, NegotiateResponse, QueryDirectoryRequest, QueryDirectoryResponse,
+    QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse, SessionId, SessionSetupRequest,
+    SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, SigningMode,
+    TreeConnectRequest, TreeConnectResponse, TreeId, WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
 
@@ -344,6 +345,68 @@ where
         Ok(response)
     }
 
+    /// Performs a `QUERY_DIRECTORY` request on the active tree.
+    pub async fn query_directory(
+        &mut self,
+        request: &QueryDirectoryRequest,
+    ) -> Result<QueryDirectoryResponse, CoreError> {
+        let tree_id = self.state.tree_id;
+        let session_id = self.state.session_id;
+        let (header, body) = self
+            .transact_raw(
+                Command::QueryDirectory,
+                request.encode(),
+                session_id,
+                tree_id,
+                &[NtStatus::SUCCESS.to_u32(), NtStatus::NO_MORE_FILES.to_u32()],
+            )
+            .await?;
+        if header.status == NtStatus::NO_MORE_FILES.to_u32() {
+            return Ok(QueryDirectoryResponse::empty());
+        }
+        QueryDirectoryResponse::decode(&body).map_err(CoreError::from)
+    }
+
+    /// Performs a `QUERY_INFO` request on the active tree.
+    pub async fn query_info(
+        &mut self,
+        request: &QueryInfoRequest,
+    ) -> Result<QueryInfoResponse, CoreError> {
+        let tree_id = self.state.tree_id;
+        let session_id = self.state.session_id;
+        let (_, response) = self
+            .transact(
+                Command::QueryInfo,
+                request.encode(),
+                session_id,
+                tree_id,
+                &[NtStatus::SUCCESS.to_u32()],
+                QueryInfoResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
+    /// Performs a `SET_INFO` request on the active tree.
+    pub async fn set_info(
+        &mut self,
+        request: &SetInfoRequest,
+    ) -> Result<SetInfoResponse, CoreError> {
+        let tree_id = self.state.tree_id;
+        let session_id = self.state.session_id;
+        let (_, response) = self
+            .transact(
+                Command::SetInfo,
+                request.encode(),
+                session_id,
+                tree_id,
+                &[NtStatus::SUCCESS.to_u32()],
+                SetInfoResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
     /// Returns the active session identifier.
     #[must_use]
     pub fn session_id(&self) -> SessionId {
@@ -376,6 +439,34 @@ where
         accepted_statuses: &[u32],
         decode: fn(&[u8]) -> Result<Response, smolder_proto::smb::ProtocolError>,
     ) -> Result<(Header, Response), CoreError> {
+        let (response_header, body) = self
+            .transact_raw(
+                command,
+                body,
+                session_id,
+                tree_id,
+                accepted_statuses,
+            )
+            .await?;
+        let response = decode(&body)?;
+        trace!(
+            ?command,
+            message_id = response_header.message_id.0,
+            status = response_header.status,
+            "received smb response"
+        );
+
+        Ok((response_header, response))
+    }
+
+    async fn transact_raw(
+        &mut self,
+        command: Command,
+        body: Vec<u8>,
+        session_id: SessionId,
+        tree_id: TreeId,
+        accepted_statuses: &[u32],
+    ) -> Result<(Header, Vec<u8>), CoreError> {
         let message_id = MessageId(self.next_message_id);
         self.next_message_id += 1;
 
@@ -419,15 +510,7 @@ where
             });
         }
 
-        let response = decode(&response_frame.payload[Header::LEN..])?;
-        trace!(
-            ?command,
-            message_id = message_id.0,
-            status = response_header.status,
-            "received smb response"
-        );
-
-        Ok((response_header, response))
+        Ok((response_header, response_frame.payload[Header::LEN..].to_vec()))
     }
 }
 

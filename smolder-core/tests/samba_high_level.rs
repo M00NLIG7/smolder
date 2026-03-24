@@ -138,3 +138,45 @@ async fn puts_and_gets_local_files_when_configured() {
     let _ = fs::remove_file(local_upload);
     let _ = fs::remove_file(local_download);
 }
+
+#[tokio::test]
+async fn lists_stats_renames_and_removes_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some((_config, mut share)) = connected_share().await else {
+        return;
+    };
+
+    let original_path = unique_name("smolder-high-level-meta");
+    let renamed_path = format!("{original_path}.renamed");
+    let payload = b"smolder high level metadata";
+
+    share
+        .write(&original_path, payload)
+        .await
+        .expect("should create file for metadata test");
+
+    let listing = share.list("").await.expect("listing should succeed");
+    assert!(listing.iter().any(|entry| entry.name == original_path));
+
+    let metadata = share
+        .stat(&original_path)
+        .await
+        .expect("stat should succeed");
+    assert_eq!(metadata.size, payload.len() as u64);
+    assert!(metadata.is_file());
+
+    share
+        .rename(&original_path, &renamed_path)
+        .await
+        .expect("rename should succeed");
+    let renamed_listing = share.list("").await.expect("listing should succeed after rename");
+    assert!(!renamed_listing.iter().any(|entry| entry.name == original_path));
+    assert!(renamed_listing.iter().any(|entry| entry.name == renamed_path));
+
+    share
+        .remove(&renamed_path)
+        .await
+        .expect("remove should succeed");
+    let final_listing = share.list("").await.expect("listing should succeed after remove");
+    assert!(!final_listing.iter().any(|entry| entry.name == renamed_path));
+}

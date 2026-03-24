@@ -158,7 +158,8 @@ impl CreateRequest {
     /// Serializes the request body.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = BytesMut::with_capacity(88 + self.name.len());
+        let buffer_len = self.name.len().max(1);
+        let mut out = BytesMut::with_capacity(88 + buffer_len);
         out.put_u16_le(57);
         out.put_u8(self.requested_oplock_level as u8);
         out.put_u8(0);
@@ -174,7 +175,11 @@ impl CreateRequest {
         out.put_u16_le(self.name.len() as u16);
         out.put_u32_le(0);
         out.put_u32_le(0);
-        out.extend_from_slice(&self.name);
+        if self.name.is_empty() {
+            out.put_u8(0);
+        } else {
+            out.extend_from_slice(&self.name);
+        }
         out.to_vec()
     }
 
@@ -476,6 +481,26 @@ mod tests {
         let decoded = CreateRequest::decode(&encoded).expect("request should decode");
 
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn create_request_with_empty_name_roundtrips() {
+        let request = CreateRequest {
+            requested_oplock_level: RequestedOplockLevel::None,
+            impersonation_level: 2,
+            desired_access: 0x0012_0081,
+            file_attributes: FileAttributes::DIRECTORY,
+            share_access: ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE,
+            create_disposition: CreateDisposition::Open,
+            create_options: CreateOptions::DIRECTORY_FILE,
+            name: Vec::new(),
+        };
+
+        let encoded = request.encode();
+        let decoded = CreateRequest::decode(&encoded).expect("request should decode");
+
+        assert_eq!(decoded, request);
+        assert_eq!(encoded.len(), 57);
     }
 
     #[test]

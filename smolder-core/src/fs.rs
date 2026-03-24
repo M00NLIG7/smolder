@@ -1,6 +1,7 @@
 //! High-level SMB2 file APIs built on top of the typestate client.
 
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::BytesMut;
 use rand::random;
@@ -9,8 +10,10 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use smolder_proto::smb::smb2::{
     CloseRequest, CloseResponse, CreateDisposition, CreateOptions, CreateRequest, Dialect,
-    FileAttributes, FileId, GlobalCapabilities, NegotiateRequest, ReadRequest, ShareAccess,
-    SigningMode, TreeConnectRequest, WriteRequest,
+    DispositionInformation, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
+    FileStandardInformation, GlobalCapabilities, NegotiateRequest, QueryDirectoryFlags,
+    QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation, SetInfoRequest,
+    ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
@@ -27,8 +30,60 @@ const FILE_READ_EA: u32 = 0x0000_0008;
 const FILE_WRITE_EA: u32 = 0x0000_0010;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+const DELETE: u32 = 0x0001_0000;
 const READ_CONTROL: u32 = 0x0002_0000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
+const FILE_LIST_DIRECTORY: u32 = 0x0000_0001;
+const WINDOWS_TICK: u64 = 10_000_000;
+const SEC_TO_UNIX_EPOCH: u64 = 11_644_473_600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateTarget {
+    Directory,
+    Any,
+}
+
+/// High-level metadata for an SMB object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmbMetadata {
+    /// Logical size of the object in bytes.
+    pub size: u64,
+    /// Allocated size of the object in bytes.
+    pub allocation_size: u64,
+    /// File attributes.
+    pub attributes: FileAttributes,
+    /// Creation time.
+    pub created: Option<SystemTime>,
+    /// Last access time.
+    pub accessed: Option<SystemTime>,
+    /// Last write time.
+    pub written: Option<SystemTime>,
+    /// Change time.
+    pub changed: Option<SystemTime>,
+}
+
+impl SmbMetadata {
+    /// Returns true when the object is a directory.
+    #[must_use]
+    pub fn is_directory(&self) -> bool {
+        self.attributes.contains(FileAttributes::DIRECTORY)
+    }
+
+    /// Returns true when the object is a regular file.
+    #[must_use]
+    pub fn is_file(&self) -> bool {
+        !self.is_directory()
+    }
+}
+
+/// One directory entry returned by `Share::list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmbDirectoryEntry {
+    /// Entry name relative to the requested directory.
+    pub name: String,
+    /// Entry metadata.
+    pub metadata: SmbMetadata,
+}
 
 /// Builder for an authenticated SMB2 client session.
 #[derive(Debug, Clone)]
@@ -443,6 +498,222 @@ where
         }
     }
 
+    /// Lists the entries in a directory.
+    pub async fn list(
+        &mut self,
+        path: impl AsRef<str>,
+    ) -> Result<Vec<SmbDirectoryEntry>, CoreError> {
+        let query_size = self.max_query_size();
+        let root_listing = path.as_ref().trim_matches(['\\', '/']).is_empty();
+        let opened = self
+            .create_handle(
+                path.as_ref(),
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                CreateDisposition::Open,
+                CreateTarget::Directory,
+                root_listing,
+            )
+            .await?;
+        let file_id = opened.file_id;
+        let mut first = true;
+        let mut entries = Vec::new();
+
+        let operation = async {
+            loop {
+                let mut request = QueryDirectoryRequest::for_pattern(file_id, "*", query_size);
+                if !first {
+                    request.flags = QueryDirectoryFlags::empty();
+                }
+                let response = self.connection.query_directory(&request).await?;
+                let decoded = response.directory_entries()?;
+                if decoded.is_empty() {
+                    break;
+                }
+                entries.extend(
+                    decoded
+                        .into_iter()
+                        .filter(|entry| entry.file_name != "." && entry.file_name != "..")
+                        .map(directory_entry_from_query),
+                );
+                first = false;
+            }
+            Ok::<(), CoreError>(())
+        }
+        .await;
+
+        let close_result = self.close_file_id(file_id).await;
+        match operation {
+            Ok(()) => {
+                close_result?;
+                Ok(entries)
+            }
+            Err(error) => {
+                let _ = close_result;
+                Err(error)
+            }
+        }
+    }
+
+    /// Returns metadata for a file or directory.
+    pub async fn stat(&mut self, path: impl AsRef<str>) -> Result<SmbMetadata, CoreError> {
+        let opened = self
+            .create_handle(
+                path.as_ref(),
+                FILE_READ_ATTRIBUTES,
+                CreateDisposition::Open,
+                CreateTarget::Any,
+                false,
+            )
+            .await?;
+        let file_id = opened.file_id;
+
+        let operation = self.metadata_for_file_id(file_id).await;
+        let close_result = self.close_file_id(file_id).await;
+        match operation {
+            Ok(metadata) => {
+                close_result?;
+                Ok(metadata)
+            }
+            Err(error) => {
+                let _ = close_result;
+                Err(error)
+            }
+        }
+    }
+
+    /// Renames a file or directory within the connected share.
+    pub async fn rename(
+        &mut self,
+        from: impl AsRef<str>,
+        to: impl AsRef<str>,
+    ) -> Result<(), CoreError> {
+        let opened = self
+            .create_handle(
+                from.as_ref(),
+                DELETE | FILE_WRITE_ATTRIBUTES,
+                CreateDisposition::Open,
+                CreateTarget::Any,
+                false,
+            )
+            .await?;
+        let file_id = opened.file_id;
+        let target = normalize_share_path_with_options(to.as_ref(), false)?;
+
+        let operation = async {
+            let request = SetInfoRequest::for_file_info(
+                file_id,
+                FileInfoClass::RenameInformation,
+                RenameInformation::from_path(&target, false).encode(),
+            );
+            self.connection.set_info(&request).await?;
+            Ok::<(), CoreError>(())
+        }
+        .await;
+
+        let close_result = self.close_file_id(file_id).await;
+        match operation {
+            Ok(()) => {
+                close_result?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = close_result;
+                Err(error)
+            }
+        }
+    }
+
+    /// Removes a file or empty directory from the connected share.
+    pub async fn remove(&mut self, path: impl AsRef<str>) -> Result<(), CoreError> {
+        let opened = self
+            .create_handle(
+                path.as_ref(),
+                DELETE,
+                CreateDisposition::Open,
+                CreateTarget::Any,
+                false,
+            )
+            .await?;
+        let file_id = opened.file_id;
+
+        let operation = async {
+            let request = SetInfoRequest::for_file_info(
+                file_id,
+                FileInfoClass::DispositionInformation,
+                DispositionInformation {
+                    delete_pending: true,
+                }
+                .encode(),
+            );
+            self.connection.set_info(&request).await?;
+            Ok::<(), CoreError>(())
+        }
+        .await;
+
+        let close_result = self.close_file_id(file_id).await;
+        match operation {
+            Ok(()) => {
+                close_result?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = close_result;
+                Err(error)
+            }
+        }
+    }
+
+    async fn create_handle(
+        &mut self,
+        path: &str,
+        desired_access: u32,
+        create_disposition: CreateDisposition,
+        target: CreateTarget,
+        allow_empty_path: bool,
+    ) -> Result<smolder_proto::smb::smb2::CreateResponse, CoreError> {
+        let normalized = normalize_share_path_with_options(path, allow_empty_path)?;
+        let mut request = CreateRequest::from_path(&normalized);
+        request.desired_access = desired_access | READ_CONTROL | SYNCHRONIZE;
+        request.create_disposition = create_disposition;
+        request.share_access = ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE;
+        request.file_attributes = match target {
+            CreateTarget::Directory => FileAttributes::DIRECTORY,
+            CreateTarget::Any => FileAttributes::NORMAL,
+        };
+        request.create_options = match target {
+            CreateTarget::Directory => CreateOptions::DIRECTORY_FILE,
+            CreateTarget::Any => CreateOptions::empty(),
+        };
+        self.connection.create(&request).await
+    }
+
+    async fn close_file_id(&mut self, file_id: FileId) -> Result<CloseResponse, CoreError> {
+        self.connection
+            .close(&CloseRequest { flags: 0, file_id })
+            .await
+    }
+
+    async fn metadata_for_file_id(&mut self, file_id: FileId) -> Result<SmbMetadata, CoreError> {
+        let basic = self
+            .connection
+            .query_info(&QueryInfoRequest::for_file_info(
+                file_id,
+                FileInfoClass::BasicInformation,
+            ))
+            .await?;
+        let standard = self
+            .connection
+            .query_info(&QueryInfoRequest::for_file_info(
+                file_id,
+                FileInfoClass::StandardInformation,
+            ))
+            .await?;
+
+        let basic = FileBasicInformation::decode(&basic.output_buffer)?;
+        let standard = FileStandardInformation::decode(&standard.output_buffer)?;
+        Ok(metadata_from_info(basic, standard))
+    }
+
     fn max_read_size(&self) -> u32 {
         let negotiated = self.connection.state().negotiated.max_read_size;
         negotiated.min(self.transfer_chunk_size).max(1)
@@ -450,6 +721,11 @@ where
 
     fn max_write_size(&self) -> u32 {
         let negotiated = self.connection.state().negotiated.max_write_size;
+        negotiated.min(self.transfer_chunk_size).max(1)
+    }
+
+    fn max_query_size(&self) -> u32 {
+        let negotiated = self.connection.state().negotiated.max_transact_size;
         negotiated.min(self.transfer_chunk_size).max(1)
     }
 }
@@ -652,8 +928,15 @@ fn normalize_share_name(share: &str) -> Result<String, CoreError> {
 }
 
 fn normalize_share_path(path: &str) -> Result<String, CoreError> {
+    normalize_share_path_with_options(path, false)
+}
+
+fn normalize_share_path_with_options(path: &str, allow_empty: bool) -> Result<String, CoreError> {
     if path.contains('\0') {
         return Err(CoreError::PathInvalid("path must not contain NUL bytes"));
+    }
+    if matches!(path, "\\" | "/") {
+        return Ok("\\".to_string());
     }
 
     let normalized = path
@@ -661,10 +944,56 @@ fn normalize_share_path(path: &str) -> Result<String, CoreError> {
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>()
         .join("\\");
-    if normalized.is_empty() {
+    if normalized.is_empty() && !allow_empty {
         return Err(CoreError::PathInvalid("path must not be empty"));
     }
     Ok(normalized)
+}
+
+fn metadata_from_info(
+    basic: FileBasicInformation,
+    standard: FileStandardInformation,
+) -> SmbMetadata {
+    let mut attributes = basic.file_attributes;
+    if standard.directory {
+        attributes |= FileAttributes::DIRECTORY;
+    }
+
+    SmbMetadata {
+        size: standard.end_of_file,
+        allocation_size: standard.allocation_size,
+        attributes,
+        created: system_time_from_windows_ticks(basic.creation_time),
+        accessed: system_time_from_windows_ticks(basic.last_access_time),
+        written: system_time_from_windows_ticks(basic.last_write_time),
+        changed: system_time_from_windows_ticks(basic.change_time),
+    }
+}
+
+fn directory_entry_from_query(
+    entry: smolder_proto::smb::smb2::DirectoryInformationEntry,
+) -> SmbDirectoryEntry {
+    SmbDirectoryEntry {
+        name: entry.file_name,
+        metadata: SmbMetadata {
+            size: entry.end_of_file,
+            allocation_size: entry.allocation_size,
+            attributes: entry.file_attributes,
+            created: system_time_from_windows_ticks(entry.creation_time),
+            accessed: system_time_from_windows_ticks(entry.last_access_time),
+            written: system_time_from_windows_ticks(entry.last_write_time),
+            changed: system_time_from_windows_ticks(entry.change_time),
+        },
+    }
+}
+
+fn system_time_from_windows_ticks(value: u64) -> Option<SystemTime> {
+    if value == 0 {
+        return None;
+    }
+
+    let unix_ticks = value.checked_sub(SEC_TO_UNIX_EPOCH * WINDOWS_TICK)?;
+    Some(UNIX_EPOCH + Duration::from_nanos(unix_ticks.saturating_mul(100)))
 }
 
 fn parse_unc_share(unc: &str) -> Result<(String, String), CoreError> {
@@ -694,10 +1023,13 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
-        CloseResponse, Command, CreateDisposition, CreateRequest, CreateResponse, Dialect,
-        FileAttributes, FileId, GlobalCapabilities, Header, MessageId, NegotiateRequest,
-        NegotiateResponse, OplockLevel, ReadRequest, ReadResponse, ReadResponseFlags,
-        SessionFlags, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode,
+        CloseResponse, Command, CreateDisposition, CreateOptions, CreateRequest, CreateResponse,
+        DirectoryInformationEntry, Dialect, FileAttributes, FileBasicInformation, FileId,
+        FileInfoClass, FileStandardInformation, GlobalCapabilities, Header, MessageId,
+        NegotiateRequest, NegotiateResponse, OplockLevel, QueryDirectoryFlags,
+        QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
+        ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags, SessionSetupRequest,
+        SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse,
         ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectResponse, TreeId,
         WriteRequest, WriteResponse,
     };
@@ -770,6 +1102,21 @@ mod tests {
     fn outbound_write(frame: &[u8]) -> WriteRequest {
         let frame = SessionMessage::decode(frame).expect("frame should decode");
         WriteRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    fn outbound_query_directory(frame: &[u8]) -> QueryDirectoryRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        QueryDirectoryRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    fn outbound_query_info(frame: &[u8]) -> QueryInfoRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        QueryInfoRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    fn outbound_set_info(frame: &[u8]) -> SetInfoRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        SetInfoRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
     }
 
     #[test]
@@ -980,6 +1327,320 @@ mod tests {
         assert_eq!(write_two.data, b"der");
     }
 
+    #[tokio::test]
+    async fn list_returns_directory_entries() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::DIRECTORY,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_attributes: FileAttributes::DIRECTORY,
+        };
+        let listing = QueryDirectoryResponse {
+            output_buffer: encode_directory_entries(&[
+                DirectoryInformationEntry {
+                    file_index: 1,
+                    creation_time: 1,
+                    last_access_time: 2,
+                    last_write_time: 3,
+                    change_time: 4,
+                    end_of_file: 7,
+                    allocation_size: 8,
+                    file_attributes: FileAttributes::ARCHIVE,
+                    file_name: "alpha.txt".to_string(),
+                },
+                DirectoryInformationEntry {
+                    file_index: 2,
+                    creation_time: 10,
+                    last_access_time: 11,
+                    last_write_time: 12,
+                    change_time: 13,
+                    end_of_file: 0,
+                    allocation_size: 0,
+                    file_attributes: FileAttributes::DIRECTORY,
+                    file_name: "nested".to_string(),
+                },
+            ],
+            ),
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::QueryDirectory,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                listing.encode(),
+            ),
+            response_frame(
+                Command::QueryDirectory,
+                NtStatus::NO_MORE_FILES.to_u32(),
+                5,
+                11,
+                7,
+                Vec::new(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                6,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let mut share = build_share(reads).await;
+        let entries = share.list("").await.expect("list should succeed");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "alpha.txt");
+        assert_eq!(entries[0].metadata.size, 7);
+        assert!(entries[0].metadata.is_file());
+        assert_eq!(entries[1].name, "nested");
+        assert!(entries[1].metadata.is_directory());
+
+        let writes = transport_writes(share);
+        let create = outbound_create(&writes[3]);
+        assert_eq!(create.create_options, CreateOptions::DIRECTORY_FILE);
+        assert!(create.name.is_empty());
+        assert_eq!(create.file_attributes, FileAttributes::DIRECTORY);
+
+        let first_query = outbound_query_directory(&writes[4]);
+        assert!(first_query.flags.contains(QueryDirectoryFlags::RESTART_SCANS));
+        assert_eq!(first_query.file_name, smolder_proto::smb::smb2::utf16le("*"));
+
+        let second_query = outbound_query_directory(&writes[5]);
+        assert!(second_query.flags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stat_reads_basic_and_standard_metadata() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 16,
+            end_of_file: 7,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 16,
+            end_of_file: 7,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+        let basic_info = QueryInfoResponse {
+            output_buffer: encode_basic_info(FileBasicInformation {
+                creation_time: super::SEC_TO_UNIX_EPOCH * super::WINDOWS_TICK + 1,
+                last_access_time: super::SEC_TO_UNIX_EPOCH * super::WINDOWS_TICK + 2,
+                last_write_time: super::SEC_TO_UNIX_EPOCH * super::WINDOWS_TICK + 3,
+                change_time: super::SEC_TO_UNIX_EPOCH * super::WINDOWS_TICK + 4,
+                file_attributes: FileAttributes::ARCHIVE,
+            }),
+        };
+        let standard_info = QueryInfoResponse {
+            output_buffer: encode_standard_info(FileStandardInformation {
+                allocation_size: 16,
+                end_of_file: 7,
+                number_of_links: 1,
+                delete_pending: false,
+                directory: false,
+            }),
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::QueryInfo,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                basic_info.encode(),
+            ),
+            response_frame(
+                Command::QueryInfo,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                standard_info.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                6,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let mut share = build_share(reads).await;
+        let metadata = share.stat("notes.txt").await.expect("stat should succeed");
+        assert_eq!(metadata.size, 7);
+        assert_eq!(metadata.allocation_size, 16);
+        assert!(metadata.is_file());
+        assert!(metadata.created.is_some());
+
+        let writes = transport_writes(share);
+        let first_query = outbound_query_info(&writes[4]);
+        assert_eq!(first_query.file_info_class, FileInfoClass::BasicInformation);
+
+        let second_query = outbound_query_info(&writes[5]);
+        assert_eq!(second_query.file_info_class, FileInfoClass::StandardInformation);
+    }
+
+    #[tokio::test]
+    async fn rename_updates_path_via_set_info() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::SetInfo,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                SetInfoResponse.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let mut share = build_share(reads).await;
+        share
+            .rename("notes.txt", "renamed.txt")
+            .await
+            .expect("rename should succeed");
+
+        let writes = transport_writes(share);
+        let set_info = outbound_set_info(&writes[4]);
+        assert_eq!(set_info.file_info_class, FileInfoClass::RenameInformation);
+        assert_eq!(
+            set_info.buffer,
+            smolder_proto::smb::smb2::RenameInformation::from_path("renamed.txt", false).encode()
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_marks_file_delete_pending() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::SetInfo,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                SetInfoResponse.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let mut share = build_share(reads).await;
+        share.remove("notes.txt").await.expect("remove should succeed");
+
+        let writes = transport_writes(share);
+        let set_info = outbound_set_info(&writes[4]);
+        assert_eq!(
+            set_info.file_info_class,
+            FileInfoClass::DispositionInformation
+        );
+        assert_eq!(set_info.buffer, vec![1]);
+    }
+
     async fn build_share(reads: Vec<Vec<u8>>) -> Share<ScriptedTransport> {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
@@ -1064,5 +1725,61 @@ mod tests {
 
     fn transport_writes(share: Share<ScriptedTransport>) -> Vec<Vec<u8>> {
         share.connection.into_transport().writes
+    }
+
+    fn encode_directory_entries(entries: &[DirectoryInformationEntry]) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let file_name = smolder_proto::smb::smb2::utf16le(&entry.file_name);
+            let entry_len = 64 + file_name.len();
+            let padded_len = if index + 1 == entries.len() {
+                entry_len
+            } else {
+                (entry_len + 7) & !7
+            };
+            let next_entry_offset = if index + 1 == entries.len() {
+                0
+            } else {
+                padded_len as u32
+            };
+
+            buffer.extend_from_slice(&next_entry_offset.to_le_bytes());
+            buffer.extend_from_slice(&entry.file_index.to_le_bytes());
+            buffer.extend_from_slice(&entry.creation_time.to_le_bytes());
+            buffer.extend_from_slice(&entry.last_access_time.to_le_bytes());
+            buffer.extend_from_slice(&entry.last_write_time.to_le_bytes());
+            buffer.extend_from_slice(&entry.change_time.to_le_bytes());
+            buffer.extend_from_slice(&entry.end_of_file.to_le_bytes());
+            buffer.extend_from_slice(&entry.allocation_size.to_le_bytes());
+            buffer.extend_from_slice(&entry.file_attributes.bits().to_le_bytes());
+            buffer.extend_from_slice(&(file_name.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(&file_name);
+            if padded_len > entry_len {
+                buffer.resize(buffer.len() + (padded_len - entry_len), 0);
+            }
+        }
+        buffer
+    }
+
+    fn encode_basic_info(info: FileBasicInformation) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&info.creation_time.to_le_bytes());
+        buffer.extend_from_slice(&info.last_access_time.to_le_bytes());
+        buffer.extend_from_slice(&info.last_write_time.to_le_bytes());
+        buffer.extend_from_slice(&info.change_time.to_le_bytes());
+        buffer.extend_from_slice(&info.file_attributes.bits().to_le_bytes());
+        buffer.extend_from_slice(&0_u32.to_le_bytes());
+        buffer
+    }
+
+    fn encode_standard_info(info: FileStandardInformation) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&info.allocation_size.to_le_bytes());
+        buffer.extend_from_slice(&info.end_of_file.to_le_bytes());
+        buffer.extend_from_slice(&info.number_of_links.to_le_bytes());
+        buffer.push(u8::from(info.delete_pending));
+        buffer.push(u8::from(info.directory));
+        buffer.extend_from_slice(&0_u16.to_le_bytes());
+        buffer
     }
 }

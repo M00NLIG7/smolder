@@ -2,6 +2,7 @@
 
 mod create;
 mod header;
+mod info;
 mod io;
 mod negotiate;
 mod session;
@@ -14,6 +15,12 @@ pub use create::{
     FileAttributes, FileId, OplockLevel, RequestedOplockLevel, ShareAccess,
 };
 pub use header::{Command, Header, HeaderFlags};
+pub use info::{
+    DirectoryInformationEntry, DispositionInformation, FileBasicInformation, FileInfoClass,
+    FileStandardInformation, InfoType, QueryDirectoryFileInformationClass, QueryDirectoryFlags,
+    QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
+    RenameInformation, SetInfoRequest, SetInfoResponse,
+};
 pub use io::{
     ReadFlags, ReadRequest, ReadResponse, ReadResponseFlags, WriteFlags, WriteRequest,
     WriteResponse,
@@ -145,4 +152,23 @@ pub fn utf16le(input: &str) -> Vec<u8> {
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>()
+}
+
+/// Decodes a UTF-16LE byte buffer without a terminating NUL.
+pub fn utf16le_string(input: &[u8]) -> Result<String, ProtocolError> {
+    if !input.len().is_multiple_of(2) {
+        return Err(ProtocolError::InvalidField {
+            field: "utf16le_string",
+            reason: "UTF-16LE byte length must be even",
+        });
+    }
+
+    let utf16 = input
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&utf16).map_err(|_| ProtocolError::InvalidField {
+        field: "utf16le_string",
+        reason: "invalid UTF-16LE sequence",
+    })
 }
