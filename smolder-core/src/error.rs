@@ -11,6 +11,9 @@ pub enum CoreError {
     /// The transport returned an I/O failure.
     #[error("transport error")]
     Io(#[from] std::io::Error),
+    /// The local filesystem or local stream returned an I/O failure.
+    #[error("local I/O error")]
+    LocalIo(std::io::Error),
     /// Packet encoding or decoding failed.
     #[error("protocol error")]
     Protocol(#[from] ProtocolError),
@@ -36,4 +39,10 @@ pub enum CoreError {
     /// The response was structurally valid but semantically unusable.
     #[error("invalid response: {0}")]
     InvalidResponse(&'static str),
+    /// The caller supplied invalid input to a high-level API.
+    #[error("invalid input: {0}")]
+    InvalidInput(&'static str),
+    /// The caller supplied an invalid SMB share path or UNC path.
+    #[error("invalid path: {0}")]
+    PathInvalid(&'static str),
 }

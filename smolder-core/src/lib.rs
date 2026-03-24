@@ -8,12 +8,14 @@
 pub mod auth;
 pub mod client;
 pub mod error;
+pub mod fs;
 pub mod prelude {
     //! Common types and traits
 
     pub use crate::auth::{AuthProvider, NtlmAuthenticator, NtlmCredentials};
     pub use crate::client::{Authenticated, Connected, Connection, Negotiated, TreeConnected};
     pub use crate::error::CoreError;
+    pub use crate::fs::{OpenOptions, RemoteFile, Share, SmbClient, SmbClientBuilder};
     pub use crate::transport::{TokioTcpTransport, Transport};
 }
 
