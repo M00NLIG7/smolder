@@ -5,10 +5,11 @@ Smolder now has two layers of SMB verification:
 - packet-level unit tests in `smolder-proto`
 - async session-engine tests in `smolder-core`
 
-This document adds two live interoperability gates against a real Samba server:
+This document adds three live interoperability gates against a real Samba server:
 
 - `NEGOTIATE`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT`
+- `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> READ -> CLOSE`
 
 ## Why Start With `NEGOTIATE`
 
@@ -20,6 +21,7 @@ This document adds two live interoperability gates against a real Samba server:
 - the response must parse cleanly back into Smolder's typed wire model
 
 The second gate exercises NTLMv2 session setup and confirms that Smolder can bind to a real share.
+The third gate exercises basic file I/O over a real handle and keeps the file ephemeral with `DELETE_ON_CLOSE`.
 
 ## Running The Live Test
 
@@ -94,11 +96,22 @@ The live negotiate test currently sends:
 
 ## Next External Gates
 
-Once authentication is implemented, add live tests in this order:
+The current live coverage now reaches:
 
-1. `CREATE`
-2. `CLOSE`
-3. `READ`
-4. `WRITE`
+1. `NEGOTIATE`
+2. `SESSION_SETUP`
+3. `TREE_CONNECT`
+4. `CREATE`
+5. `WRITE`
+6. `READ`
+7. `CLOSE`
+
+The next practical interop gates are:
+
+1. `QUERY_INFO` / metadata reads
+2. `SET_INFO`
+3. `RENAME`
+4. `DELETE`
+5. directory enumeration
 
 After those pass consistently, the next step is wiring a repeatable Samba `selftest` / `smbtorture` harness for the product surface Smolder actually exposes.

@@ -81,7 +81,7 @@ impl ReadRequest {
     /// Serializes the request body.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = BytesMut::with_capacity(48 + self.read_channel_info.len());
+        let mut out = BytesMut::with_capacity(49 + self.read_channel_info.len());
         out.put_u16_le(49);
         out.put_u8(self.padding);
         out.put_u8(self.flags.bits());
@@ -99,7 +99,11 @@ impl ReadRequest {
         };
         out.put_u16_le(read_channel_info_offset);
         out.put_u16_le(self.read_channel_info.len() as u16);
-        out.extend_from_slice(&self.read_channel_info);
+        if self.read_channel_info.is_empty() {
+            out.put_u8(0);
+        } else {
+            out.extend_from_slice(&self.read_channel_info);
+        }
         out.to_vec()
     }
 
