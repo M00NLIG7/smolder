@@ -6,3 +6,10 @@ authors = ["M00NLIG7"]
 description = "Smolder core - Part of the Smolder SMB toolkit"
 repository = "https://github.com/M00NLIG7/smolder"
 license = "MIT"
+
+[dependencies]
+async-trait = "0.1"
+smolder-proto = { path = "../smolder-proto" }
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt"] }
+tracing = "0.1"
