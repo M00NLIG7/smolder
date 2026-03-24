@@ -3,7 +3,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use smolder_core::prelude::{NtlmCredentials, SmbClient};
+use smolder_core::prelude::{NtlmCredentials, SmbClient, SmbMetadata};
 
 const ENV_USERNAME: [&str; 2] = ["SMOLDER_SMB_USERNAME", "SMOLDER_SAMBA_USERNAME"];
 const ENV_PASSWORD: [&str; 2] = ["SMOLDER_SMB_PASSWORD", "SMOLDER_SAMBA_PASSWORD"];
@@ -30,8 +30,15 @@ struct AuthOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Cat { remote: RemoteLocation },
+    Ls { remote: RemoteLocation },
+    Stat { remote: RemoteLocation },
     Get { remote: RemoteLocation, local: PathBuf },
     Put { local: PathBuf, remote: RemoteLocation },
+    Remove { remote: RemoteLocation },
+    Move {
+        source: RemoteLocation,
+        destination: RemoteLocation,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +74,26 @@ async fn run(args: Vec<String>) -> Result<(), String> {
                 .await
                 .map_err(|error| error.to_string())?;
         }
+        Command::Ls { remote } => {
+            let mut share = connect_share(&auth, &remote).await?;
+            let mut entries = share.list(&remote.path).await.map_err(|error| error.to_string())?;
+            entries.sort_by(|left, right| left.name.cmp(&right.name));
+            for entry in entries {
+                if entry.metadata.is_directory() {
+                    println!("{}/", entry.name);
+                } else {
+                    println!("{}", entry.name);
+                }
+            }
+        }
+        Command::Stat { remote } => {
+            let mut share = connect_share(&auth, &remote).await?;
+            let metadata = share
+                .stat(&remote.path)
+                .await
+                .map_err(|error| error.to_string())?;
+            print_metadata(&remote.path, &metadata);
+        }
         Command::Get { remote, local } => {
             let mut share = connect_share(&auth, &remote).await?;
             share
@@ -78,6 +105,24 @@ async fn run(args: Vec<String>) -> Result<(), String> {
             let mut share = connect_share(&auth, &remote).await?;
             share
                 .put(local, &remote.path)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Command::Remove { remote } => {
+            let mut share = connect_share(&auth, &remote).await?;
+            share
+                .remove(&remote.path)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Command::Move {
+            source,
+            destination,
+        } => {
+            ensure_same_share(&source, &destination)?;
+            let mut share = connect_share(&auth, &source).await?;
+            share
+                .rename(&source.path, &destination.path)
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -189,6 +234,28 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 remote: parse_remote_location(&positionals[0])?,
             }
         }
+        "ls" => {
+            if positionals.len() != 1 {
+                return Err(format!(
+                    "`ls` expects exactly 1 remote SMB URL\n\n{}",
+                    usage(&program)
+                ));
+            }
+            Command::Ls {
+                remote: parse_remote_location_with_options(&positionals[0], true)?,
+            }
+        }
+        "stat" => {
+            if positionals.len() != 1 {
+                return Err(format!(
+                    "`stat` expects exactly 1 remote SMB URL\n\n{}",
+                    usage(&program)
+                ));
+            }
+            Command::Stat {
+                remote: parse_remote_location(&positionals[0])?,
+            }
+        }
         "get" => {
             if positionals.len() != 2 {
                 return Err(format!(
@@ -211,6 +278,29 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
             Command::Put {
                 local: PathBuf::from(&positionals[0]),
                 remote: parse_remote_location(&positionals[1])?,
+            }
+        }
+        "rm" => {
+            if positionals.len() != 1 {
+                return Err(format!(
+                    "`rm` expects exactly 1 remote SMB URL\n\n{}",
+                    usage(&program)
+                ));
+            }
+            Command::Remove {
+                remote: parse_remote_location(&positionals[0])?,
+            }
+        }
+        "mv" => {
+            if positionals.len() != 2 {
+                return Err(format!(
+                    "`mv` expects a source SMB URL and a destination SMB URL\n\n{}",
+                    usage(&program)
+                ));
+            }
+            Command::Move {
+                source: parse_remote_location(&positionals[0])?,
+                destination: parse_remote_location(&positionals[1])?,
             }
         }
         _ => return Err(format!("unknown command: {command_name}\n\n{}", usage(&program))),
@@ -259,18 +349,29 @@ fn usage(program: &str) -> String {
         "\
 Usage:
   {program} cat smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
+  {program} ls smb://host[:port]/share[/path] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
+  {program} stat smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} get smb://host[:port]/share/path LOCAL_PATH [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
-  {program} put LOCAL_PATH smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+  {program} put LOCAL_PATH smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
+  {program} rm smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
+  {program} mv smb://host[:port]/share/path smb://host[:port]/share/new-path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
     )
 }
 
 fn parse_remote_location(input: &str) -> Result<RemoteLocation, String> {
+    parse_remote_location_with_options(input, false)
+}
+
+fn parse_remote_location_with_options(
+    input: &str,
+    allow_empty_path: bool,
+) -> Result<RemoteLocation, String> {
     let remainder = input
         .strip_prefix("smb://")
         .ok_or_else(|| "remote paths must start with smb://".to_string())?;
     let (authority, path) = remainder
         .split_once('/')
-        .ok_or_else(|| "remote paths must include a share and file path".to_string())?;
+        .ok_or_else(|| "remote paths must include a share name".to_string())?;
 
     let (host, port) = parse_host_port(authority)?;
     let mut segments = path.split('/').filter(|segment| !segment.is_empty());
@@ -278,7 +379,7 @@ fn parse_remote_location(input: &str) -> Result<RemoteLocation, String> {
         .next()
         .ok_or_else(|| "remote paths must include a share name".to_string())?;
     let file_path = segments.collect::<Vec<_>>().join("/");
-    if file_path.is_empty() {
+    if file_path.is_empty() && !allow_empty_path {
         return Err("remote paths must include a file path after the share".to_string());
     }
 
@@ -308,11 +409,46 @@ fn parse_host_port(authority: &str) -> Result<(String, u16), String> {
     Ok((authority.to_string(), 445))
 }
 
+fn ensure_same_share(source: &RemoteLocation, destination: &RemoteLocation) -> Result<(), String> {
+    if source.host != destination.host
+        || source.port != destination.port
+        || source.share != destination.share
+    {
+        return Err("mv requires both SMB URLs to use the same host, port, and share".to_string());
+    }
+    Ok(())
+}
+
+fn print_metadata(path: &str, metadata: &SmbMetadata) {
+    println!("Path: {path}");
+    println!(
+        "Type: {}",
+        if metadata.is_directory() {
+            "directory"
+        } else {
+            "file"
+        }
+    );
+    println!("Size: {}", metadata.size);
+    println!("AllocationSize: {}", metadata.allocation_size);
+    println!("Attributes: 0x{:08x}", metadata.attributes.bits());
+    println!("Created: {}", format_time(metadata.created));
+    println!("Accessed: {}", format_time(metadata.accessed));
+    println!("Written: {}", format_time(metadata.written));
+    println!("Changed: {}", format_time(metadata.changed));
+}
+
+fn format_time(value: Option<std::time::SystemTime>) -> String {
+    value
+        .map(|time| format!("{time:?}"))
+        .unwrap_or_else(|| "<none>".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{parse_cli, parse_remote_location, Command, RemoteLocation};
+    use super::{parse_cli, parse_remote_location, parse_remote_location_with_options, Command, RemoteLocation};
 
     #[test]
     fn parse_cat_command_with_inline_credentials() {
@@ -378,5 +514,67 @@ mod tests {
         let error = parse_remote_location("smb://server/share")
             .expect_err("share-only URLs should be rejected");
         assert!(error.contains("file path"));
+    }
+
+    #[test]
+    fn parse_ls_command_allows_share_root() {
+        let options = parse_cli(vec![
+            "smolder".to_string(),
+            "ls".to_string(),
+            "smb://server/share".to_string(),
+            "--username=user".to_string(),
+            "--password=pass".to_string(),
+        ])
+        .expect("parser should accept ls arguments");
+
+        assert_eq!(
+            options.command,
+            Command::Ls {
+                remote: RemoteLocation {
+                    host: "server".to_string(),
+                    port: 445,
+                    share: "share".to_string(),
+                    path: String::new(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_mv_command_accepts_two_remote_urls() {
+        let options = parse_cli(vec![
+            "smolder".to_string(),
+            "mv".to_string(),
+            "smb://server/share/old.txt".to_string(),
+            "smb://server/share/new.txt".to_string(),
+            "--username=user".to_string(),
+            "--password=pass".to_string(),
+        ])
+        .expect("parser should accept mv arguments");
+
+        assert_eq!(
+            options.command,
+            Command::Move {
+                source: RemoteLocation {
+                    host: "server".to_string(),
+                    port: 445,
+                    share: "share".to_string(),
+                    path: "old.txt".to_string(),
+                },
+                destination: RemoteLocation {
+                    host: "server".to_string(),
+                    port: 445,
+                    share: "share".to_string(),
+                    path: "new.txt".to_string(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_remote_location_with_options_accepts_empty_path() {
+        let location = parse_remote_location_with_options("smb://server/share", true)
+            .expect("share root should be accepted");
+        assert_eq!(location.path, "");
     }
 }

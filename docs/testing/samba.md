@@ -14,9 +14,15 @@ This document now includes live interoperability gates against a real Samba serv
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> READ -> CLOSE`
 - high-level `write` / `read`
 - high-level `put` / `get`
+- high-level `list` / `stat`
+- high-level `rename` / `remove`
 - CLI `cat`
 - CLI `get`
 - CLI `put`
+- CLI `ls`
+- CLI `stat`
+- CLI `mv`
+- CLI `rm`
 
 ## Why Start With `NEGOTIATE`
 
@@ -151,16 +157,24 @@ The current live coverage now reaches:
 9. high-level `read`
 10. high-level `put`
 11. high-level `get`
-12. CLI `cat`
-13. CLI `get`
-14. CLI `put`
+12. high-level `list`
+13. high-level `stat`
+14. high-level `rename`
+15. high-level `remove`
+16. CLI `cat`
+17. CLI `get`
+18. CLI `put`
+19. CLI `ls`
+20. CLI `stat`
+21. CLI `mv`
+22. CLI `rm`
 
 The next practical interop gates are:
 
-1. `QUERY_INFO` / metadata reads
-2. `SET_INFO`
-3. `RENAME`
-4. `DELETE`
-5. directory enumeration
+1. `FLUSH`
+2. `TREE_DISCONNECT`
+3. `LOGOFF`
+4. deeper `QUERY_INFO` coverage beyond basic file metadata
+5. SMB 3.1.1 negotiate contexts and signing hardening
 
 After those pass consistently, the next step is wiring a repeatable Samba `selftest` / `smbtorture` harness for the product surface Smolder actually exposes.

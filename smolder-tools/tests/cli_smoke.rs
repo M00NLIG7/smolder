@@ -87,10 +87,14 @@ fn temp_path(prefix: &str) -> PathBuf {
 }
 
 fn smb_url(config: &SambaConfig, remote_path: &str) -> String {
-    format!(
-        "smb://{}:{}/{}/{}",
-        config.host, config.port, config.share, remote_path
-    )
+    if remote_path.is_empty() {
+        format!("smb://{}:{}/{}", config.host, config.port, config.share)
+    } else {
+        format!(
+            "smb://{}:{}/{}/{}",
+            config.host, config.port, config.share, remote_path
+        )
+    }
 }
 
 fn configure_auth(command: &mut Command, config: &SambaConfig) {
@@ -199,4 +203,126 @@ async fn get_command_downloads_file_when_configured() {
     assert_eq!(downloaded, payload);
 
     let _ = fs::remove_file(local_path);
+}
+
+#[tokio::test]
+async fn ls_command_lists_entries_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some((config, mut share)) = connected_share().await else {
+        return;
+    };
+
+    let remote_path = unique_name("smolder-cli-ls");
+    share
+        .write(&remote_path, b"smolder cli ls payload")
+        .await
+        .expect("should seed remote file");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
+    command.arg("ls").arg(smb_url(&config, ""));
+    configure_auth(&mut command, &config);
+
+    let output = command.output().expect("CLI should run");
+    assert!(
+        output.status.success(),
+        "ls stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("ls output should be UTF-8");
+    assert!(stdout.lines().any(|line| line == remote_path));
+}
+
+#[tokio::test]
+async fn stat_command_prints_metadata_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some((config, mut share)) = connected_share().await else {
+        return;
+    };
+
+    let remote_path = unique_name("smolder-cli-stat");
+    let payload = b"smolder cli stat payload";
+    share
+        .write(&remote_path, payload)
+        .await
+        .expect("should seed remote file");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
+    command.arg("stat").arg(smb_url(&config, &remote_path));
+    configure_auth(&mut command, &config);
+
+    let output = command.output().expect("CLI should run");
+    assert!(
+        output.status.success(),
+        "stat stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stat output should be UTF-8");
+    assert!(stdout.contains(&format!("Path: {remote_path}")));
+    assert!(stdout.contains(&format!("Size: {}", payload.len())));
+}
+
+#[tokio::test]
+async fn mv_command_renames_files_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some((config, mut share)) = connected_share().await else {
+        return;
+    };
+
+    let source = unique_name("smolder-cli-mv-old");
+    let destination = unique_name("smolder-cli-mv-new");
+    let payload = b"smolder cli mv payload";
+    share
+        .write(&source, payload)
+        .await
+        .expect("should seed remote file");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
+    command
+        .arg("mv")
+        .arg(smb_url(&config, &source))
+        .arg(smb_url(&config, &destination));
+    configure_auth(&mut command, &config);
+
+    let output = command.output().expect("CLI should run");
+    assert!(
+        output.status.success(),
+        "mv stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let round_trip = share
+        .read(&destination)
+        .await
+        .expect("renamed file should exist");
+    assert_eq!(round_trip, payload);
+    let listing = share.list("").await.expect("listing should succeed");
+    assert!(!listing.iter().any(|entry| entry.name == source));
+}
+
+#[tokio::test]
+async fn rm_command_deletes_files_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some((config, mut share)) = connected_share().await else {
+        return;
+    };
+
+    let remote_path = unique_name("smolder-cli-rm");
+    share
+        .write(&remote_path, b"smolder cli rm payload")
+        .await
+        .expect("should seed remote file");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
+    command.arg("rm").arg(smb_url(&config, &remote_path));
+    configure_auth(&mut command, &config);
+
+    let output = command.output().expect("CLI should run");
+    assert!(
+        output.status.success(),
+        "rm stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let listing = share.list("").await.expect("listing should succeed");
+    assert!(!listing.iter().any(|entry| entry.name == remote_path));
 }
