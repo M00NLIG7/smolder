@@ -6,7 +6,8 @@ use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
 
 use super::{
-    get_array, get_u16, get_u32, get_u64, CreditCharge, MessageId, SessionId, TreeId, PROTOCOL_ID,
+    get_array, get_u16, get_u32, get_u64, AsyncId, CreditCharge, MessageId, SessionId, TreeId,
+    PROTOCOL_ID,
 };
 use crate::smb::ProtocolError;
 
@@ -102,6 +103,8 @@ pub struct Header {
     pub next_command: u32,
     /// Message identifier.
     pub message_id: MessageId,
+    /// Asynchronous identifier present on async headers.
+    pub async_id: Option<AsyncId>,
     /// Tree identifier.
     pub tree_id: TreeId,
     /// Session identifier.
@@ -125,6 +128,7 @@ impl Header {
             flags: HeaderFlags::empty(),
             next_command: 0,
             message_id,
+            async_id: None,
             tree_id: TreeId(0),
             session_id: SessionId(0),
             signature: [0; 16],
@@ -144,8 +148,12 @@ impl Header {
         out.put_u32_le(self.flags.bits());
         out.put_u32_le(self.next_command);
         out.put_u64_le(self.message_id.0);
-        out.put_u32_le(0);
-        out.put_u32_le(self.tree_id.0);
+        if self.flags.contains(HeaderFlags::ASYNC_COMMAND) {
+            out.put_u64_le(self.async_id.unwrap_or(AsyncId(0)).0);
+        } else {
+            out.put_u32_le(0);
+            out.put_u32_le(self.tree_id.0);
+        }
         out.put_u64_le(self.session_id.0);
         out.extend_from_slice(&self.signature);
         out.to_vec()
@@ -186,8 +194,12 @@ impl Header {
         )?;
         let next_command = get_u32(&mut input, "next_command")?;
         let message_id = MessageId(get_u64(&mut input, "message_id")?);
-        let _reserved = get_u32(&mut input, "reserved")?;
-        let tree_id = TreeId(get_u32(&mut input, "tree_id")?);
+        let (async_id, tree_id) = if flags.contains(HeaderFlags::ASYNC_COMMAND) {
+            (Some(AsyncId(get_u64(&mut input, "async_id")?)), TreeId(0))
+        } else {
+            let _reserved = get_u32(&mut input, "reserved")?;
+            (None, TreeId(get_u32(&mut input, "tree_id")?))
+        };
         let session_id = SessionId(get_u64(&mut input, "session_id")?);
         let signature = get_array::<16>(&mut input, "signature")?;
 
@@ -199,6 +211,7 @@ impl Header {
             flags,
             next_command,
             message_id,
+            async_id,
             tree_id,
             session_id,
             signature,
@@ -209,7 +222,7 @@ impl Header {
 #[cfg(test)]
 mod tests {
     use super::{Command, Header, HeaderFlags};
-    use crate::smb::smb2::{MessageId, SessionId, TreeId};
+    use crate::smb::smb2::{AsyncId, MessageId, SessionId, TreeId};
 
     #[test]
     fn header_roundtrips() {
@@ -223,5 +236,20 @@ mod tests {
         let decoded = Header::decode(&encoded).expect("header should decode");
 
         assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn async_header_roundtrips() {
+        let mut header = Header::new(Command::Write, MessageId(7));
+        header.status = 0x0000_0103;
+        header.flags = HeaderFlags::SERVER_TO_REDIR | HeaderFlags::ASYNC_COMMAND;
+        header.async_id = Some(AsyncId(99));
+        header.session_id = SessionId(55);
+
+        let encoded = header.encode();
+        let decoded = Header::decode(&encoded).expect("header should decode");
+
+        assert_eq!(decoded, header);
+        assert_eq!(decoded.tree_id, TreeId(0));
     }
 }

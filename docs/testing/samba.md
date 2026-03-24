@@ -12,6 +12,7 @@ This document now includes live interoperability gates against a real Samba serv
 - `NEGOTIATE`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> READ -> CLOSE`
+- `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> FLUSH -> CLOSE -> TREE_DISCONNECT -> LOGOFF`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> FLUSH -> CLOSE -> TREE_DISCONNECT -> LOGOFF`
 - high-level `write` / `read`
 - high-level `put` / `get`
@@ -177,12 +178,14 @@ The current live coverage now reaches:
 27. CLI `mv`
 28. CLI `rm`
 
+The current engine also handles interim async SMB2 responses (`STATUS_PENDING` with `SMB2_FLAGS_ASYNC_COMMAND`) and keeps waiting for the final response on the same message id.
+
 The next practical interop gates are:
 
-1. asynchronous `STATUS_PENDING` / async-command handling
-2. deeper `QUERY_INFO` coverage beyond basic file metadata
-3. SMB 3.1.1 negotiate contexts and signing hardening
-4. `IOCTL`
-5. leases / durable handles / compounding
+1. deeper `QUERY_INFO` coverage beyond basic file metadata
+2. SMB 3.1.1 negotiate contexts and signing hardening
+3. `IOCTL`
+4. leases / durable handles / compounding
+5. response-signing verification
 
 After those pass consistently, the next step is wiring a repeatable Samba `selftest` / `smbtorture` harness for the product surface Smolder actually exposes.

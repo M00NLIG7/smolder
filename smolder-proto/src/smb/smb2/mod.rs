@@ -50,6 +50,10 @@ pub const PROTOCOL_ID: [u8; 4] = [0xfe, b'S', b'M', b'B'];
 pub struct MessageId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// An asynchronous command identifier assigned by the server.
+pub struct AsyncId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// A negotiated session identifier.
 pub struct SessionId(pub u64);
 

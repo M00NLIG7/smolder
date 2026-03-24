@@ -202,6 +202,7 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
     };
 
     let path = unique_test_file_path();
+    let payload = b"smolder lifecycle".to_vec();
 
     let mut create_request = CreateRequest::from_path(&path);
     create_request.create_disposition = CreateDisposition::Create;
@@ -213,6 +214,10 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
         .create(&create_request)
         .await
         .expect("Samba should create the lifecycle test file");
+    connection
+        .write(&WriteRequest::for_file(created.file_id, 0, payload))
+        .await
+        .expect("Samba should write the lifecycle test payload");
     connection
         .flush(&FlushRequest::for_file(created.file_id))
         .await

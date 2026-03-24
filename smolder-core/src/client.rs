@@ -4,13 +4,13 @@ use tracing::{trace, trace_span, Instrument};
 
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, FlushRequest,
-    FlushResponse, Header, LogoffRequest, LogoffResponse, MessageId, NegotiateRequest,
-    NegotiateResponse, QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest,
-    QueryInfoResponse, ReadRequest, ReadResponse, SessionId, SessionSetupRequest,
-    SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, SigningMode,
-    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse, TreeId,
-    WriteRequest, WriteResponse,
+    AsyncId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, FlushRequest,
+    FlushResponse, Header, HeaderFlags, LogoffRequest, LogoffResponse, MessageId,
+    NegotiateRequest, NegotiateResponse, QueryDirectoryRequest, QueryDirectoryResponse,
+    QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse, SessionId,
+    SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest,
+    SetInfoResponse, SigningMode, TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest,
+    TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
 
@@ -551,34 +551,90 @@ where
             .instrument(trace_span!("smb_send", ?command, message_id = message_id.0))
             .await?;
 
-        let response_frame = self
-            .transport
-            .recv()
-            .instrument(trace_span!("smb_recv", ?command, message_id = message_id.0))
-            .await?;
-        let response_frame = SessionMessage::decode(&response_frame)?;
-        if response_frame.payload.len() < Header::LEN {
-            return Err(CoreError::InvalidResponse(
-                "response shorter than SMB2 header",
-            ));
-        }
+        let mut pending_async_id = None;
+        loop {
+            let response_frame = self
+                .transport
+                .recv()
+                .instrument(trace_span!("smb_recv", ?command, message_id = message_id.0))
+                .await?;
+            let response_frame = SessionMessage::decode(&response_frame)?;
+            if response_frame.payload.len() < Header::LEN {
+                return Err(CoreError::InvalidResponse(
+                    "response shorter than SMB2 header",
+                ));
+            }
 
-        let response_header = Header::decode(&response_frame.payload[..Header::LEN])?;
-        if response_header.command != command {
-            return Err(CoreError::UnexpectedCommand {
-                expected: command,
-                actual: response_header.command,
-            });
-        }
-        if !accepted_statuses.contains(&response_header.status) {
-            return Err(CoreError::UnexpectedStatus {
-                command,
-                status: response_header.status,
-            });
-        }
+            let response_header = Header::decode(&response_frame.payload[..Header::LEN])?;
+            if response_header.command != command {
+                return Err(CoreError::UnexpectedCommand {
+                    expected: command,
+                    actual: response_header.command,
+                });
+            }
+            if response_header.message_id != message_id {
+                return Err(CoreError::InvalidResponse(
+                    "response message id did not match the request",
+                ));
+            }
 
-        Ok((response_header, response_frame.payload[Header::LEN..].to_vec()))
+            if response_header.status == NtStatus::PENDING.to_u32() {
+                let async_id = validate_pending_response(&response_header)?;
+                pending_async_id = Some(async_id);
+                trace!(
+                    ?command,
+                    message_id = response_header.message_id.0,
+                    async_id = async_id.0,
+                    "received interim async SMB response"
+                );
+                continue;
+            }
+
+            if let Some(async_id) = pending_async_id {
+                validate_async_final_response(&response_header, async_id)?;
+            }
+
+            if !accepted_statuses.contains(&response_header.status) {
+                return Err(CoreError::UnexpectedStatus {
+                    command,
+                    status: response_header.status,
+                });
+            }
+
+            return Ok((response_header, response_frame.payload[Header::LEN..].to_vec()));
+        }
     }
+}
+
+fn validate_pending_response(header: &Header) -> Result<AsyncId, CoreError> {
+    if !header.flags.contains(HeaderFlags::ASYNC_COMMAND) {
+        return Err(CoreError::InvalidResponse(
+            "pending response must use the async SMB2 header",
+        ));
+    }
+    let async_id = header
+        .async_id
+        .ok_or(CoreError::InvalidResponse("pending response was missing an async id"))?;
+    if async_id.0 == 0 {
+        return Err(CoreError::InvalidResponse(
+            "pending response async id must be nonzero",
+        ));
+    }
+    Ok(async_id)
+}
+
+fn validate_async_final_response(header: &Header, async_id: AsyncId) -> Result<(), CoreError> {
+    if !header.flags.contains(HeaderFlags::ASYNC_COMMAND) {
+        return Err(CoreError::InvalidResponse(
+            "final async response must use the async SMB2 header",
+        ));
+    }
+    if header.async_id != Some(async_id) {
+        return Err(CoreError::InvalidResponse(
+            "final async response async id did not match the interim response",
+        ));
+    }
+    Ok(())
 }
 
 fn session_setup_security_mode(signing_mode: SigningMode) -> SessionSetupSecurityMode {
@@ -599,13 +655,14 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
-        CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect,
+        AsyncId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect,
         FileAttributes, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
-        LogoffRequest, LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse,
-        OplockLevel, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags, SessionId,
-        SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
-        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
-        TreeDisconnectRequest, TreeId, WriteRequest, WriteResponse,
+        HeaderFlags, LogoffRequest, LogoffResponse, MessageId, NegotiateRequest,
+        NegotiateResponse, OplockLevel, ReadRequest, ReadResponse, ReadResponseFlags,
+        SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
+        SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode, TreeCapabilities,
+        TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeId, WriteRequest,
+        WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
@@ -654,6 +711,27 @@ mod tests {
         header.status = status;
         header.session_id = SessionId(session_id);
         header.tree_id = TreeId(tree_id);
+
+        let mut packet = header.encode();
+        packet.extend_from_slice(&body);
+        SessionMessage::new(packet)
+            .encode()
+            .expect("response should frame")
+    }
+
+    fn async_response_frame(
+        command: Command,
+        status: u32,
+        message_id: u64,
+        async_id: u64,
+        session_id: u64,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
+        let mut header = Header::new(command, MessageId(message_id));
+        header.status = status;
+        header.flags = HeaderFlags::SERVER_TO_REDIR | HeaderFlags::ASYNC_COMMAND;
+        header.async_id = Some(AsyncId(async_id));
+        header.session_id = SessionId(session_id);
 
         let mut packet = header.encode();
         packet.extend_from_slice(&body);
@@ -1096,5 +1174,123 @@ mod tests {
         assert_eq!(second_setup_header.session_id, SessionId(77));
         let second_setup = outbound_session_setup(&transport.writes[2]);
         assert_eq!(second_setup.security_buffer, vec![0x03, 0x04, 0x05]);
+    }
+
+    #[tokio::test]
+    async fn write_handles_interim_async_response() {
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
+            server_guid: *b"server-guid-0001",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: Vec::new(),
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: Vec::new(),
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                11,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                11,
+                7,
+                tree_response.encode(),
+            ),
+            async_response_frame(
+                Command::Write,
+                NtStatus::PENDING.to_u32(),
+                3,
+                99,
+                11,
+                Vec::new(),
+            ),
+            async_response_frame(
+                Command::Write,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                99,
+                11,
+                WriteResponse { count: 5 }.encode(),
+            ),
+        ]);
+
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0001",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+        let tree_request = TreeConnectRequest::from_unc(r"\\server\share");
+        let write_request = WriteRequest::for_file(
+            FileId {
+                persistent: 0x11,
+                volatile: 0x22,
+            },
+            0,
+            b"hello".to_vec(),
+        );
+
+        let connection = Connection::new(transport);
+        let connection = connection
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed");
+        let connection = connection
+            .session_setup(&session_request)
+            .await
+            .expect("session setup should succeed");
+        let mut connection = connection
+            .tree_connect(&tree_request)
+            .await
+            .expect("tree connect should succeed");
+
+        let response = connection
+            .write(&write_request)
+            .await
+            .expect("write should succeed after interim pending response");
+        assert_eq!(response.count, 5);
+
+        let transport = connection.into_transport();
+        assert_eq!(transport.writes.len(), 4);
     }
 }
