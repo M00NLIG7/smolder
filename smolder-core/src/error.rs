@@ -1,5 +1,6 @@
 //! Errors returned by the core client/session layer.
 
+use crate::auth::AuthError;
 use smolder_proto::smb::smb2::Command;
 use smolder_proto::smb::ProtocolError;
 use thiserror::Error;
@@ -13,6 +14,9 @@ pub enum CoreError {
     /// Packet encoding or decoding failed.
     #[error("protocol error")]
     Protocol(#[from] ProtocolError),
+    /// Authentication token processing failed.
+    #[error("authentication error")]
+    Auth(#[from] AuthError),
     /// The server responded with a different command than expected.
     #[error("unexpected response command: expected {expected:?}, got {actual:?}")]
     UnexpectedCommand {

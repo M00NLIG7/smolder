@@ -9,6 +9,11 @@ license = "MIT"
 
 [dependencies]
 async-trait = "0.1"
+bitflags = "2"
+hmac = "0.12"
+md-5 = "0.10"
+md4 = "0.10"
+rand = "0.8"
 smolder-proto = { path = "../smolder-proto" }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt"] }
