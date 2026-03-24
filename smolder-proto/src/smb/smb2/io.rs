@@ -38,6 +38,70 @@ bitflags! {
     }
 }
 
+/// SMB2 flush request body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlushRequest {
+    /// File handle to flush.
+    pub file_id: FileId,
+}
+
+impl FlushRequest {
+    /// Builds a flush request for an open file handle.
+    #[must_use]
+    pub fn for_file(file_id: FileId) -> Self {
+        Self { file_id }
+    }
+
+    /// Serializes the request body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(24);
+        out.put_u16_le(24);
+        out.put_u16_le(0);
+        out.put_u32_le(0);
+        out.put_u64_le(self.file_id.persistent);
+        out.put_u64_le(self.file_id.volatile);
+        out.to_vec()
+    }
+
+    /// Parses the request body.
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = body;
+        check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 24, "structure_size")?;
+        let _reserved1 = get_u16(&mut input, "reserved1")?;
+        let _reserved2 = get_u32(&mut input, "reserved2")?;
+        let file_id = FileId {
+            persistent: get_u64(&mut input, "file_id_persistent")?,
+            volatile: get_u64(&mut input, "file_id_volatile")?,
+        };
+
+        Ok(Self { file_id })
+    }
+}
+
+/// SMB2 flush response body.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FlushResponse;
+
+impl FlushResponse {
+    /// Serializes the response body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(4);
+        out.put_u16_le(4);
+        out.put_u16_le(0);
+        out.to_vec()
+    }
+
+    /// Parses the response body.
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = body;
+        check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 4, "structure_size")?;
+        let _reserved = get_u16(&mut input, "reserved")?;
+        Ok(Self)
+    }
+}
+
 /// SMB2 read request body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadRequest {
@@ -359,10 +423,30 @@ impl WriteResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        ReadFlags, ReadRequest, ReadResponse, ReadResponseFlags, WriteFlags, WriteRequest,
-        WriteResponse,
+        FlushRequest, FlushResponse, ReadFlags, ReadRequest, ReadResponse, ReadResponseFlags,
+        WriteFlags, WriteRequest, WriteResponse,
     };
     use crate::smb::smb2::FileId;
+
+    #[test]
+    fn flush_request_and_response_roundtrip() {
+        let request = FlushRequest {
+            file_id: FileId {
+                persistent: 3,
+                volatile: 4,
+            },
+        };
+        let response = FlushResponse;
+
+        let encoded_request = request.encode();
+        let decoded_request = FlushRequest::decode(&encoded_request).expect("request should decode");
+        assert_eq!(decoded_request, request);
+
+        let encoded_response = response.encode();
+        let decoded_response =
+            FlushResponse::decode(&encoded_response).expect("response should decode");
+        assert_eq!(decoded_response, response);
+    }
 
     #[test]
     fn read_request_roundtrips() {

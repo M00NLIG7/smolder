@@ -11,9 +11,9 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use smolder_proto::smb::smb2::{
     CloseRequest, CloseResponse, CreateDisposition, CreateOptions, CreateRequest, Dialect,
     DispositionInformation, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
-    FileStandardInformation, GlobalCapabilities, NegotiateRequest, QueryDirectoryFlags,
-    QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation, SetInfoRequest,
-    ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
+    FileStandardInformation, FlushRequest, GlobalCapabilities, NegotiateRequest,
+    QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest, ReadRequest,
+    RenameInformation, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
@@ -240,6 +240,13 @@ impl<T> SmbClient<T>
 where
     T: Transport + Send,
 {
+    /// Logs off the authenticated SMB session and drops the underlying transport.
+    pub async fn logoff(self) -> Result<(), CoreError> {
+        let SmbClient { connection, .. } = self;
+        let _ = connection.logoff().await?;
+        Ok(())
+    }
+
     /// Connects the authenticated session to a share by share name.
     pub async fn share(self, share: impl AsRef<str>) -> Result<Share<T>, CoreError> {
         let share = normalize_share_name(share.as_ref())?;
@@ -318,6 +325,23 @@ impl<T> Share<T>
 where
     T: Transport + Send,
 {
+    /// Disconnects the current tree and returns to the authenticated client session.
+    pub async fn disconnect(self) -> Result<SmbClient<T>, CoreError> {
+        let Share {
+            server,
+            connection,
+            transfer_chunk_size,
+            ..
+        } = self;
+        let connection = connection.tree_disconnect().await?;
+
+        Ok(SmbClient {
+            server,
+            connection,
+            transfer_chunk_size,
+        })
+    }
+
     /// Opens a remote file on the connected share.
     pub async fn open<'a>(
         &'a mut self,
@@ -796,6 +820,15 @@ where
         Ok(())
     }
 
+    /// Flushes the remote file handle to stable storage on the server.
+    pub async fn flush(&mut self) -> Result<(), CoreError> {
+        self.share
+            .connection
+            .flush(&FlushRequest::for_file(self.file_id))
+            .await?;
+        Ok(())
+    }
+
     /// Closes the remote file handle.
     pub async fn close(mut self) -> Result<CloseResponse, CoreError> {
         if self.closed {
@@ -1025,13 +1058,14 @@ mod tests {
     use smolder_proto::smb::smb2::{
         CloseResponse, Command, CreateDisposition, CreateOptions, CreateRequest, CreateResponse,
         DirectoryInformationEntry, Dialect, FileAttributes, FileBasicInformation, FileId,
-        FileInfoClass, FileStandardInformation, GlobalCapabilities, Header, MessageId,
-        NegotiateRequest, NegotiateResponse, OplockLevel, QueryDirectoryFlags,
-        QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
-        ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags, SessionSetupRequest,
-        SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse,
-        ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectResponse, TreeId,
-        WriteRequest, WriteResponse,
+        FileInfoClass, FileStandardInformation, FlushRequest, FlushResponse,
+        GlobalCapabilities, Header, MessageId, NegotiateRequest, NegotiateResponse,
+        OplockLevel, QueryDirectoryFlags, QueryDirectoryRequest, QueryDirectoryResponse,
+        QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse, ReadResponseFlags,
+        SessionFlags, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode,
+        SetInfoRequest, SetInfoResponse, ShareFlags, ShareType, SigningMode, TreeCapabilities,
+        TreeConnectRequest, TreeConnectResponse, TreeDisconnectResponse, TreeId, WriteRequest,
+        WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
@@ -1102,6 +1136,11 @@ mod tests {
     fn outbound_write(frame: &[u8]) -> WriteRequest {
         let frame = SessionMessage::decode(frame).expect("frame should decode");
         WriteRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    fn outbound_flush(frame: &[u8]) -> FlushRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        FlushRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
     }
 
     fn outbound_query_directory(frame: &[u8]) -> QueryDirectoryRequest {
@@ -1325,6 +1364,66 @@ mod tests {
         let write_two = outbound_write(&writes[5]);
         assert_eq!(write_two.offset, 4);
         assert_eq!(write_two.data, b"der");
+    }
+
+    #[tokio::test]
+    async fn remote_file_flushes_current_handle() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Flush,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                FlushResponse.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let mut share = build_share(reads).await;
+        let mut file = share
+            .open("notes.txt", OpenOptions::new().write(true))
+            .await
+            .expect("open should succeed");
+        file.flush().await.expect("flush should succeed");
+        file.close().await.expect("close should succeed");
+
+        let writes = transport_writes(share);
+        let flush = outbound_flush(&writes[4]);
+        assert_eq!(flush.file_id, create_response.file_id);
     }
 
     #[tokio::test]
@@ -1639,6 +1738,62 @@ mod tests {
             FileInfoClass::DispositionInformation
         );
         assert_eq!(set_info.buffer, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn share_disconnect_returns_authenticated_client() {
+        let next_tree = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::ENCRYPT_DATA,
+            capabilities: TreeCapabilities::CONTINUOUS_AVAILABILITY,
+            maximal_access: 0x0012_019f,
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::TreeDisconnect,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                TreeDisconnectResponse.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                9,
+                next_tree.encode(),
+            ),
+        ];
+
+        let share = build_share(reads).await;
+        let client = share.disconnect().await.expect("disconnect should succeed");
+        let share = client
+            .share("archive")
+            .await
+            .expect("second tree connect should succeed");
+
+        let writes = transport_writes(share);
+        let disconnect_header = Header::decode(
+            &SessionMessage::decode(&writes[3])
+                .expect("frame should decode")
+                .payload[..Header::LEN],
+        )
+        .expect("header should decode");
+        assert_eq!(disconnect_header.command, Command::TreeDisconnect);
+
+        let reconnect = SessionMessage::decode(&writes[4]).expect("frame should decode");
+        let reconnect_header =
+            Header::decode(&reconnect.payload[..Header::LEN]).expect("header should decode");
+        assert_eq!(reconnect_header.command, Command::TreeConnect);
+        let reconnect_request =
+            TreeConnectRequest::decode(&reconnect.payload[Header::LEN..]).expect("request should decode");
+        assert_eq!(
+            reconnect_request.path,
+            smolder_proto::smb::smb2::utf16le(r"\\server\archive")
+        );
     }
 
     async fn build_share(reads: Vec<Vec<u8>>) -> Share<ScriptedTransport> {

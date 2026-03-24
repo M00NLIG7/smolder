@@ -118,6 +118,52 @@ impl TreeConnectRequest {
     }
 }
 
+/// SMB2 tree disconnect request body.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TreeDisconnectRequest;
+
+impl TreeDisconnectRequest {
+    /// Serializes the request body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(4);
+        out.put_u16_le(4);
+        out.put_u16_le(0);
+        out.to_vec()
+    }
+
+    /// Parses the request body.
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = body;
+        check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 4, "structure_size")?;
+        let _reserved = get_u16(&mut input, "reserved")?;
+        Ok(Self)
+    }
+}
+
+/// SMB2 tree disconnect response body.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TreeDisconnectResponse;
+
+impl TreeDisconnectResponse {
+    /// Serializes the response body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(4);
+        out.put_u16_le(4);
+        out.put_u16_le(0);
+        out.to_vec()
+    }
+
+    /// Parses the response body.
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = body;
+        check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 4, "structure_size")?;
+        let _reserved = get_u16(&mut input, "reserved")?;
+        Ok(Self)
+    }
+}
+
 /// SMB2 tree connect response body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeConnectResponse {
@@ -185,7 +231,10 @@ impl TreeConnectResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShareFlags, ShareType, TreeCapabilities, TreeConnectRequest, TreeConnectResponse};
+    use super::{
+        ShareFlags, ShareType, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
+        TreeDisconnectRequest, TreeDisconnectResponse,
+    };
 
     #[test]
     fn tree_connect_request_roundtrips() {
@@ -209,5 +258,21 @@ mod tests {
         let decoded = TreeConnectResponse::decode(&encoded).expect("response should decode");
 
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn tree_disconnect_request_and_response_roundtrip() {
+        let request = TreeDisconnectRequest;
+        let response = TreeDisconnectResponse;
+
+        let encoded_request = request.encode();
+        let decoded_request =
+            TreeDisconnectRequest::decode(&encoded_request).expect("request should decode");
+        assert_eq!(decoded_request, request);
+
+        let encoded_response = response.encode();
+        let decoded_response = TreeDisconnectResponse::decode(&encoded_response)
+            .expect("response should decode");
+        assert_eq!(decoded_response, response);
     }
 }

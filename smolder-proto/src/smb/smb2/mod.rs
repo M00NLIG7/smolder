@@ -22,16 +22,20 @@ pub use info::{
     RenameInformation, SetInfoRequest, SetInfoResponse,
 };
 pub use io::{
-    ReadFlags, ReadRequest, ReadResponse, ReadResponseFlags, WriteFlags, WriteRequest,
-    WriteResponse,
+    FlushRequest, FlushResponse, ReadFlags, ReadRequest, ReadResponse, ReadResponseFlags,
+    WriteFlags, WriteRequest, WriteResponse,
 };
 pub use negotiate::{
     Dialect, GlobalCapabilities, NegotiateContext, NegotiateRequest, NegotiateResponse, SigningMode,
 };
 pub use session::{
-    SessionFlags, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode,
+    LogoffRequest, LogoffResponse, SessionFlags, SessionSetupRequest, SessionSetupResponse,
+    SessionSetupSecurityMode,
 };
-pub use tree::{ShareFlags, ShareType, TreeCapabilities, TreeConnectRequest, TreeConnectResponse};
+pub use tree::{
+    ShareFlags, ShareType, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
+    TreeDisconnectRequest, TreeDisconnectResponse,
+};
 
 use super::ProtocolError;
 

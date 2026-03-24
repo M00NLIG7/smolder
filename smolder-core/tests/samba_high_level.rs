@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use smolder_core::prelude::{NtlmCredentials, SmbClient, Share};
+use smolder_core::prelude::{NtlmCredentials, OpenOptions, SmbClient, Share};
 use tokio::sync::Mutex;
 
 fn required_env(name: &str) -> Option<String> {
@@ -179,4 +179,37 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .expect("remove should succeed");
     let final_listing = share.list("").await.expect("listing should succeed after remove");
     assert!(!final_listing.iter().any(|entry| entry.name == renamed_path));
+}
+
+#[tokio::test]
+async fn flushes_disconnects_and_logs_off_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some((_config, mut share)) = connected_share().await else {
+        return;
+    };
+
+    let remote_path = unique_name("smolder-high-level-lifecycle");
+    let payload = b"smolder high level lifecycle";
+
+    let mut file = share
+        .open(
+            &remote_path,
+            OpenOptions::new().write(true).create(true).truncate(true),
+        )
+        .await
+        .expect("open should succeed");
+    file.write_all(payload).await.expect("write should succeed");
+    file.flush().await.expect("flush should succeed");
+    file.close().await.expect("close should succeed");
+
+    let metadata = share.stat(&remote_path).await.expect("stat should succeed");
+    assert_eq!(metadata.size, payload.len() as u64);
+
+    share
+        .remove(&remote_path)
+        .await
+        .expect("remove should succeed");
+
+    let client = share.disconnect().await.expect("disconnect should succeed");
+    client.logoff().await.expect("logoff should succeed");
 }

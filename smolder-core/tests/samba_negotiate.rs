@@ -4,9 +4,9 @@ use smolder_core::prelude::{
     Connection, NtlmAuthenticator, NtlmCredentials, TokioTcpTransport, TreeConnected,
 };
 use smolder_proto::smb::smb2::{
-    CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, GlobalCapabilities,
-    NegotiateRequest, ReadRequest, SessionId, ShareAccess, SigningMode, TreeConnectRequest, TreeId,
-    WriteRequest,
+    CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, FlushRequest,
+    GlobalCapabilities, NegotiateRequest, ReadRequest, SessionId, ShareAccess, SigningMode,
+    TreeConnectRequest, TreeId, WriteRequest,
 };
 
 fn required_env(name: &str) -> Option<String> {
@@ -193,4 +193,42 @@ async fn creates_writes_reads_and_closes_file_when_configured() {
     assert_eq!(wrote.count, payload.len() as u32);
     assert_eq!(read.data, payload);
     assert_eq!(closed.flags, 0);
+}
+
+#[tokio::test]
+async fn flushes_disconnects_and_logs_off_when_configured() {
+    let Some((_config, mut connection)) = authenticated_tree_connection().await else {
+        return;
+    };
+
+    let path = unique_test_file_path();
+
+    let mut create_request = CreateRequest::from_path(&path);
+    create_request.create_disposition = CreateDisposition::Create;
+    create_request.create_options |= CreateOptions::DELETE_ON_CLOSE;
+    create_request.desired_access |= 0x0001_0000;
+    create_request.share_access |= ShareAccess::DELETE;
+
+    let created = connection
+        .create(&create_request)
+        .await
+        .expect("Samba should create the lifecycle test file");
+    connection
+        .flush(&FlushRequest::for_file(created.file_id))
+        .await
+        .expect("Samba should flush the lifecycle test file");
+    let closed = connection
+        .close(&CloseRequest {
+            flags: 0,
+            file_id: created.file_id,
+        })
+        .await
+        .expect("Samba should close the lifecycle test file");
+    assert_eq!(closed.flags, 0);
+
+    let connection = connection
+        .tree_disconnect()
+        .await
+        .expect("Samba should disconnect the tree");
+    connection.logoff().await.expect("Samba should log off the session");
 }

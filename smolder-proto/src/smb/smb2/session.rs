@@ -30,6 +30,52 @@ bitflags! {
     }
 }
 
+/// SMB2 logoff request body.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LogoffRequest;
+
+impl LogoffRequest {
+    /// Serializes the request body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(4);
+        out.put_u16_le(4);
+        out.put_u16_le(0);
+        out.to_vec()
+    }
+
+    /// Parses the request body.
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = body;
+        check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 4, "structure_size")?;
+        let _reserved = get_u16(&mut input, "reserved")?;
+        Ok(Self)
+    }
+}
+
+/// SMB2 logoff response body.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LogoffResponse;
+
+impl LogoffResponse {
+    /// Serializes the response body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(4);
+        out.put_u16_le(4);
+        out.put_u16_le(0);
+        out.to_vec()
+    }
+
+    /// Parses the response body.
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = body;
+        check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 4, "structure_size")?;
+        let _reserved = get_u16(&mut input, "reserved")?;
+        Ok(Self)
+    }
+}
+
 /// SMB2 session setup request body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSetupRequest {
@@ -151,8 +197,24 @@ impl SessionSetupResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionFlags, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode,
+        LogoffRequest, LogoffResponse, SessionFlags, SessionSetupRequest, SessionSetupResponse,
+        SessionSetupSecurityMode,
     };
+
+    #[test]
+    fn logoff_request_and_response_roundtrip() {
+        let request = LogoffRequest;
+        let response = LogoffResponse;
+
+        let encoded_request = request.encode();
+        let decoded_request = LogoffRequest::decode(&encoded_request).expect("request should decode");
+        assert_eq!(decoded_request, request);
+
+        let encoded_response = response.encode();
+        let decoded_response =
+            LogoffResponse::decode(&encoded_response).expect("response should decode");
+        assert_eq!(decoded_response, response);
+    }
 
     #[test]
     fn session_setup_request_roundtrips() {

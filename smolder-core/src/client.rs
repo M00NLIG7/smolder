@@ -4,11 +4,13 @@ use tracing::{trace, trace_span, Instrument};
 
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Header, MessageId,
-    NegotiateRequest, NegotiateResponse, QueryDirectoryRequest, QueryDirectoryResponse,
-    QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse, SessionId, SessionSetupRequest,
+    CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, FlushRequest,
+    FlushResponse, Header, LogoffRequest, LogoffResponse, MessageId, NegotiateRequest,
+    NegotiateResponse, QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest,
+    QueryInfoResponse, ReadRequest, ReadResponse, SessionId, SessionSetupRequest,
     SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, SigningMode,
-    TreeConnectRequest, TreeConnectResponse, TreeId, WriteRequest, WriteResponse,
+    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse, TreeId,
+    WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
 
@@ -235,6 +237,28 @@ impl<T> Connection<T, Authenticated>
 where
     T: Transport + Send,
 {
+    /// Performs `LOGOFF` and transitions back into the negotiated state.
+    pub async fn logoff(mut self) -> Result<Connection<T, Negotiated>, CoreError> {
+        let negotiated = self.state.negotiated.clone();
+        let session_id = self.state.session_id;
+        let _ = self
+            .transact(
+                Command::Logoff,
+                LogoffRequest.encode(),
+                session_id,
+                TreeId(0),
+                &[0],
+                LogoffResponse::decode,
+            )
+            .await?;
+
+        Ok(Connection {
+            transport: self.transport,
+            next_message_id: self.next_message_id,
+            state: Negotiated { response: negotiated },
+        })
+    }
+
     /// Performs `TREE_CONNECT` and transitions into the tree-connected state.
     pub async fn tree_connect(
         mut self,
@@ -277,6 +301,32 @@ impl<T> Connection<T, TreeConnected>
 where
     T: Transport + Send,
 {
+    /// Performs a `TREE_DISCONNECT` request and returns to the authenticated state.
+    pub async fn tree_disconnect(mut self) -> Result<Connection<T, Authenticated>, CoreError> {
+        let authenticated = Authenticated {
+            negotiated: self.state.negotiated.clone(),
+            session: self.state.session.clone(),
+            session_id: self.state.session_id,
+            session_key: self.state.session_key.clone(),
+        };
+        let _ = self
+            .transact(
+                Command::TreeDisconnect,
+                TreeDisconnectRequest.encode(),
+                authenticated.session_id,
+                self.state.tree_id,
+                &[0],
+                TreeDisconnectResponse::decode,
+            )
+            .await?;
+
+        Ok(Connection {
+            transport: self.transport,
+            next_message_id: self.next_message_id,
+            state: authenticated,
+        })
+    }
+
     /// Performs a `CREATE` request on the active tree.
     pub async fn create(&mut self, request: &CreateRequest) -> Result<CreateResponse, CoreError> {
         let tree_id = self.state.tree_id;
@@ -340,6 +390,23 @@ where
                 tree_id,
                 &[0],
                 CloseResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
+    /// Performs a `FLUSH` request on the active tree.
+    pub async fn flush(&mut self, request: &FlushRequest) -> Result<FlushResponse, CoreError> {
+        let tree_id = self.state.tree_id;
+        let session_id = self.state.session_id;
+        let (_, response) = self
+            .transact(
+                Command::Flush,
+                request.encode(),
+                session_id,
+                tree_id,
+                &[0],
+                FlushResponse::decode,
             )
             .await?;
         Ok(response)
@@ -533,11 +600,12 @@ mod tests {
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
         CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect,
-        FileAttributes, FileId, GlobalCapabilities, Header, MessageId, NegotiateRequest,
-        NegotiateResponse, OplockLevel, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags,
-        SessionId, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
-        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeId,
-        WriteRequest, WriteResponse,
+        FileAttributes, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
+        LogoffRequest, LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse,
+        OplockLevel, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags, SessionId,
+        SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
+        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
+        TreeDisconnectRequest, TreeId, WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
@@ -614,6 +682,11 @@ mod tests {
         WriteRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
     }
 
+    fn outbound_flush(frame: &[u8]) -> FlushRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        FlushRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
     #[derive(Debug)]
     struct MockAuthProvider {
         initial_token: Vec<u8>,
@@ -681,6 +754,7 @@ mod tests {
             create_contexts: Vec::new(),
         };
         let write_response = WriteResponse { count: 5 };
+        let flush_response = FlushResponse;
         let read_response = ReadResponse {
             data_remaining: 0,
             flags: ReadResponseFlags::empty(),
@@ -692,6 +766,8 @@ mod tests {
             end_of_file: 128,
             file_attributes: FileAttributes::ARCHIVE,
         };
+        let tree_disconnect_response = smolder_proto::smb::smb2::TreeDisconnectResponse;
+        let logoff_response = LogoffResponse;
 
         let transport = ScriptedTransport::new(vec![
             response_frame(
@@ -735,9 +811,17 @@ mod tests {
                 write_response.encode(),
             ),
             response_frame(
-                Command::Read,
+                Command::Flush,
                 NtStatus::SUCCESS.to_u32(),
                 5,
+                55,
+                9,
+                flush_response.encode(),
+            ),
+            response_frame(
+                Command::Read,
+                NtStatus::SUCCESS.to_u32(),
+                6,
                 55,
                 9,
                 read_response.encode(),
@@ -745,10 +829,26 @@ mod tests {
             response_frame(
                 Command::Close,
                 NtStatus::SUCCESS.to_u32(),
-                6,
+                7,
                 55,
                 9,
                 close_response.encode(),
+            ),
+            response_frame(
+                Command::TreeDisconnect,
+                NtStatus::SUCCESS.to_u32(),
+                8,
+                55,
+                9,
+                tree_disconnect_response.encode(),
+            ),
+            response_frame(
+                Command::Logoff,
+                NtStatus::SUCCESS.to_u32(),
+                9,
+                55,
+                0,
+                logoff_response.encode(),
             ),
         ]);
 
@@ -770,6 +870,7 @@ mod tests {
         let tree_request = TreeConnectRequest::from_unc(r"\\server\share");
         let create_request = CreateRequest::from_path("notes.txt");
         let write_request = WriteRequest::for_file(create_response.file_id, 0, b"hello".to_vec());
+        let flush_request = FlushRequest::for_file(create_response.file_id);
         let read_request = ReadRequest::for_file(create_response.file_id, 0, 5);
         let close_request = CloseRequest {
             flags: 0,
@@ -798,6 +899,10 @@ mod tests {
             .write(&write_request)
             .await
             .expect("write should succeed");
+        let flush = connection
+            .flush(&flush_request)
+            .await
+            .expect("flush should succeed");
         let read = connection
             .read(&read_request)
             .await
@@ -806,17 +911,21 @@ mod tests {
             .close(&close_request)
             .await
             .expect("close should succeed");
+        let connection = connection
+            .tree_disconnect()
+            .await
+            .expect("tree disconnect should succeed");
+        let connection = connection.logoff().await.expect("logoff should succeed");
 
-        assert_eq!(connection.session_id(), SessionId(55));
-        assert_eq!(connection.tree_id(), TreeId(9));
-        assert!(connection.session_key().is_none());
         assert_eq!(create.file_id, close_request.file_id);
         assert_eq!(write.count, 5);
+        assert_eq!(flush, FlushResponse);
         assert_eq!(read.data, b"hello");
         assert_eq!(close.end_of_file, 128);
+        assert_eq!(connection.state().response.dialect_revision, Dialect::Smb311);
 
         let transport = connection.into_transport();
-        assert_eq!(transport.writes.len(), 7);
+        assert_eq!(transport.writes.len(), 10);
 
         let negotiate_header = outbound_header(&transport.writes[0]);
         assert_eq!(negotiate_header.command, Command::Negotiate);
@@ -850,20 +959,47 @@ mod tests {
         assert_eq!(write_body.data, b"hello");
         assert_eq!(write_body.file_id, create_response.file_id);
 
-        let read_header = outbound_header(&transport.writes[5]);
+        let flush_header = outbound_header(&transport.writes[5]);
+        assert_eq!(flush_header.command, Command::Flush);
+        assert_eq!(flush_header.message_id, MessageId(5));
+        assert_eq!(flush_header.session_id, SessionId(55));
+        assert_eq!(flush_header.tree_id, TreeId(9));
+        let flush_body = outbound_flush(&transport.writes[5]);
+        assert_eq!(flush_body.file_id, create_response.file_id);
+
+        let read_header = outbound_header(&transport.writes[6]);
         assert_eq!(read_header.command, Command::Read);
-        assert_eq!(read_header.message_id, MessageId(5));
+        assert_eq!(read_header.message_id, MessageId(6));
         assert_eq!(read_header.session_id, SessionId(55));
         assert_eq!(read_header.tree_id, TreeId(9));
-        let read_body = outbound_read(&transport.writes[5]);
+        let read_body = outbound_read(&transport.writes[6]);
         assert_eq!(read_body.length, 5);
         assert_eq!(read_body.file_id, create_response.file_id);
 
-        let close_header = outbound_header(&transport.writes[6]);
+        let close_header = outbound_header(&transport.writes[7]);
         assert_eq!(close_header.command, Command::Close);
-        assert_eq!(close_header.message_id, MessageId(6));
+        assert_eq!(close_header.message_id, MessageId(7));
         assert_eq!(close_header.session_id, SessionId(55));
         assert_eq!(close_header.tree_id, TreeId(9));
+
+        let tree_disconnect_header = outbound_header(&transport.writes[8]);
+        assert_eq!(tree_disconnect_header.command, Command::TreeDisconnect);
+        assert_eq!(tree_disconnect_header.message_id, MessageId(8));
+        assert_eq!(tree_disconnect_header.session_id, SessionId(55));
+        assert_eq!(tree_disconnect_header.tree_id, TreeId(9));
+        let frame = SessionMessage::decode(&transport.writes[8]).expect("frame should decode");
+        let tree_disconnect =
+            TreeDisconnectRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode");
+        assert_eq!(tree_disconnect, TreeDisconnectRequest);
+
+        let logoff_header = outbound_header(&transport.writes[9]);
+        assert_eq!(logoff_header.command, Command::Logoff);
+        assert_eq!(logoff_header.message_id, MessageId(9));
+        assert_eq!(logoff_header.session_id, SessionId(55));
+        assert_eq!(logoff_header.tree_id, TreeId(0));
+        let frame = SessionMessage::decode(&transport.writes[9]).expect("frame should decode");
+        let logoff = LogoffRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode");
+        assert_eq!(logoff, LogoffRequest);
     }
 
     #[tokio::test]

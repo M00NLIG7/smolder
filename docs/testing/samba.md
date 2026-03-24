@@ -12,10 +12,12 @@ This document now includes live interoperability gates against a real Samba serv
 - `NEGOTIATE`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> READ -> CLOSE`
+- `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> FLUSH -> CLOSE -> TREE_DISCONNECT -> LOGOFF`
 - high-level `write` / `read`
 - high-level `put` / `get`
 - high-level `list` / `stat`
 - high-level `rename` / `remove`
+- high-level `flush` / `disconnect` / `logoff`
 - CLI `cat`
 - CLI `get`
 - CLI `put`
@@ -153,28 +155,34 @@ The current live coverage now reaches:
 5. `WRITE`
 6. `READ`
 7. `CLOSE`
-8. high-level `write`
-9. high-level `read`
-10. high-level `put`
-11. high-level `get`
-12. high-level `list`
-13. high-level `stat`
-14. high-level `rename`
-15. high-level `remove`
-16. CLI `cat`
-17. CLI `get`
-18. CLI `put`
-19. CLI `ls`
-20. CLI `stat`
-21. CLI `mv`
-22. CLI `rm`
+8. `FLUSH`
+9. `TREE_DISCONNECT`
+10. `LOGOFF`
+11. high-level `write`
+12. high-level `read`
+13. high-level `put`
+14. high-level `get`
+15. high-level `list`
+16. high-level `stat`
+17. high-level `rename`
+18. high-level `remove`
+19. high-level `flush`
+20. high-level `disconnect`
+21. high-level `logoff`
+22. CLI `cat`
+23. CLI `get`
+24. CLI `put`
+25. CLI `ls`
+26. CLI `stat`
+27. CLI `mv`
+28. CLI `rm`
 
 The next practical interop gates are:
 
-1. `FLUSH`
-2. `TREE_DISCONNECT`
-3. `LOGOFF`
-4. deeper `QUERY_INFO` coverage beyond basic file metadata
-5. SMB 3.1.1 negotiate contexts and signing hardening
+1. asynchronous `STATUS_PENDING` / async-command handling
+2. deeper `QUERY_INFO` coverage beyond basic file metadata
+3. SMB 3.1.1 negotiate contexts and signing hardening
+4. `IOCTL`
+5. leases / durable handles / compounding
 
 After those pass consistently, the next step is wiring a repeatable Samba `selftest` / `smbtorture` harness for the product surface Smolder actually exposes.
