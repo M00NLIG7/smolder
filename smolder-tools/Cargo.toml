@@ -6,3 +6,11 @@ authors = ["M00NLIG7"]
 description = "Smolder tools - Part of the Smolder SMB toolkit"
 repository = "https://github.com/M00NLIG7/smolder"
 license = "MIT"
+
+[[bin]]
+name = "smolder"
+path = "src/main.rs"
+
+[dependencies]
+smolder-core = { path = "../smolder-core" }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt"] }
