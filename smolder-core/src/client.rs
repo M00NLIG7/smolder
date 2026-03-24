@@ -6,9 +6,11 @@ use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
     CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Header, MessageId,
     NegotiateRequest, NegotiateResponse, SessionId, SessionSetupRequest, SessionSetupResponse,
-    TreeConnectRequest, TreeConnectResponse, TreeId,
+    SessionSetupSecurityMode, SigningMode, TreeConnectRequest, TreeConnectResponse, TreeId,
 };
+use smolder_proto::smb::status::NtStatus;
 
+use crate::auth::AuthProvider;
 use crate::error::CoreError;
 use crate::transport::Transport;
 
@@ -32,6 +34,8 @@ pub struct Authenticated {
     pub session: SessionSetupResponse,
     /// Assigned session identifier.
     pub session_id: SessionId,
+    /// Exported session key from the authentication mechanism.
+    pub session_key: Option<Vec<u8>>,
 }
 
 /// The transport is connected to a tree and can issue file operations.
@@ -47,6 +51,8 @@ pub struct TreeConnected {
     pub session_id: SessionId,
     /// Assigned tree identifier.
     pub tree_id: TreeId,
+    /// Exported session key from the authentication mechanism.
+    pub session_key: Option<Vec<u8>>,
 }
 
 /// A typestate SMB connection over an abstract transport.
@@ -121,6 +127,72 @@ impl<T> Connection<T, Negotiated>
 where
     T: Transport + Send,
 {
+    /// Performs a multi-step authenticated `SESSION_SETUP` exchange.
+    pub async fn authenticate<A>(
+        mut self,
+        auth_provider: &mut A,
+    ) -> Result<Connection<T, Authenticated>, CoreError>
+    where
+        A: AuthProvider,
+    {
+        let negotiated = self.state.response.clone();
+        let security_mode = session_setup_security_mode(negotiated.security_mode);
+        let mut session_id = SessionId(0);
+        let mut next_token = auth_provider.initial_token(&negotiated)?;
+
+        loop {
+            let request = SessionSetupRequest {
+                flags: 0,
+                security_mode,
+                capabilities: 0,
+                channel: 0,
+                security_buffer: next_token,
+                previous_session_id: 0,
+            };
+            let (header, response) = self
+                .transact(
+                    Command::SessionSetup,
+                    request.encode(),
+                    session_id,
+                    TreeId(0),
+                    &[
+                        NtStatus::SUCCESS.to_u32(),
+                        NtStatus::MORE_PROCESSING_REQUIRED.to_u32(),
+                    ],
+                    SessionSetupResponse::decode,
+                )
+                .await?;
+
+            if header.session_id == SessionId(0) {
+                return Err(CoreError::InvalidResponse(
+                    "session setup response must assign a session id",
+                ));
+            }
+            if session_id != SessionId(0) && header.session_id != session_id {
+                return Err(CoreError::InvalidResponse(
+                    "session setup response changed the active session id",
+                ));
+            }
+
+            session_id = header.session_id;
+            if header.status == NtStatus::SUCCESS.to_u32() {
+                auth_provider.finish(&response.security_buffer)?;
+                return Ok(Connection {
+                    transport: self.transport,
+                    next_message_id: self.next_message_id,
+                    state: Authenticated {
+                        negotiated,
+                        session: response,
+                        session_id,
+                        session_key: auth_provider.session_key().map(ToOwned::to_owned),
+                    },
+                });
+            }
+
+            next_token = auth_provider.next_token(&response.security_buffer)?;
+        }
+    }
+
     /// Performs `SESSION_SETUP` and transitions into the authenticated state.
     pub async fn session_setup(
         mut self,
@@ -151,6 +223,7 @@ where
                 negotiated,
                 session: response,
                 session_id: header.session_id,
+                session_key: None,
             },
         })
     }
@@ -192,6 +265,7 @@ where
                 tree: response,
                 session_id: authenticated.session_id,
                 tree_id: header.tree_id,
+                session_key: authenticated.session_key,
             },
         })
     }
@@ -245,6 +319,12 @@ where
     #[must_use]
     pub fn tree_id(&self) -> TreeId {
         self.state.tree_id
+    }
+
+    /// Returns the exported session key for the authenticated session, if available.
+    #[must_use]
+    pub fn session_key(&self) -> Option<&[u8]> {
+        self.state.session_key.as_deref()
     }
 }
 
@@ -316,6 +396,17 @@ where
     }
 }
 
+fn session_setup_security_mode(signing_mode: SigningMode) -> SessionSetupSecurityMode {
+    let mut security_mode = SessionSetupSecurityMode::empty();
+    if signing_mode.contains(SigningMode::ENABLED) {
+        security_mode |= SessionSetupSecurityMode::SIGNING_ENABLED;
+    }
+    if signing_mode.contains(SigningMode::REQUIRED) {
+        security_mode |= SessionSetupSecurityMode::SIGNING_REQUIRED;
+    }
+    security_mode
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -329,7 +420,9 @@ mod tests {
         SessionSetupResponse, SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode,
         TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeId,
     };
+    use smolder_proto::smb::status::NtStatus;
 
+    use crate::auth::{AuthError, AuthProvider};
     use crate::client::Connection;
     use crate::transport::Transport;
 
@@ -364,13 +457,14 @@ mod tests {
 
     fn response_frame(
         command: Command,
+        status: u32,
         message_id: u64,
         session_id: u64,
         tree_id: u32,
         body: Vec<u8>,
     ) -> Vec<u8> {
         let mut header = Header::new(command, MessageId(message_id));
-        header.status = 0;
+        header.status = status;
         header.session_id = SessionId(session_id);
         header.tree_id = TreeId(tree_id);
 
@@ -384,6 +478,41 @@ mod tests {
     fn outbound_header(frame: &[u8]) -> Header {
         let frame = SessionMessage::decode(frame).expect("frame should decode");
         Header::decode(&frame.payload[..Header::LEN]).expect("header should decode")
+    }
+
+    fn outbound_session_setup(frame: &[u8]) -> SessionSetupRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        SessionSetupRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    #[derive(Debug)]
+    struct MockAuthProvider {
+        initial_token: Vec<u8>,
+        challenge_token: Vec<u8>,
+        final_token: Vec<u8>,
+        session_key: Option<Vec<u8>>,
+        finished: bool,
+    }
+
+    impl AuthProvider for MockAuthProvider {
+        fn initial_token(&mut self, _negotiate: &NegotiateResponse) -> Result<Vec<u8>, AuthError> {
+            Ok(self.initial_token.clone())
+        }
+
+        fn next_token(&mut self, incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
+            assert_eq!(incoming, self.challenge_token);
+            Ok(self.final_token.clone())
+        }
+
+        fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
+            assert!(incoming.is_empty());
+            self.finished = true;
+            Ok(())
+        }
+
+        fn session_key(&self) -> Option<&[u8]> {
+            self.session_key.as_deref()
+        }
     }
 
     #[tokio::test]
@@ -430,11 +559,46 @@ mod tests {
         };
 
         let transport = ScriptedTransport::new(vec![
-            response_frame(Command::Negotiate, 0, 0, 0, negotiate_response.encode()),
-            response_frame(Command::SessionSetup, 1, 55, 0, session_response.encode()),
-            response_frame(Command::TreeConnect, 2, 55, 9, tree_response.encode()),
-            response_frame(Command::Create, 3, 55, 9, create_response.encode()),
-            response_frame(Command::Close, 4, 55, 9, close_response.encode()),
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                55,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                55,
+                9,
+                tree_response.encode(),
+            ),
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                55,
+                9,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                55,
+                9,
+                close_response.encode(),
+            ),
         ]);
 
         let negotiate_request = NegotiateRequest {
@@ -484,6 +648,7 @@ mod tests {
 
         assert_eq!(connection.session_id(), SessionId(55));
         assert_eq!(connection.tree_id(), TreeId(9));
+        assert!(connection.session_key().is_none());
         assert_eq!(create.file_id, close_request.file_id);
         assert_eq!(close.end_of_file, 128);
 
@@ -518,5 +683,101 @@ mod tests {
         assert_eq!(close_header.message_id, MessageId(4));
         assert_eq!(close_header.session_id, SessionId(55));
         assert_eq!(close_header.tree_id, TreeId(9));
+    }
+
+    #[tokio::test]
+    async fn authenticate_loops_until_session_setup_succeeds() {
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED | SigningMode::REQUIRED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
+            server_guid: *b"server-guid-0001",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: Vec::new(),
+        };
+        let challenge_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: vec![0xaa, 0xbb, 0xcc],
+        };
+        let success_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: Vec::new(),
+        };
+
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::MORE_PROCESSING_REQUIRED.to_u32(),
+                1,
+                77,
+                0,
+                challenge_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                77,
+                0,
+                success_response.encode(),
+            ),
+        ]);
+
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0001",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let mut auth_provider = MockAuthProvider {
+            initial_token: vec![0x01, 0x02],
+            challenge_token: vec![0xaa, 0xbb, 0xcc],
+            final_token: vec![0x03, 0x04, 0x05],
+            session_key: Some(vec![0x55; 16]),
+            finished: false,
+        };
+
+        let connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut auth_provider)
+            .await
+            .expect("authenticate should succeed");
+
+        assert_eq!(connection.state().session_id, SessionId(77));
+        assert_eq!(connection.state().session_key, Some(vec![0x55; 16]));
+        assert!(auth_provider.finished);
+
+        let transport = connection.into_transport();
+        assert_eq!(transport.writes.len(), 3);
+
+        let first_setup_header = outbound_header(&transport.writes[1]);
+        assert_eq!(first_setup_header.session_id, SessionId(0));
+        let first_setup = outbound_session_setup(&transport.writes[1]);
+        assert_eq!(
+            first_setup.security_mode,
+            SessionSetupSecurityMode::SIGNING_ENABLED | SessionSetupSecurityMode::SIGNING_REQUIRED
+        );
+        assert_eq!(first_setup.security_buffer, vec![0x01, 0x02]);
+
+        let second_setup_header = outbound_header(&transport.writes[2]);
+        assert_eq!(second_setup_header.session_id, SessionId(77));
+        let second_setup = outbound_session_setup(&transport.writes[2]);
+        assert_eq!(second_setup.security_buffer, vec![0x03, 0x04, 0x05]);
     }
 }
