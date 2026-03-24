@@ -1,5 +1,5 @@
-//! Smolder tools crate
-//! 
+//! Smolder SMB protocol primitives.
+//!
 //! Copyright (c) 2025 M00NLIG7
 
 #![forbid(unsafe_code)]
@@ -9,4 +9,5 @@ pub mod prelude {
     //! Common types and traits
 }
 
+/// SMB protocol modules.
 pub mod smb;

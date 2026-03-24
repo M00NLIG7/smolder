@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 members = [
     "smolder-core",
     "smolder-proto",

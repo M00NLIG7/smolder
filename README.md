@@ -1,34 +1,55 @@
-# Smolder 🔥
+# Smolder
 
-A blazing fast, pure Rust implementation of the SMB protocol for security testing and assessment, inspired by projects like Impacket. This project aims to provide similar capabilities in a modern, memory-safe Rust environment.
+An SMB research toolkit in Rust. The current codebase is being rebuilt around a typed SMB2/3 protocol layer first, with transport, authentication, and higher-level tooling layered on top once the wire model is stable.
 
 ## Overview
 
-Smolder is a comprehensive SMB protocol toolkit written in Rust, designed specifically for security testing. It provides low-level control over SMB operations while maintaining high performance and memory safety.
+Smolder is organized as a small workspace:
 
-## Features
+- `smolder-proto`: SMB wire types, framing, codecs, and packet validation.
+- `smolder-core`: client/session logic and transport orchestration.
+- `smolder-tools`: tooling and integration helpers.
 
-- 🛡️ Pure Rust implementation of SMB protocol
-- 🚀 Async/await support for high performance
-- 🔧 Low-level protocol control for security testing
-- 🔒 NTLM and Kerberos authentication support
-- 🛠️ Example tools inspired by various security testing utilities
-- 📦 Zero external dependencies for core protocol implementation
+## Status
+
+Implemented now:
+
+- SMB2/3 packet header types
+- RFC1002 session framing
+- Typed wire bodies for `NEGOTIATE`, `SESSION_SETUP`, `TREE_CONNECT`, `CREATE`, and `CLOSE`
+- Unit tests for packet encode/decode round-trips
+
+Planned next:
+
+- Async transport and request dispatcher in `smolder-core`
+- NTLMv2/SPNEGO authentication
+- Live interoperability tests against Samba
+
+Not implemented yet:
+
+- Kerberos
+- Read/write/query operations
+- SMB1 compatibility
+- Full Samba `selftest` coverage
 
 ## Quick Start
 
 ```rust
-use smolder::prelude::*;
+use smolder_proto::smb::netbios::SessionMessage;
+use smolder_proto::smb::smb2::{Command, Header, MessageId, NegotiateRequest, Dialect, SigningMode, GlobalCapabilities};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let conn = SMBConnection::new()
-        .with_credentials(Credentials::ntlm("username", "password"))
-        .connect("192.168.1.1", 445)
-        .await?;
-    
-    // Your SMB operations here
-}
+let header = Header::new(Command::Negotiate, MessageId(1));
+let body = NegotiateRequest {
+    security_mode: SigningMode::ENABLED,
+    capabilities: GlobalCapabilities::LARGE_MTU,
+    client_guid: *b"0123456789abcdef",
+    dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+    negotiate_contexts: Vec::new(),
+};
+
+let mut packet = header.encode();
+packet.extend_from_slice(&body.encode()?);
+let frame = SessionMessage::new(packet).encode()?;
 ```
 
 ## Security Notice
