@@ -276,6 +276,7 @@ where
             share: self,
             file_id: response.file_id,
             position: 0,
+            end_of_file: response.end_of_file,
             closed: false,
         })
     }
@@ -459,6 +460,7 @@ pub struct RemoteFile<'a, T = TokioTcpTransport> {
     share: &'a mut Share<T>,
     file_id: FileId,
     position: u64,
+    end_of_file: u64,
     closed: bool,
 }
 
@@ -474,13 +476,20 @@ where
 
     /// Reads the next chunk into the provided buffer and returns the number of bytes read.
     pub async fn read_chunk(&mut self, buffer: &mut BytesMut) -> Result<usize, CoreError> {
+        if self.position >= self.end_of_file {
+            buffer.clear();
+            return Ok(0);
+        }
+
+        let remaining = self.end_of_file - self.position;
+        let read_length = remaining.min(u64::from(self.share.max_read_size())) as u32;
         let response = self
             .share
             .connection
             .read(&ReadRequest::for_file(
                 self.file_id,
                 self.position,
-                self.share.max_read_size(),
+                read_length,
             ))
             .await?;
         buffer.clear();
@@ -506,6 +515,7 @@ where
                 return Err(CoreError::InvalidResponse("short SMB write response"));
             }
             self.position += chunk.len() as u64;
+            self.end_of_file = self.end_of_file.max(self.position);
         }
         Ok(())
     }
@@ -869,22 +879,9 @@ mod tests {
                 .encode(),
             ),
             response_frame(
-                Command::Read,
-                NtStatus::SUCCESS.to_u32(),
-                6,
-                11,
-                7,
-                ReadResponse {
-                    data_remaining: 0,
-                    flags: ReadResponseFlags::empty(),
-                    data: Vec::new(),
-                }
-                .encode(),
-            ),
-            response_frame(
                 Command::Close,
                 NtStatus::SUCCESS.to_u32(),
-                7,
+                6,
                 11,
                 7,
                 close_response.encode(),
@@ -906,7 +903,7 @@ mod tests {
 
         let read_two = outbound_read(&writes[5]);
         assert_eq!(read_two.offset, 4);
-        assert_eq!(read_two.length, 4);
+        assert_eq!(read_two.length, 3);
     }
 
     #[tokio::test]

@@ -13,4 +13,4 @@ path = "src/main.rs"
 
 [dependencies]
 smolder-core = { path = "../smolder-core" }
-tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt"] }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt", "sync"] }
