@@ -45,6 +45,10 @@ pub enum Command {
     Create = 0x0005,
     /// `CLOSE`
     Close = 0x0006,
+    /// `READ`
+    Read = 0x0008,
+    /// `WRITE`
+    Write = 0x0009,
 }
 
 impl TryFrom<u16> for Command {
@@ -59,6 +63,8 @@ impl TryFrom<u16> for Command {
             0x0004 => Ok(Self::TreeDisconnect),
             0x0005 => Ok(Self::Create),
             0x0006 => Ok(Self::Close),
+            0x0008 => Ok(Self::Read),
+            0x0009 => Ok(Self::Write),
             _ => Err(ProtocolError::InvalidField {
                 field: "command",
                 reason: "unknown SMB2 command",

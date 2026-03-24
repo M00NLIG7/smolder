@@ -2,6 +2,7 @@
 
 mod create;
 mod header;
+mod io;
 mod negotiate;
 mod session;
 mod tree;
@@ -13,6 +14,10 @@ pub use create::{
     FileAttributes, FileId, OplockLevel, RequestedOplockLevel, ShareAccess,
 };
 pub use header::{Command, Header, HeaderFlags};
+pub use io::{
+    ReadFlags, ReadRequest, ReadResponse, ReadResponseFlags, WriteFlags, WriteRequest,
+    WriteResponse,
+};
 pub use negotiate::{
     Dialect, GlobalCapabilities, NegotiateContext, NegotiateRequest, NegotiateResponse, SigningMode,
 };

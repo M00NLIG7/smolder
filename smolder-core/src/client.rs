@@ -5,8 +5,9 @@ use tracing::{trace, trace_span, Instrument};
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
     CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Header, MessageId,
-    NegotiateRequest, NegotiateResponse, SessionId, SessionSetupRequest, SessionSetupResponse,
-    SessionSetupSecurityMode, SigningMode, TreeConnectRequest, TreeConnectResponse, TreeId,
+    NegotiateRequest, NegotiateResponse, ReadRequest, ReadResponse, SessionId, SessionSetupRequest,
+    SessionSetupResponse, SessionSetupSecurityMode, SigningMode, TreeConnectRequest,
+    TreeConnectResponse, TreeId, WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
 
@@ -292,6 +293,40 @@ where
         Ok(response)
     }
 
+    /// Performs a `READ` request on the active tree.
+    pub async fn read(&mut self, request: &ReadRequest) -> Result<ReadResponse, CoreError> {
+        let tree_id = self.state.tree_id;
+        let session_id = self.state.session_id;
+        let (_, response) = self
+            .transact(
+                Command::Read,
+                request.encode(),
+                session_id,
+                tree_id,
+                &[0],
+                ReadResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
+    /// Performs a `WRITE` request on the active tree.
+    pub async fn write(&mut self, request: &WriteRequest) -> Result<WriteResponse, CoreError> {
+        let tree_id = self.state.tree_id;
+        let session_id = self.state.session_id;
+        let (_, response) = self
+            .transact(
+                Command::Write,
+                request.encode(),
+                session_id,
+                tree_id,
+                &[0],
+                WriteResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
     /// Performs a `CLOSE` request on the active tree.
     pub async fn close(&mut self, request: &CloseRequest) -> Result<CloseResponse, CoreError> {
         let tree_id = self.state.tree_id;
@@ -416,9 +451,10 @@ mod tests {
     use smolder_proto::smb::smb2::{
         CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect,
         FileAttributes, FileId, GlobalCapabilities, Header, MessageId, NegotiateRequest,
-        NegotiateResponse, OplockLevel, SessionFlags, SessionId, SessionSetupRequest,
-        SessionSetupResponse, SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode,
-        TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeId,
+        NegotiateResponse, OplockLevel, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags,
+        SessionId, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
+        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeId,
+        WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
@@ -483,6 +519,16 @@ mod tests {
     fn outbound_session_setup(frame: &[u8]) -> SessionSetupRequest {
         let frame = SessionMessage::decode(frame).expect("frame should decode");
         SessionSetupRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    fn outbound_read(frame: &[u8]) -> ReadRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        ReadRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    fn outbound_write(frame: &[u8]) -> WriteRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        WriteRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
     }
 
     #[derive(Debug)]
@@ -551,6 +597,12 @@ mod tests {
             },
             create_contexts: Vec::new(),
         };
+        let write_response = WriteResponse { count: 5 };
+        let read_response = ReadResponse {
+            data_remaining: 0,
+            flags: ReadResponseFlags::empty(),
+            data: b"hello".to_vec(),
+        };
         let close_response = CloseResponse {
             flags: 0,
             allocation_size: 4096,
@@ -592,9 +644,25 @@ mod tests {
                 create_response.encode(),
             ),
             response_frame(
-                Command::Close,
+                Command::Write,
                 NtStatus::SUCCESS.to_u32(),
                 4,
+                55,
+                9,
+                write_response.encode(),
+            ),
+            response_frame(
+                Command::Read,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                55,
+                9,
+                read_response.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                6,
                 55,
                 9,
                 close_response.encode(),
@@ -618,6 +686,8 @@ mod tests {
         };
         let tree_request = TreeConnectRequest::from_unc(r"\\server\share");
         let create_request = CreateRequest::from_path("notes.txt");
+        let write_request = WriteRequest::for_file(create_response.file_id, 0, b"hello".to_vec());
+        let read_request = ReadRequest::for_file(create_response.file_id, 0, 5);
         let close_request = CloseRequest {
             flags: 0,
             file_id: create_response.file_id,
@@ -641,6 +711,14 @@ mod tests {
             .create(&create_request)
             .await
             .expect("create should succeed");
+        let write = connection
+            .write(&write_request)
+            .await
+            .expect("write should succeed");
+        let read = connection
+            .read(&read_request)
+            .await
+            .expect("read should succeed");
         let close = connection
             .close(&close_request)
             .await
@@ -650,10 +728,12 @@ mod tests {
         assert_eq!(connection.tree_id(), TreeId(9));
         assert!(connection.session_key().is_none());
         assert_eq!(create.file_id, close_request.file_id);
+        assert_eq!(write.count, 5);
+        assert_eq!(read.data, b"hello");
         assert_eq!(close.end_of_file, 128);
 
         let transport = connection.into_transport();
-        assert_eq!(transport.writes.len(), 5);
+        assert_eq!(transport.writes.len(), 7);
 
         let negotiate_header = outbound_header(&transport.writes[0]);
         assert_eq!(negotiate_header.command, Command::Negotiate);
@@ -678,9 +758,27 @@ mod tests {
         assert_eq!(create_header.session_id, SessionId(55));
         assert_eq!(create_header.tree_id, TreeId(9));
 
-        let close_header = outbound_header(&transport.writes[4]);
+        let write_header = outbound_header(&transport.writes[4]);
+        assert_eq!(write_header.command, Command::Write);
+        assert_eq!(write_header.message_id, MessageId(4));
+        assert_eq!(write_header.session_id, SessionId(55));
+        assert_eq!(write_header.tree_id, TreeId(9));
+        let write_body = outbound_write(&transport.writes[4]);
+        assert_eq!(write_body.data, b"hello");
+        assert_eq!(write_body.file_id, create_response.file_id);
+
+        let read_header = outbound_header(&transport.writes[5]);
+        assert_eq!(read_header.command, Command::Read);
+        assert_eq!(read_header.message_id, MessageId(5));
+        assert_eq!(read_header.session_id, SessionId(55));
+        assert_eq!(read_header.tree_id, TreeId(9));
+        let read_body = outbound_read(&transport.writes[5]);
+        assert_eq!(read_body.length, 5);
+        assert_eq!(read_body.file_id, create_response.file_id);
+
+        let close_header = outbound_header(&transport.writes[6]);
         assert_eq!(close_header.command, Command::Close);
-        assert_eq!(close_header.message_id, MessageId(4));
+        assert_eq!(close_header.message_id, MessageId(6));
         assert_eq!(close_header.session_id, SessionId(55));
         assert_eq!(close_header.tree_id, TreeId(9));
     }
