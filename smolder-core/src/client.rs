@@ -146,20 +146,50 @@ impl SigningState {
             ));
         }
 
-        let mut signed_packet = packet.to_vec();
-        let signature =
-            <[u8; 16]>::try_from(&signed_packet[Header::SIGNATURE_RANGE]).map_err(|_| {
-                CoreError::InvalidResponse("signed packet did not contain a full signature")
-            })?;
-        signed_packet[Header::SIGNATURE_RANGE].fill(0);
+        let signature = <[u8; 16]>::try_from(&packet[Header::SIGNATURE_RANGE]).map_err(|_| {
+            CoreError::InvalidResponse("signed packet did not contain a full signature")
+        })?;
 
-        if self.signature_for(&signed_packet)? != signature {
+        if self.signature_for_verification(packet)? != signature {
             return Err(CoreError::InvalidResponse(
                 "SMB response signature did not match the derived signing key",
             ));
         }
 
         Ok(())
+    }
+
+    fn signature_for_verification(&self, packet: &[u8]) -> Result<[u8; 16], CoreError> {
+        const ZERO_SIGNATURE: [u8; 16] = [0; 16];
+        let prefix = &packet[..Header::SIGNATURE_RANGE.start];
+        let suffix = &packet[Header::SIGNATURE_RANGE.end..];
+
+        match self.algorithm {
+            SigningAlgorithm::HmacSha256 => {
+                let mut mac = Hmac::<Sha256>::new_from_slice(&self.key).map_err(|_| {
+                    CoreError::InvalidInput("invalid SMB signing key for HMAC-SHA256")
+                })?;
+                mac.update(prefix);
+                mac.update(&ZERO_SIGNATURE);
+                mac.update(suffix);
+                let digest = mac.finalize().into_bytes();
+                let mut signature = [0u8; 16];
+                signature.copy_from_slice(&digest[..16]);
+                Ok(signature)
+            }
+            SigningAlgorithm::Aes128Cmac => {
+                let mut mac = Cmac::<Aes128>::new_from_slice(&self.key).map_err(|_| {
+                    CoreError::InvalidInput("invalid SMB signing key for AES-128-CMAC")
+                })?;
+                mac.update(prefix);
+                mac.update(&ZERO_SIGNATURE);
+                mac.update(suffix);
+                let digest = mac.finalize().into_bytes();
+                let mut signature = [0u8; 16];
+                signature.copy_from_slice(&digest[..16]);
+                Ok(signature)
+            }
+        }
     }
 
     fn signature_for(&self, packet: &[u8]) -> Result<[u8; 16], CoreError> {
