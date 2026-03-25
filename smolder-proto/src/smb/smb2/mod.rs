@@ -4,6 +4,7 @@ mod create;
 mod header;
 mod info;
 mod io;
+mod ioctl;
 mod negotiate;
 mod session;
 mod tree;
@@ -24,6 +25,10 @@ pub use info::{
 pub use io::{
     FlushRequest, FlushResponse, ReadFlags, ReadRequest, ReadResponse, ReadResponseFlags,
     WriteFlags, WriteRequest, WriteResponse,
+};
+pub use ioctl::{
+    CtlCode, IoctlFlags, IoctlRequest, IoctlResponse, NetworkAddress, NetworkInterfaceCapabilities,
+    NetworkInterfaceInfo, NetworkInterfaceInfoResponse, ResumeKeyResponse,
 };
 pub use negotiate::{
     Dialect, GlobalCapabilities, NegotiateContext, NegotiateContextType, NegotiateRequest,
@@ -87,6 +92,36 @@ fn slice_from_offset<'a>(
     field: &'static str,
 ) -> Result<&'a [u8], ProtocolError> {
     let offset = usize::from(offset_from_header);
+    if offset < HEADER_LEN {
+        return Err(ProtocolError::InvalidField {
+            field,
+            reason: "offset points before SMB2 body",
+        });
+    }
+
+    let start = offset - HEADER_LEN;
+    let end = start.checked_add(len).ok_or(ProtocolError::InvalidField {
+        field,
+        reason: "offset overflow",
+    })?;
+
+    if end > body.len() {
+        return Err(ProtocolError::UnexpectedEof { field });
+    }
+
+    Ok(&body[start..end])
+}
+
+fn slice_from_offset32<'a>(
+    body: &'a [u8],
+    offset_from_header: u32,
+    len: usize,
+    field: &'static str,
+) -> Result<&'a [u8], ProtocolError> {
+    let offset = usize::try_from(offset_from_header).map_err(|_| ProtocolError::InvalidField {
+        field,
+        reason: "offset overflow",
+    })?;
     if offset < HEADER_LEN {
         return Err(ProtocolError::InvalidField {
             field,

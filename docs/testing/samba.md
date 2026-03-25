@@ -14,6 +14,8 @@ This document now includes live interoperability gates against a real Samba serv
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> READ -> CLOSE`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> FLUSH -> CLOSE -> TREE_DISCONNECT -> LOGOFF`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> FLUSH -> CLOSE -> TREE_DISCONNECT -> LOGOFF`
+- `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> IOCTL(FSCTL_SRV_REQUEST_RESUME_KEY) -> CLOSE`
+- `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> IOCTL(FSCTL_QUERY_NETWORK_INTERFACE_INFO)`
 - high-level `write` / `read`
 - high-level `put` / `get`
 - high-level `list` / `stat`
@@ -160,24 +162,26 @@ The current live coverage now reaches:
 8. `FLUSH`
 9. `TREE_DISCONNECT`
 10. `LOGOFF`
-11. high-level `write`
-12. high-level `read`
-13. high-level `put`
-14. high-level `get`
-15. high-level `list`
-16. high-level `stat`
-17. high-level `rename`
-18. high-level `remove`
-19. high-level `flush`
-20. high-level `disconnect`
-21. high-level `logoff`
-22. CLI `cat`
-23. CLI `get`
-24. CLI `put`
-25. CLI `ls`
-26. CLI `stat`
-27. CLI `mv`
-28. CLI `rm`
+11. `IOCTL(FSCTL_SRV_REQUEST_RESUME_KEY)`
+12. `IOCTL(FSCTL_QUERY_NETWORK_INTERFACE_INFO)` when the server advertises multi-channel support
+13. high-level `write`
+14. high-level `read`
+15. high-level `put`
+16. high-level `get`
+17. high-level `list`
+18. high-level `stat`
+19. high-level `rename`
+20. high-level `remove`
+21. high-level `flush`
+22. high-level `disconnect`
+23. high-level `logoff`
+24. CLI `cat`
+25. CLI `get`
+26. CLI `put`
+27. CLI `ls`
+28. CLI `stat`
+29. CLI `mv`
+30. CLI `rm`
 
 The current engine also handles interim async SMB2 responses (`STATUS_PENDING` with `SMB2_FLAGS_ASYNC_COMMAND`) and keeps waiting for the final response on the same message id.
 
@@ -185,7 +189,7 @@ The next practical interop gates are:
 
 1. deeper `QUERY_INFO` coverage beyond basic file metadata
 2. stronger SMB 3.x response-signing coverage for more edge cases, including additional async and error paths
-3. `IOCTL`
+3. more `IOCTL` coverage beyond `FSCTL_SRV_REQUEST_RESUME_KEY` and `FSCTL_QUERY_NETWORK_INTERFACE_INFO`
 4. leases / durable handles / compounding
 5. encryption and negotiate-context expansion beyond preauth integrity
 

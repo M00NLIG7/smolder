@@ -118,6 +118,14 @@ pub struct FileId {
     pub volatile: u64,
 }
 
+impl FileId {
+    /// Sentinel file identifier used by tree-scoped SMB2 operations without an open handle.
+    pub const NONE: Self = Self {
+        persistent: u64::MAX,
+        volatile: u64::MAX,
+    };
+}
+
 /// SMB2 create request body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRequest {

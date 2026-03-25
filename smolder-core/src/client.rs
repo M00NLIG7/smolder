@@ -6,11 +6,12 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    AsyncId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect,
-    FlushRequest, FlushResponse, Header, HeaderFlags, LogoffRequest, LogoffResponse, MessageId,
-    NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
-    QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
-    ReadRequest, ReadResponse, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
+    AsyncId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect, FileId,
+    FlushRequest, FlushResponse, Header, HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest,
+    LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryRequest,
+    QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse,
+    ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
     SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, SigningMode, TreeConnectRequest,
     TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse, TreeId, WriteRequest,
     WriteResponse,
@@ -686,6 +687,50 @@ where
         Ok(response)
     }
 
+    /// Performs an `IOCTL` request on the active tree.
+    pub async fn ioctl(&mut self, request: &IoctlRequest) -> Result<IoctlResponse, CoreError> {
+        let context = RequestContext::new(
+            self.state.session_id,
+            self.state.tree_id,
+            self.state.signing_required,
+            self.state.signing.clone(),
+        );
+        let (_, response) = self
+            .transact(
+                Command::Ioctl,
+                request.encode(),
+                context,
+                &[NtStatus::SUCCESS.to_u32()],
+                IoctlResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
+    /// Queries the server's network-interface inventory through `FSCTL_QUERY_NETWORK_INTERFACE_INFO`.
+    pub async fn query_network_interfaces(
+        &mut self,
+        max_output_response: u32,
+    ) -> Result<NetworkInterfaceInfoResponse, CoreError> {
+        let response = self
+            .ioctl(&IoctlRequest::query_network_interface_info(
+                max_output_response,
+            ))
+            .await?;
+        NetworkInterfaceInfoResponse::decode(&response.output).map_err(CoreError::from)
+    }
+
+    /// Requests a server-side resume key for an open file handle.
+    pub async fn request_resume_key(
+        &mut self,
+        file_id: FileId,
+    ) -> Result<ResumeKeyResponse, CoreError> {
+        let response = self
+            .ioctl(&IoctlRequest::request_resume_key(file_id))
+            .await?;
+        ResumeKeyResponse::decode(&response.output).map_err(CoreError::from)
+    }
+
     /// Performs a `QUERY_DIRECTORY` request on the active tree.
     pub async fn query_directory(
         &mut self,
@@ -1184,12 +1229,12 @@ mod tests {
     use smolder_proto::smb::smb2::{
         AsyncId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect,
         FileAttributes, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
-        HeaderFlags, LogoffRequest, LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse,
-        OplockLevel, PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest,
-        ReadResponse, ReadResponseFlags, SessionFlags, SessionId, SessionSetupRequest,
-        SessionSetupResponse, SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode,
-        TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeId,
-        WriteRequest, WriteResponse,
+        HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest, LogoffResponse, MessageId,
+        NegotiateRequest, NegotiateResponse, OplockLevel, PreauthIntegrityCapabilities,
+        PreauthIntegrityHashId, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags,
+        SessionId, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
+        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
+        TreeDisconnectRequest, TreeId, WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
@@ -1320,6 +1365,11 @@ mod tests {
     fn outbound_flush(frame: &[u8]) -> FlushRequest {
         let frame = SessionMessage::decode(frame).expect("frame should decode");
         FlushRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    fn outbound_ioctl(frame: &[u8]) -> IoctlRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        IoctlRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
     }
 
     fn preauth_context(salt: &[u8]) -> smolder_proto::smb::smb2::NegotiateContext {
@@ -1790,6 +1840,280 @@ mod tests {
         assert_eq!(second_setup_header.session_id, SessionId(77));
         let second_setup = outbound_session_setup(&transport.writes[2]);
         assert_eq!(second_setup.security_buffer, vec![0x03, 0x04, 0x05]);
+    }
+
+    #[tokio::test]
+    async fn ioctl_queries_network_interfaces_on_tree_connection() {
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![preauth_context(b"server-salt-0001")],
+            server_guid: *b"server-guid-0001",
+            capabilities: GlobalCapabilities::DFS | GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: vec![0xa1, 0x01],
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let ioctl_response = IoctlResponse {
+            ctl_code: smolder_proto::smb::smb2::CtlCode::FSCTL_QUERY_NETWORK_INTERFACE_INFO,
+            file_id: FileId::NONE,
+            input: Vec::new(),
+            output: {
+                let mut output = Vec::new();
+                output.extend_from_slice(&0u32.to_le_bytes());
+                output.extend_from_slice(&7u32.to_le_bytes());
+                output.extend_from_slice(&0u32.to_le_bytes());
+                output.extend_from_slice(&0u32.to_le_bytes());
+                output.extend_from_slice(&10_000_000u64.to_le_bytes());
+                let mut sockaddr = [0u8; 128];
+                sockaddr[0..2].copy_from_slice(&0x0002u16.to_le_bytes());
+                sockaddr[4..8].copy_from_slice(&[192, 168, 1, 10]);
+                output.extend_from_slice(&sockaddr);
+                output
+            },
+            flags: 0,
+        };
+
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                55,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                55,
+                9,
+                tree_response.encode(),
+            ),
+            response_frame(
+                Command::Ioctl,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                55,
+                9,
+                ioctl_response.encode(),
+            ),
+        ]);
+
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0001",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client-salt-0001")],
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+
+        let mut connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .session_setup(&session_request)
+            .await
+            .expect("session setup should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+
+        let interfaces = connection
+            .query_network_interfaces(16 * 1024)
+            .await
+            .expect("ioctl query should succeed");
+
+        assert_eq!(interfaces.interfaces.len(), 1);
+        let transport = connection.into_transport();
+        let header = outbound_header(&transport.writes[3]);
+        assert_eq!(header.command, Command::Ioctl);
+        assert_eq!(header.message_id, MessageId(3));
+        assert_eq!(header.session_id, SessionId(55));
+        assert_eq!(header.tree_id, TreeId(9));
+        let request = outbound_ioctl(&transport.writes[3]);
+        assert_eq!(
+            request.ctl_code,
+            smolder_proto::smb::smb2::CtlCode::FSCTL_QUERY_NETWORK_INTERFACE_INFO
+        );
+        assert_eq!(request.file_id, FileId::NONE);
+        assert!(request.input.is_empty());
+        assert_eq!(request.max_output_response, 16 * 1024);
+    }
+
+    #[tokio::test]
+    async fn ioctl_requests_resume_key_for_open_file() {
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![preauth_context(b"server-salt-0001")],
+            server_guid: *b"server-guid-0001",
+            capabilities: GlobalCapabilities::DFS | GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: vec![0xa1, 0x01],
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4096,
+            end_of_file: 128,
+            file_id: FileId {
+                persistent: 0x11,
+                volatile: 0x22,
+            },
+            create_contexts: Vec::new(),
+        };
+        let ioctl_response = IoctlResponse {
+            ctl_code: smolder_proto::smb::smb2::CtlCode::FSCTL_SRV_REQUEST_RESUME_KEY,
+            file_id: create_response.file_id,
+            input: Vec::new(),
+            output: {
+                let mut output = Vec::new();
+                output.extend(0u8..24u8);
+                output.extend_from_slice(&0u32.to_le_bytes());
+                output.extend_from_slice(&[0, 0, 0, 0]);
+                output
+            },
+            flags: 0,
+        };
+
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                55,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                55,
+                9,
+                tree_response.encode(),
+            ),
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                55,
+                9,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Ioctl,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                55,
+                9,
+                ioctl_response.encode(),
+            ),
+        ]);
+
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0001",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client-salt-0001")],
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+
+        let mut connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .session_setup(&session_request)
+            .await
+            .expect("session setup should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+        let create = connection
+            .create(&CreateRequest::from_path("notes.txt"))
+            .await
+            .expect("create should succeed");
+
+        let resume_key = connection
+            .request_resume_key(create.file_id)
+            .await
+            .expect("resume-key ioctl should succeed");
+
+        assert_eq!(resume_key.resume_key[0], 0);
+        assert_eq!(resume_key.resume_key[23], 23);
+        assert!(resume_key.context.is_empty());
+
+        let transport = connection.into_transport();
+        let header = outbound_header(&transport.writes[4]);
+        assert_eq!(header.command, Command::Ioctl);
+        let request = outbound_ioctl(&transport.writes[4]);
+        assert_eq!(
+            request.ctl_code,
+            smolder_proto::smb::smb2::CtlCode::FSCTL_SRV_REQUEST_RESUME_KEY
+        );
+        assert_eq!(request.file_id, create_response.file_id);
+        assert_eq!(request.max_output_response, 32);
     }
 
     #[tokio::test]

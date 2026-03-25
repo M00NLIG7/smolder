@@ -52,6 +52,8 @@ pub enum Command {
     Read = 0x0008,
     /// `WRITE`
     Write = 0x0009,
+    /// `IOCTL`
+    Ioctl = 0x000b,
     /// `QUERY_DIRECTORY`
     QueryDirectory = 0x000e,
     /// `QUERY_INFO`
@@ -75,6 +77,7 @@ impl TryFrom<u16> for Command {
             0x0007 => Ok(Self::Flush),
             0x0008 => Ok(Self::Read),
             0x0009 => Ok(Self::Write),
+            0x000b => Ok(Self::Ioctl),
             0x000e => Ok(Self::QueryDirectory),
             0x0010 => Ok(Self::QueryInfo),
             0x0011 => Ok(Self::SetInfo),

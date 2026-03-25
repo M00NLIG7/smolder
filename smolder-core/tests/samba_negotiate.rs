@@ -243,3 +243,71 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
         .await
         .expect("Samba should log off the session");
 }
+
+#[tokio::test]
+async fn queries_network_interfaces_with_ioctl_when_configured() {
+    let Some((_config, mut connection)) = authenticated_tree_connection().await else {
+        return;
+    };
+
+    let dialect = connection.state().negotiated.dialect_revision;
+    if !matches!(dialect, Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311) {
+        eprintln!("skipping ioctl test: negotiated dialect {dialect:?} is not SMB 3.x");
+        return;
+    }
+    if !connection
+        .state()
+        .negotiated
+        .capabilities
+        .contains(GlobalCapabilities::MULTI_CHANNEL)
+    {
+        eprintln!("skipping ioctl test: server did not advertise multi-channel support");
+        return;
+    }
+
+    let interfaces = connection
+        .query_network_interfaces(64 * 1024)
+        .await
+        .expect("Samba should answer FSCTL_QUERY_NETWORK_INTERFACE_INFO");
+
+    assert!(
+        !interfaces.interfaces.is_empty(),
+        "server should report at least one network interface"
+    );
+}
+
+#[tokio::test]
+async fn requests_resume_key_with_ioctl_when_configured() {
+    let Some((_config, mut connection)) = authenticated_tree_connection().await else {
+        return;
+    };
+
+    let path = unique_test_file_path();
+    let mut create_request = CreateRequest::from_path(&path);
+    create_request.create_disposition = CreateDisposition::Create;
+    create_request.create_options |= CreateOptions::DELETE_ON_CLOSE;
+    create_request.desired_access |= 0x0001_0000;
+    create_request.share_access |= ShareAccess::DELETE;
+
+    let created = connection
+        .create(&create_request)
+        .await
+        .expect("Samba should create the resume-key test file");
+    let resume_key = connection
+        .request_resume_key(created.file_id)
+        .await
+        .expect("Samba should answer FSCTL_SRV_REQUEST_RESUME_KEY");
+    let closed = connection
+        .close(&CloseRequest {
+            flags: 0,
+            file_id: created.file_id,
+        })
+        .await
+        .expect("Samba should close the resume-key test file");
+
+    assert_eq!(closed.flags, 0);
+    assert!(
+        resume_key.resume_key.iter().any(|byte| *byte != 0),
+        "server should return a non-zero opaque resume key"
+    );
+}
