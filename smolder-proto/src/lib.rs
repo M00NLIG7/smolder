@@ -9,5 +9,8 @@ pub mod prelude {
     //! Common types and traits
 }
 
+/// RPC protocol modules.
+pub mod rpc;
+
 /// SMB protocol modules.
 pub mod smb;
