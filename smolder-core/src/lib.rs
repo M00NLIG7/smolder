@@ -9,7 +9,6 @@ pub mod auth;
 pub mod client;
 pub mod error;
 pub mod fs;
-pub mod remote_exec;
 pub mod prelude {
     //! Common types and traits
 
@@ -19,10 +18,6 @@ pub mod prelude {
     pub use crate::fs::{
         Lease, LeaseRequest, OpenOptions, RemoteFile, Share, SmbClient, SmbClientBuilder,
         SmbDirectoryEntry, SmbMetadata,
-    };
-    pub use crate::remote_exec::{
-        ExecMode, ExecRequest, ExecResult, InteractiveReader, InteractiveSession, InteractiveStdin,
-        InteractiveWaiter, RemoteExecBuilder, RemoteExecClient,
     };
     pub use crate::transport::{TokioTcpTransport, Transport};
 }

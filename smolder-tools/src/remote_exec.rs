@@ -18,10 +18,10 @@ use smolder_proto::smb::smb2::{
 };
 use smolder_proto::smb::status::NtStatus;
 
-use crate::auth::{NtlmAuthenticator, NtlmCredentials};
-use crate::client::{Connection, TreeConnected};
-use crate::error::CoreError;
-use crate::transport::TokioTcpTransport;
+use smolder_core::auth::{NtlmAuthenticator, NtlmCredentials};
+use smolder_core::client::{Connection, TreeConnected};
+use smolder_core::error::CoreError;
+use smolder_core::transport::TokioTcpTransport;
 
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -2008,7 +2008,7 @@ mod tests {
     fn remote_binary_name_rejects_separators() {
         let error =
             normalize_remote_file_name(r"bad\name.exe").expect_err("separator should be rejected");
-        assert!(matches!(error, crate::error::CoreError::PathInvalid(_)));
+        assert!(matches!(error, smolder_core::error::CoreError::PathInvalid(_)));
     }
 
     #[test]

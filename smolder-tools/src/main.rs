@@ -4,9 +4,9 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use smolder_core::prelude::{
-    ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, NtlmCredentials, RemoteExecClient,
-    SmbClient, SmbMetadata,
+use smolder_core::prelude::{NtlmCredentials, SmbClient, SmbMetadata};
+use smolder_tools::prelude::{
+    ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, RemoteExecClient,
 };
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -761,6 +761,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use smolder_tools::prelude::ExecRequest;
+
     use super::{
         parse_cli, parse_duration, parse_exec_target, parse_remote_location,
         parse_remote_location_with_options, Command, ExecTarget, RemoteLocation,
@@ -918,7 +920,7 @@ mod tests {
                 );
                 assert_eq!(
                     request,
-                    smolder_core::prelude::ExecRequest::command("whoami")
+                    ExecRequest::command("whoami")
                         .with_timeout(Duration::from_secs(30))
                 );
             }
@@ -957,7 +959,7 @@ mod tests {
                 );
                 assert_eq!(
                     request,
-                    smolder_core::prelude::ExecRequest::command("dir")
+                    ExecRequest::command("dir")
                         .with_working_directory("C:\\Temp")
                 );
                 assert_eq!(service_binary, None);
@@ -1020,7 +1022,7 @@ mod tests {
                 assert!(interactive);
                 assert_eq!(
                     request,
-                    smolder_core::prelude::ExecRequest::command(String::new())
+                    ExecRequest::command(String::new())
                 );
             }
             other => panic!("unexpected command variant: {other:?}"),
