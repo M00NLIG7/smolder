@@ -26,6 +26,8 @@ use crate::transport::TokioTcpTransport;
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const OUTPUT_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+const OUTPUT_SETTLE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const PIPE_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const ADMIN_SHARE_ROOT: &str = r"C:\Windows";
 const DEFAULT_STAGING_DIR: &str = r"Temp";
@@ -42,6 +44,7 @@ const SC_MANAGER_CONNECT: u32 = 0x0001;
 const SERVICE_ALL_ACCESS: u32 = 0x000f_01ff;
 const SERVICE_WIN32_OWN_PROCESS: u32 = 0x0000_0010;
 const SERVICE_DEMAND_START: u32 = 0x0000_0003;
+const SERVICE_STOPPED: u32 = 0x0000_0001;
 const ERROR_SERVICE_REQUEST_TIMEOUT: u32 = 1053;
 const SVCCTL_CONTEXT_ID: u16 = 0;
 const SVCCTL_SYNTAX: SyntaxId = SyntaxId::new(
@@ -589,11 +592,14 @@ impl RemoteExecClient {
 
         let service_name = command_paths.service_name.clone();
         let execution = async {
+            let script = match mode {
+                ExecMode::SmbExec => build_smbexec_script(&request, &command_paths),
+                ExecMode::PsExec => build_psexec_script(&request),
+            };
+            admin
+                .write_all(&command_paths.script_relative, script.as_bytes())
+                .await?;
             if matches!(mode, ExecMode::PsExec) {
-                let script = build_psexec_script(&request);
-                admin
-                    .write_all(&command_paths.script_relative, script.as_bytes())
-                    .await?;
                 if let Some(service_binary) = &self.psexec_service_binary {
                     let payload = fs::read(service_binary).await.map_err(CoreError::LocalIo)?;
                     admin
@@ -603,16 +609,25 @@ impl RemoteExecClient {
             }
 
             let service_command = match mode {
-                ExecMode::SmbExec => build_smbexec_service_command(
-                    &request,
-                    &command_paths.stdout_absolute,
-                    &command_paths.exit_absolute,
-                ),
+                ExecMode::SmbExec => build_smbexec_service_command(&command_paths),
                 ExecMode::PsExec => build_psexec_service_command(
                     self.psexec_service_binary.as_deref(),
                     &command_paths,
                 ),
             };
+            if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
+                eprintln!(
+                    "remote exec mode={:?} service={} script={} runner={} stdout={} stderr={} exit={} command={}",
+                    mode,
+                    service_name,
+                    command_paths.script_relative,
+                    command_paths.runner_relative,
+                    command_paths.stdout_relative,
+                    command_paths.stderr_relative,
+                    command_paths.exit_relative,
+                    service_command
+                );
+            }
 
             let scm_handle = scm.open_sc_manager().await?;
             let service_handle = scm
@@ -624,6 +639,10 @@ impl RemoteExecClient {
                 let _ = scm.close_handle(&service_handle).await;
                 let _ = scm.close_handle(&scm_handle).await;
                 return Err(error);
+            }
+            if matches!(mode, ExecMode::SmbExec) {
+                scm.wait_for_service_stop(&service_handle, timeout_budget, self.poll_interval)
+                    .await?;
             }
 
             let exec_result = wait_for_result(
@@ -643,15 +662,18 @@ impl RemoteExecClient {
         }
         .await;
 
-        let _ = admin.try_remove(&command_paths.stdout_relative).await;
-        let _ = admin.try_remove(&command_paths.stderr_relative).await;
-        let _ = admin.try_remove(&command_paths.exit_relative).await;
-        if matches!(mode, ExecMode::PsExec) {
+        if std::env::var_os("SMOLDER_KEEP_REMOTE_ARTIFACTS").is_none() {
+            let _ = admin.try_remove(&command_paths.stdout_relative).await;
+            let _ = admin.try_remove(&command_paths.stderr_relative).await;
+            let _ = admin.try_remove(&command_paths.exit_relative).await;
+            let _ = admin.try_remove(&command_paths.runner_relative).await;
             let _ = admin.try_remove(&command_paths.script_relative).await;
-            if self.psexec_service_binary.is_some() {
-                let _ = admin
-                    .try_remove(&command_paths.service_binary_relative)
-                    .await;
+            if matches!(mode, ExecMode::PsExec) {
+                if self.psexec_service_binary.is_some() {
+                    let _ = admin
+                        .try_remove(&command_paths.service_binary_relative)
+                        .await;
+                }
             }
         }
 
@@ -703,11 +725,13 @@ struct CommandPaths {
     stderr_relative: String,
     exit_relative: String,
     script_relative: String,
+    runner_relative: String,
     service_binary_relative: String,
     stdout_absolute: String,
     stderr_absolute: String,
     exit_absolute: String,
     script_absolute: String,
+    runner_absolute: String,
     service_binary_absolute: String,
 }
 
@@ -719,6 +743,7 @@ impl CommandPaths {
         let stderr_relative = join_share_path(staging_directory, &format!("{prefix}.err"));
         let exit_relative = join_share_path(staging_directory, &format!("{prefix}.exit"));
         let script_relative = join_share_path(staging_directory, &format!("{prefix}.cmd"));
+        let runner_relative = join_share_path(staging_directory, &format!("{prefix}.bat"));
         let service_binary_relative =
             join_share_path(staging_directory, &format!("{prefix}-{psexec_binary_name}"));
         let service_name = format!("SMOLDER{token:016X}");
@@ -729,11 +754,13 @@ impl CommandPaths {
             stderr_absolute: admin_absolute_path(&stderr_relative),
             exit_absolute: admin_absolute_path(&exit_relative),
             script_absolute: admin_absolute_path(&script_relative),
+            runner_absolute: admin_absolute_path(&runner_relative),
             service_binary_absolute: admin_absolute_path(&service_binary_relative),
             stdout_relative,
             stderr_relative,
             exit_relative,
             script_relative,
+            runner_relative,
             service_binary_relative,
         }
     }
@@ -794,18 +821,17 @@ impl ScmClient {
     ) -> Result<ScHandle, CoreError> {
         let mut stub = NdrWriter::new();
         stub.write_context_handle(scm_handle);
-        stub.write_unique_wide_string(Some(service_name));
+        stub.write_wide_string(service_name);
         stub.write_unique_wide_string(Some(service_name));
         stub.write_u32(SERVICE_ALL_ACCESS);
         stub.write_u32(SERVICE_WIN32_OWN_PROCESS);
         stub.write_u32(SERVICE_DEMAND_START);
         stub.write_u32(0);
-        stub.write_unique_wide_string(Some(binary_path));
+        stub.write_wide_string(binary_path);
         stub.write_unique_wide_string(None);
-        stub.write_non_null_pointer();
-        stub.write_u32(0);
         stub.write_u32(0);
         stub.write_unique_bytes(None);
+        stub.write_u32(0);
         stub.write_unique_wide_string(None);
         stub.write_u32(0);
         stub.write_unique_bytes(None);
@@ -819,7 +845,7 @@ impl ScmClient {
         stub.write_u32(0);
         stub.write_u32(0);
         let response = self.rpc.call(19, stub.into_bytes()).await?;
-        let status = parse_u32_status(&response, "start_service")?;
+        let status = read_u32_status(&response)?;
         if status == 0 || status == ERROR_SERVICE_REQUEST_TIMEOUT {
             return Ok(());
         }
@@ -833,7 +859,7 @@ impl ScmClient {
         let mut stub = NdrWriter::new();
         stub.write_context_handle(service_handle);
         let response = self.rpc.call(2, stub.into_bytes()).await?;
-        let status = parse_u32_status(&response, "delete_service")?;
+        let status = read_u32_status(&response)?;
         if status == 0 {
             return Ok(());
         }
@@ -841,6 +867,32 @@ impl ScmClient {
             operation: "delete_service",
             code: status,
         })
+    }
+
+    async fn wait_for_service_stop(
+        &mut self,
+        service_handle: &ScHandle,
+        timeout_budget: Duration,
+        poll_interval: Duration,
+    ) -> Result<(), CoreError> {
+        let deadline = Instant::now() + timeout_budget;
+        loop {
+            let current_state = self.query_service_status(service_handle).await?;
+            if current_state == SERVICE_STOPPED {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(CoreError::Timeout("waiting for service to stop"));
+            }
+            sleep(poll_interval).await;
+        }
+    }
+
+    async fn query_service_status(&mut self, service_handle: &ScHandle) -> Result<u32, CoreError> {
+        let mut stub = NdrWriter::new();
+        stub.write_context_handle(service_handle);
+        let response = self.rpc.call(6, stub.into_bytes()).await?;
+        parse_query_service_status_response(&response)
     }
 
     async fn close_handle(&mut self, handle: &ScHandle) -> Result<(), CoreError> {
@@ -880,6 +932,9 @@ impl RpcPipeClient {
         });
         let response = self.pipe.call(bind.encode()).await?;
         let packet = Packet::decode(&response)?;
+        if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
+            eprintln!("rpc bind packet={:?}", packet);
+        }
         let Packet::BindAck(BindAckPdu { result, .. }) = packet else {
             return Err(CoreError::InvalidResponse("expected rpc bind ack"));
         };
@@ -903,7 +958,11 @@ impl RpcPipeClient {
             stub_data,
         });
         let response = self.pipe.call(request.encode()).await?;
-        match Packet::decode(&response)? {
+        let packet = Packet::decode(&response)?;
+        if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
+            eprintln!("rpc call opnum={} packet={:?}", opnum, packet);
+        }
+        match packet {
             Packet::Response(ResponsePdu { stub_data, .. }) => Ok(stub_data),
             Packet::Fault(fault) => Err(CoreError::RemoteOperation {
                 operation: "rpc_fault",
@@ -993,6 +1052,7 @@ impl NamedPipeClient {
             .max_transact_size
             .min(connection.state().negotiated.max_read_size)
             .min(connection.state().negotiated.max_write_size)
+            .min(u32::from(u16::MAX))
             .max(1024);
 
         Ok(Self {
@@ -1107,8 +1167,18 @@ struct AdminShare {
 impl AdminShare {
     async fn connect(config: &SessionConfig, share: &str) -> Result<Self, CoreError> {
         let connection = connect_tree(config, share).await?;
-        let max_read_size = connection.state().negotiated.max_read_size.max(1);
-        let max_write_size = connection.state().negotiated.max_write_size.max(1);
+        let max_read_size = connection
+            .state()
+            .negotiated
+            .max_read_size
+            .min(u32::from(u16::MAX))
+            .max(1);
+        let max_write_size = connection
+            .state()
+            .negotiated
+            .max_write_size
+            .min(u32::from(u16::MAX))
+            .max(1);
         Ok(Self {
             connection,
             max_read_size,
@@ -1130,10 +1200,15 @@ impl AdminShare {
         let mut output = Vec::new();
         let read_result = async {
             loop {
-                let response = self
+                let response = match self
                     .connection
                     .read(&ReadRequest::for_file(file_id, offset, self.max_read_size))
-                    .await?;
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) if is_end_of_file(&error) => break,
+                    Err(error) => return Err(error),
+                };
                 if response.data.is_empty() {
                     break;
                 }
@@ -1323,18 +1398,8 @@ async fn wait_for_result(
         .map_err(|_| CoreError::Timeout("waiting for remote command completion"))??;
         if let Some(exit_contents) = exit_contents {
             let exit_code = parse_exit_code(&exit_contents)?;
-            let stdout = admin
-                .read_if_exists(&paths.stdout_relative)
-                .await?
-                .unwrap_or_default();
-            let stderr = if matches!(mode, ExecMode::PsExec) {
-                admin
-                    .read_if_exists(&paths.stderr_relative)
-                    .await?
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let (stdout, stderr) =
+                collect_command_output(mode, admin, paths, deadline, poll_interval).await?;
             return Ok(ExecResult {
                 mode,
                 service_name: paths.service_name.clone(),
@@ -1351,6 +1416,36 @@ async fn wait_for_result(
     }
 }
 
+async fn collect_command_output(
+    mode: ExecMode,
+    admin: &mut AdminShare,
+    paths: &CommandPaths,
+    deadline: Instant,
+    poll_interval: Duration,
+) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
+    let settle_deadline = deadline.min(Instant::now() + OUTPUT_SETTLE_TIMEOUT.max(poll_interval));
+    loop {
+        let stdout = admin
+            .read_if_exists(&paths.stdout_relative)
+            .await?
+            .unwrap_or_default();
+        let stderr = if matches!(mode, ExecMode::PsExec) {
+            admin
+                .read_if_exists(&paths.stderr_relative)
+                .await?
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        if !stdout.is_empty() || !stderr.is_empty() || Instant::now() >= settle_deadline {
+            return Ok((stdout, stderr));
+        }
+
+        sleep(OUTPUT_SETTLE_RETRY_INTERVAL).await;
+    }
+}
+
 fn default_negotiate_contexts(dialects: &[Dialect]) -> Vec<NegotiateContext> {
     if !dialects.contains(&Dialect::Smb311) {
         return Vec::new();
@@ -1364,15 +1459,8 @@ fn default_negotiate_contexts(dialects: &[Dialect]) -> Vec<NegotiateContext> {
     )]
 }
 
-fn build_smbexec_service_command(
-    request: &ExecRequest,
-    stdout_absolute: &str,
-    exit_absolute: &str,
-) -> String {
-    let command = request_command_fragment(request);
-    format!(
-        r#"%COMSPEC% /Q /V:ON /c "({command}) > "{stdout_absolute}" 2>&1 & echo !ERRORLEVEL! > "{exit_absolute}"""#
-    )
+fn build_smbexec_service_command(command_paths: &CommandPaths) -> String {
+    format!(r#"%COMSPEC% /Q /c {}"#, command_paths.script_absolute)
 }
 
 fn build_psexec_service_command(
@@ -1431,19 +1519,71 @@ fn build_psexec_script(request: &ExecRequest) -> String {
     script
 }
 
-fn request_command_fragment(request: &ExecRequest) -> String {
-    match &request.working_directory {
-        Some(working_directory) => {
-            format!(
-                r#"cd /d "{working_directory}" && {}"#,
-                request.command_text().expect("validated non-empty command")
-            )
-        }
-        None => request
-            .command_text()
-            .expect("validated non-empty command")
-            .to_string(),
+fn build_smbexec_script(
+    request: &ExecRequest,
+    command_paths: &CommandPaths,
+) -> String {
+    let runner_script = build_smbexec_runner_script(request, command_paths);
+    let runner_path = quote_windows_arg(&command_paths.runner_absolute);
+    let mut script = String::from("@echo off\r\n");
+    for (index, line) in runner_script
+        .split("\r\n")
+        .filter(|line| !line.is_empty())
+        .enumerate()
+    {
+        let redirect = if index == 0 { ">" } else { ">>" };
+        script.push_str("echo ");
+        script.push_str(&escape_cmd_for_echo(line));
+        script.push(' ');
+        script.push_str(redirect);
+        script.push(' ');
+        script.push_str(&runner_path);
+        script.push_str("\r\n");
     }
+    script.push_str(&format!(r#"%COMSPEC% /Q /c {runner_path}"#));
+    script.push_str("\r\n");
+    script.push_str(&format!(r#"del {runner_path}"#));
+    script.push_str("\r\n");
+    script
+}
+
+fn build_smbexec_runner_script(
+    request: &ExecRequest,
+    command_paths: &CommandPaths,
+) -> String {
+    let stdout_path = quote_windows_arg(&command_paths.stdout_absolute);
+    let exit_path = quote_windows_arg(&command_paths.exit_absolute);
+    let mut script = String::from("@echo off\r\n");
+    if let Some(working_directory) = &request.working_directory {
+        script.push_str(&format!(r#"cd /d "{working_directory}""#));
+        script.push_str("\r\n");
+        script.push_str("if errorlevel 1 goto write_exit\r\n");
+    }
+    script.push_str(request.command_text().expect("validated non-empty command"));
+    script.push_str(&format!(r#" > {stdout_path} 2>&1"#));
+    script.push_str("\r\n");
+    script.push_str(":write_exit\r\n");
+    script.push_str(&format!(r#"echo %ERRORLEVEL% > {exit_path}"#));
+    script.push_str("\r\n");
+    script
+}
+
+fn escape_cmd_for_echo(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '^' => escaped.push_str("^^"),
+            '&' => escaped.push_str("^&"),
+            '|' => escaped.push_str("^|"),
+            '<' => escaped.push_str("^<"),
+            '>' => escaped.push_str("^>"),
+            '(' => escaped.push_str("^("),
+            ')' => escaped.push_str("^)"),
+            '%' => escaped.push_str("%%"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn parse_exit_control_line(line: &str) -> Result<Option<i32>, CoreError> {
@@ -1489,20 +1629,10 @@ fn parse_create_service_response(response: &[u8]) -> Result<ScHandle, CoreError>
             "scmr create-service response was too short",
         ));
     }
+    let _tag_id_referent = u32::from_le_bytes(response[..4].try_into().expect("referent slice"));
     let mut handle = [0_u8; 20];
-    handle.copy_from_slice(&response[..20]);
-    let referent = u32::from_le_bytes(response[20..24].try_into().expect("referent slice"));
-    let status_offset = if referent == 0 { 24 } else { 28 };
-    if response.len() < status_offset + 4 {
-        return Err(CoreError::InvalidResponse(
-            "scmr create-service status field was truncated",
-        ));
-    }
-    let status = u32::from_le_bytes(
-        response[status_offset..status_offset + 4]
-            .try_into()
-            .expect("status slice"),
-    );
+    handle.copy_from_slice(&response[4..24]);
+    let status = u32::from_le_bytes(response[24..28].try_into().expect("status slice"));
     if status != 0 {
         return Err(CoreError::RemoteOperation {
             operation: "create_service",
@@ -1523,20 +1653,33 @@ fn parse_close_handle_response(response: &[u8]) -> Result<u32, CoreError> {
     ))
 }
 
-fn parse_u32_status(response: &[u8], operation: &'static str) -> Result<u32, CoreError> {
+fn parse_query_service_status_response(response: &[u8]) -> Result<u32, CoreError> {
+    if response.len() < 32 {
+        return Err(CoreError::InvalidResponse(
+            "scmr query-service-status response was too short",
+        ));
+    }
+    let current_state =
+        u32::from_le_bytes(response[4..8].try_into().expect("current-state slice"));
+    let status = u32::from_le_bytes(response[28..32].try_into().expect("status slice"));
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "query_service_status",
+            code: status,
+        });
+    }
+    Ok(current_state)
+}
+
+fn read_u32_status(response: &[u8]) -> Result<u32, CoreError> {
     if response.len() < 4 {
         return Err(CoreError::InvalidResponse(
             "scmr status response was too short",
         ));
     }
-    let status = u32::from_le_bytes(response[..4].try_into().expect("status slice"));
-    if status == 0 {
-        return Ok(status);
-    }
-    Err(CoreError::RemoteOperation {
-        operation,
-        code: status,
-    })
+    Ok(u32::from_le_bytes(
+        response[..4].try_into().expect("status slice"),
+    ))
 }
 
 fn parse_exit_code(bytes: &[u8]) -> Result<i32, CoreError> {
@@ -1616,6 +1759,13 @@ fn is_not_found(error: &CoreError) -> bool {
     )
 }
 
+fn is_end_of_file(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::UnexpectedStatus { status, .. } if *status == NtStatus::END_OF_FILE.to_u32()
+    )
+}
+
 fn is_pipe_not_ready(error: &CoreError) -> bool {
     is_not_found(error)
 }
@@ -1647,32 +1797,35 @@ impl NdrWriter {
         self.bytes.extend_from_slice(&value.to_le_bytes());
     }
 
-    fn write_non_null_pointer(&mut self) {
-        self.align(4);
-        let referent = self.next_referent();
-        self.bytes.extend_from_slice(&referent.to_le_bytes());
-    }
-
     fn write_unique_wide_string(&mut self, value: Option<&str>) {
         self.align(4);
         match value {
             Some(value) => {
                 let referent = self.next_referent();
                 self.bytes.extend_from_slice(&referent.to_le_bytes());
-                self.align(4);
-                let mut encoded = value.encode_utf16().collect::<Vec<_>>();
-                encoded.push(0);
-                let count = encoded.len() as u32;
-                self.bytes.extend_from_slice(&count.to_le_bytes());
-                self.bytes.extend_from_slice(&0_u32.to_le_bytes());
-                self.bytes.extend_from_slice(&count.to_le_bytes());
-                for code_unit in encoded {
-                    self.bytes.extend_from_slice(&code_unit.to_le_bytes());
-                }
-                self.align(4);
+                self.write_wide_string_body(value);
             }
             None => self.bytes.extend_from_slice(&0_u32.to_le_bytes()),
         }
+    }
+
+    fn write_wide_string(&mut self, value: &str) {
+        self.align(4);
+        self.write_wide_string_body(value);
+    }
+
+    fn write_wide_string_body(&mut self, value: &str) {
+        self.align(4);
+        let mut encoded = value.encode_utf16().collect::<Vec<_>>();
+        encoded.push(0);
+        let count = encoded.len() as u32;
+        self.bytes.extend_from_slice(&count.to_le_bytes());
+        self.bytes.extend_from_slice(&0_u32.to_le_bytes());
+        self.bytes.extend_from_slice(&count.to_le_bytes());
+        for code_unit in encoded {
+            self.bytes.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        self.align(4);
     }
 
     fn write_unique_bytes(&mut self, value: Option<&[u8]>) {
@@ -1709,22 +1862,56 @@ mod tests {
 
     use super::{
         build_psexec_interactive_service_command, build_psexec_script,
-        build_psexec_service_command, build_smbexec_service_command, normalize_remote_file_name,
+        build_psexec_service_command, build_smbexec_runner_script, build_smbexec_script,
+        build_smbexec_service_command, escape_cmd_for_echo, normalize_remote_file_name,
         parse_create_service_response, parse_exit_code, parse_exit_control_line,
         parse_open_handle_response, quote_windows_arg, CommandPaths, ExecMode, ExecRequest,
     };
 
     #[test]
     fn smbexec_command_redirects_output_and_exit_code() {
+        let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
+        let command = build_smbexec_service_command(&paths);
+        assert_eq!(command, format!(r#"%COMSPEC% /Q /c {}"#, paths.script_absolute));
+    }
+
+    #[test]
+    fn smbexec_script_redirects_command_output_and_exit_code() {
         let request = ExecRequest::command("whoami").with_working_directory(r"C:\");
-        let command = build_smbexec_service_command(
-            &request,
-            r"C:\Windows\Temp\out.txt",
-            r"C:\Windows\Temp\exit.txt",
+        let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
+        let script = build_smbexec_script(&request, &paths);
+        assert!(script.starts_with("@echo off\r\n"));
+        assert!(script.contains(r#"echo @echo off > "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#"echo cd /d "C:\" >> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#"echo if errorlevel 1 goto write_exit >> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#"echo whoami ^> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#".out" 2^>^&1 >> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#"%COMSPEC% /Q /c "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#".bat""#));
+        assert!(script.contains(r#"del "C:\Windows\Temp\SMOLDER-"#));
+    }
+
+    #[test]
+    fn smbexec_runner_redirects_command_output_and_exit_code() {
+        let request = ExecRequest::command("whoami").with_working_directory(r"C:\");
+        let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
+        let script = build_smbexec_runner_script(&request, &paths);
+        assert!(script.starts_with("@echo off\r\n"));
+        assert!(script.contains(r#"cd /d "C:\""#));
+        assert!(script.contains("if errorlevel 1 goto write_exit\r\n"));
+        assert!(script.contains(r#"whoami > "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#".out" 2>&1"#));
+        assert!(script.contains(":write_exit\r\n"));
+        assert!(script.contains(r#"echo %ERRORLEVEL% > "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(".exit"));
+    }
+
+    #[test]
+    fn escape_cmd_for_echo_preserves_literal_batch_text() {
+        assert_eq!(
+            escape_cmd_for_echo(r#"echo %ERRORLEVEL% > "C:\Temp\out.txt" 2>&1 & exit /b 1"#),
+            r#"echo %%ERRORLEVEL%% ^> "C:\Temp\out.txt" 2^>^&1 ^& exit /b 1"#
         );
-        assert!(command.contains(r#"cd /d "C:\" && whoami"#));
-        assert!(command.contains(r#"> "C:\Windows\Temp\out.txt" 2>&1"#));
-        assert!(command.contains(r#"echo !ERRORLEVEL! > "C:\Windows\Temp\exit.txt""#));
     }
 
     #[test]
@@ -1782,9 +1969,8 @@ mod tests {
 
     #[test]
     fn parses_create_service_response_with_tag_pointer() {
-        let mut response = vec![0x22; 20];
-        response.extend_from_slice(&1_u32.to_le_bytes());
-        response.extend_from_slice(&9_u32.to_le_bytes());
+        let mut response = vec![1, 0, 0, 0];
+        response.extend_from_slice(&[0x22; 20]);
         response.extend_from_slice(&0_u32.to_le_bytes());
         let handle = parse_create_service_response(&response).expect("response should parse");
         assert_eq!(handle.0, [0x22; 20]);
