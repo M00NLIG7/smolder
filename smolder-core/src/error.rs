@@ -48,4 +48,15 @@ pub enum CoreError {
     /// The requested operation is valid but not supported by the negotiated session or server.
     #[error("unsupported: {0}")]
     Unsupported(&'static str),
+    /// A remote RPC or service-control operation returned a failure code.
+    #[error("remote {operation} failed with 0x{code:08x}")]
+    RemoteOperation {
+        /// Operation label.
+        operation: &'static str,
+        /// Returned status or Win32 error code.
+        code: u32,
+    },
+    /// The requested operation exceeded its timeout budget.
+    #[error("operation timed out: {0}")]
+    Timeout(&'static str),
 }
