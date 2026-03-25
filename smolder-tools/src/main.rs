@@ -29,12 +29,26 @@ struct AuthOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
-    Cat { remote: RemoteLocation },
-    Ls { remote: RemoteLocation },
-    Stat { remote: RemoteLocation },
-    Get { remote: RemoteLocation, local: PathBuf },
-    Put { local: PathBuf, remote: RemoteLocation },
-    Remove { remote: RemoteLocation },
+    Cat {
+        remote: RemoteLocation,
+    },
+    Ls {
+        remote: RemoteLocation,
+    },
+    Stat {
+        remote: RemoteLocation,
+    },
+    Get {
+        remote: RemoteLocation,
+        local: PathBuf,
+    },
+    Put {
+        local: PathBuf,
+        remote: RemoteLocation,
+    },
+    Remove {
+        remote: RemoteLocation,
+    },
     Move {
         source: RemoteLocation,
         destination: RemoteLocation,
@@ -58,14 +72,20 @@ async fn main() {
 }
 
 async fn run(args: Vec<String>) -> Result<(), String> {
-    let options = parse_cli(args)?;
+    let CliOptions {
+        command,
+        username,
+        password,
+        domain,
+        workstation,
+    } = parse_cli(args)?;
     let auth = AuthOptions {
-        username: options.username.clone(),
-        password: options.password.clone(),
-        domain: options.domain.clone(),
-        workstation: options.workstation.clone(),
+        username,
+        password,
+        domain,
+        workstation,
     };
-    match options.command {
+    match command {
         Command::Cat { remote } => {
             let mut share = connect_share(&auth, &remote).await?;
             let mut stdout = tokio::io::stdout();
@@ -76,7 +96,10 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         }
         Command::Ls { remote } => {
             let mut share = connect_share(&auth, &remote).await?;
-            let mut entries = share.list(&remote.path).await.map_err(|error| error.to_string())?;
+            let mut entries = share
+                .list(&remote.path)
+                .await
+                .map_err(|error| error.to_string())?;
             entries.sort_by(|left, right| left.name.cmp(&right.name));
             for entry in entries {
                 if entry.metadata.is_directory() {
@@ -135,23 +158,23 @@ async fn connect_share(
     options: &AuthOptions,
     remote: &RemoteLocation,
 ) -> Result<smolder_core::prelude::Share, String> {
-    let mut credentials = NtlmCredentials::new(options.username.clone(), options.password.clone());
+    let mut credentials = NtlmCredentials::new(&options.username, &options.password);
     if let Some(domain) = &options.domain {
-        credentials = credentials.with_domain(domain.clone());
+        credentials = credentials.with_domain(domain.as_str());
     }
     if let Some(workstation) = &options.workstation {
-        credentials = credentials.with_workstation(workstation.clone());
+        credentials = credentials.with_workstation(workstation.as_str());
     }
 
     let client = SmbClient::builder()
-        .server(remote.host.clone())
+        .server(remote.host.as_str())
         .port(remote.port)
         .credentials(credentials)
         .connect()
         .await
         .map_err(|error| error.to_string())?;
     client
-        .share(remote.share.clone())
+        .share(remote.share.as_str())
         .await
         .map_err(|error| error.to_string())
 }
@@ -165,7 +188,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
         return Err(usage(&program));
     }
 
-    let command_name = args[1].clone();
+    let command_name = args[1].as_str();
     let mut positionals = Vec::new();
     let mut username = None;
     let mut password = None;
@@ -216,13 +239,13 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 return Err(format!("unknown option: {token}\n\n{}", usage(&program)));
             }
             _ => {
-                positionals.push(token.clone());
+                positionals.push(token.as_str());
             }
         }
         index += 1;
     }
 
-    let command = match command_name.as_str() {
+    let command = match command_name {
         "cat" => {
             if positionals.len() != 1 {
                 return Err(format!(
@@ -231,7 +254,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 ));
             }
             Command::Cat {
-                remote: parse_remote_location(&positionals[0])?,
+                remote: parse_remote_location(positionals[0])?,
             }
         }
         "ls" => {
@@ -242,7 +265,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 ));
             }
             Command::Ls {
-                remote: parse_remote_location_with_options(&positionals[0], true)?,
+                remote: parse_remote_location_with_options(positionals[0], true)?,
             }
         }
         "stat" => {
@@ -253,7 +276,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 ));
             }
             Command::Stat {
-                remote: parse_remote_location(&positionals[0])?,
+                remote: parse_remote_location(positionals[0])?,
             }
         }
         "get" => {
@@ -264,8 +287,8 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 ));
             }
             Command::Get {
-                remote: parse_remote_location(&positionals[0])?,
-                local: PathBuf::from(&positionals[1]),
+                remote: parse_remote_location(positionals[0])?,
+                local: PathBuf::from(positionals[1]),
             }
         }
         "put" => {
@@ -276,8 +299,8 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 ));
             }
             Command::Put {
-                local: PathBuf::from(&positionals[0]),
-                remote: parse_remote_location(&positionals[1])?,
+                local: PathBuf::from(positionals[0]),
+                remote: parse_remote_location(positionals[1])?,
             }
         }
         "rm" => {
@@ -288,7 +311,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 ));
             }
             Command::Remove {
-                remote: parse_remote_location(&positionals[0])?,
+                remote: parse_remote_location(positionals[0])?,
             }
         }
         "mv" => {
@@ -299,11 +322,16 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 ));
             }
             Command::Move {
-                source: parse_remote_location(&positionals[0])?,
-                destination: parse_remote_location(&positionals[1])?,
+                source: parse_remote_location(positionals[0])?,
+                destination: parse_remote_location(positionals[1])?,
             }
         }
-        _ => return Err(format!("unknown command: {command_name}\n\n{}", usage(&program))),
+        _ => {
+            return Err(format!(
+                "unknown command: {command_name}\n\n{}",
+                usage(&program)
+            ))
+        }
     };
 
     let username = username
@@ -448,7 +476,10 @@ fn format_time(value: Option<std::time::SystemTime>) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{parse_cli, parse_remote_location, parse_remote_location_with_options, Command, RemoteLocation};
+    use super::{
+        parse_cli, parse_remote_location, parse_remote_location_with_options, Command,
+        RemoteLocation,
+    };
 
     #[test]
     fn parse_cat_command_with_inline_credentials() {
