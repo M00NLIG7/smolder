@@ -2,8 +2,11 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use smolder_core::prelude::{NtlmCredentials, SmbClient, SmbMetadata};
+use smolder_core::prelude::{
+    ExecMode, ExecRequest, NtlmCredentials, RemoteExecClient, SmbClient, SmbMetadata,
+};
 
 const ENV_USERNAME: [&str; 2] = ["SMOLDER_SMB_USERNAME", "SMOLDER_SAMBA_USERNAME"];
 const ENV_PASSWORD: [&str; 2] = ["SMOLDER_SMB_PASSWORD", "SMOLDER_SAMBA_PASSWORD"];
@@ -29,6 +32,14 @@ struct AuthOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
+    SmbExec {
+        target: ExecTarget,
+        request: ExecRequest,
+    },
+    PsExec {
+        target: ExecTarget,
+        request: ExecRequest,
+    },
     Cat {
         remote: RemoteLocation,
     },
@@ -63,15 +74,28 @@ struct RemoteLocation {
     path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExecTarget {
+    host: String,
+    port: u16,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    if let Err(error) = run(env::args().collect()).await {
-        eprintln!("{error}");
-        std::process::exit(1);
+    match run(env::args().collect()).await {
+        Ok(code) => {
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
     }
 }
 
-async fn run(args: Vec<String>) -> Result<(), String> {
+async fn run(args: Vec<String>) -> Result<i32, String> {
     let CliOptions {
         command,
         username,
@@ -86,6 +110,24 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         workstation,
     };
     match command {
+        Command::SmbExec { target, request } => {
+            let exec = connect_remote_exec(&auth, &target, ExecMode::SmbExec).await?;
+            let result = exec.run(request).await.map_err(|error| error.to_string())?;
+            print!("{}", String::from_utf8_lossy(&result.stdout));
+            if !result.stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&result.stderr));
+            }
+            return Ok(result.exit_code);
+        }
+        Command::PsExec { target, request } => {
+            let exec = connect_remote_exec(&auth, &target, ExecMode::PsExec).await?;
+            let result = exec.run(request).await.map_err(|error| error.to_string())?;
+            print!("{}", String::from_utf8_lossy(&result.stdout));
+            if !result.stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&result.stderr));
+            }
+            return Ok(result.exit_code);
+        }
         Command::Cat { remote } => {
             let mut share = connect_share(&auth, &remote).await?;
             let mut stdout = tokio::io::stdout();
@@ -151,7 +193,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    Ok(0)
 }
 
 async fn connect_share(
@@ -179,6 +221,29 @@ async fn connect_share(
         .map_err(|error| error.to_string())
 }
 
+async fn connect_remote_exec(
+    options: &AuthOptions,
+    target: &ExecTarget,
+    mode: ExecMode,
+) -> Result<RemoteExecClient, String> {
+    let mut credentials = NtlmCredentials::new(&options.username, &options.password);
+    if let Some(domain) = &options.domain {
+        credentials = credentials.with_domain(domain.as_str());
+    }
+    if let Some(workstation) = &options.workstation {
+        credentials = credentials.with_workstation(workstation.as_str());
+    }
+
+    RemoteExecClient::builder()
+        .server(target.host.as_str())
+        .port(target.port)
+        .credentials(credentials)
+        .mode(mode)
+        .connect()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
     let program = args
         .first()
@@ -194,6 +259,9 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
     let mut password = None;
     let mut domain = None;
     let mut workstation = None;
+    let mut command_text = None;
+    let mut workdir = None;
+    let mut timeout = None;
 
     let mut index = 2;
     while index < args.len() {
@@ -221,6 +289,21 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
             index += 1;
             continue;
         }
+        if let Some(value) = token.strip_prefix("--command=") {
+            command_text = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--workdir=") {
+            workdir = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--timeout=") {
+            timeout = Some(parse_duration(value)?);
+            index += 1;
+            continue;
+        }
 
         match token.as_str() {
             "--username" => {
@@ -235,6 +318,16 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
             "--workstation" => {
                 workstation = Some(next_value(&args, &mut index, "--workstation")?);
             }
+            "--command" => {
+                command_text = Some(next_value(&args, &mut index, "--command")?);
+            }
+            "--workdir" => {
+                workdir = Some(next_value(&args, &mut index, "--workdir")?);
+            }
+            "--timeout" => {
+                let value = next_value(&args, &mut index, "--timeout")?;
+                timeout = Some(parse_duration(&value)?);
+            }
             _ if token.starts_with("--") => {
                 return Err(format!("unknown option: {token}\n\n{}", usage(&program)));
             }
@@ -245,7 +338,45 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
         index += 1;
     }
 
+    let exec_request = || -> Result<ExecRequest, String> {
+        let command_text = command_text
+            .clone()
+            .ok_or_else(|| format!("missing --command for `{command_name}`\n\n{}", usage(&program)))?;
+        let mut request = ExecRequest::command(command_text);
+        if let Some(workdir) = workdir.clone() {
+            request = request.with_working_directory(workdir);
+        }
+        if let Some(timeout) = timeout {
+            request = request.with_timeout(timeout);
+        }
+        Ok(request)
+    };
+
     let command = match command_name {
+        "smbexec" => {
+            if positionals.len() != 1 {
+                return Err(format!(
+                    "`smbexec` expects exactly 1 target SMB URL\n\n{}",
+                    usage(&program)
+                ));
+            }
+            Command::SmbExec {
+                target: parse_exec_target(positionals[0])?,
+                request: exec_request()?,
+            }
+        }
+        "psexec" => {
+            if positionals.len() != 1 {
+                return Err(format!(
+                    "`psexec` expects exactly 1 target SMB URL\n\n{}",
+                    usage(&program)
+                ));
+            }
+            Command::PsExec {
+                target: parse_exec_target(positionals[0])?,
+                request: exec_request()?,
+            }
+        }
         "cat" => {
             if positionals.len() != 1 {
                 return Err(format!(
@@ -376,6 +507,8 @@ fn usage(program: &str) -> String {
     format!(
         "\
 Usage:
+  {program} smbexec smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
+  {program} psexec smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} cat smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} ls smb://host[:port]/share[/path] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} stat smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
@@ -388,6 +521,17 @@ Usage:
 
 fn parse_remote_location(input: &str) -> Result<RemoteLocation, String> {
     parse_remote_location_with_options(input, false)
+}
+
+fn parse_exec_target(input: &str) -> Result<ExecTarget, String> {
+    let authority = input
+        .strip_prefix("smb://")
+        .ok_or_else(|| "remote targets must start with smb://".to_string())?;
+    if authority.contains('/') {
+        return Err("remote exec targets must use smb://host[:port] without a share path".to_string());
+    }
+    let (host, port) = parse_host_port(authority)?;
+    Ok(ExecTarget { host, port })
 }
 
 fn parse_remote_location_with_options(
@@ -437,6 +581,22 @@ fn parse_host_port(authority: &str) -> Result<(String, u16), String> {
     Ok((authority.to_string(), 445))
 }
 
+fn parse_duration(input: &str) -> Result<Duration, String> {
+    if let Some(milliseconds) = input.strip_suffix("ms") {
+        return milliseconds
+            .parse::<u64>()
+            .map(Duration::from_millis)
+            .map_err(|_| "timeout milliseconds must be a whole number, e.g. 500ms".to_string());
+    }
+    if let Some(seconds) = input.strip_suffix('s') {
+        return seconds
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|_| "timeout must be a whole number of seconds, e.g. 30s".to_string());
+    }
+    Err("timeout must end with `s` or `ms`".to_string())
+}
+
 fn ensure_same_share(source: &RemoteLocation, destination: &RemoteLocation) -> Result<(), String> {
     if source.host != destination.host
         || source.port != destination.port
@@ -475,10 +635,11 @@ fn format_time(value: Option<std::time::SystemTime>) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::{
-        parse_cli, parse_remote_location, parse_remote_location_with_options, Command,
-        RemoteLocation,
+        parse_cli, parse_duration, parse_exec_target, parse_remote_location,
+        parse_remote_location_with_options, Command, ExecTarget, RemoteLocation,
     };
 
     #[test]
@@ -607,5 +768,82 @@ mod tests {
         let location = parse_remote_location_with_options("smb://server/share", true)
             .expect("share root should be accepted");
         assert_eq!(location.path, "");
+    }
+
+    #[test]
+    fn parse_smbexec_command_with_target_only_url() {
+        let options = parse_cli(vec![
+            "smolder".to_string(),
+            "smbexec".to_string(),
+            "smb://server:1445".to_string(),
+            "--command=whoami".to_string(),
+            "--timeout=30s".to_string(),
+            "--username=user".to_string(),
+            "--password=pass".to_string(),
+        ])
+        .expect("parser should accept smbexec arguments");
+
+        match options.command {
+            Command::SmbExec { target, request } => {
+                assert_eq!(
+                    target,
+                    ExecTarget {
+                        host: "server".to_string(),
+                        port: 1445,
+                    }
+                );
+                assert_eq!(request, smolder_core::prelude::ExecRequest::command("whoami").with_timeout(Duration::from_secs(30)));
+            }
+            other => panic!("unexpected command variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_psexec_command_accepts_workdir() {
+        let options = parse_cli(vec![
+            "smolder".to_string(),
+            "psexec".to_string(),
+            "smb://server".to_string(),
+            "--command".to_string(),
+            "dir".to_string(),
+            "--workdir".to_string(),
+            "C:\\Temp".to_string(),
+            "--username=user".to_string(),
+            "--password=pass".to_string(),
+        ])
+        .expect("parser should accept psexec arguments");
+
+        match options.command {
+            Command::PsExec { target, request } => {
+                assert_eq!(
+                    target,
+                    ExecTarget {
+                        host: "server".to_string(),
+                        port: 445,
+                    }
+                );
+                assert_eq!(
+                    request,
+                    smolder_core::prelude::ExecRequest::command("dir")
+                        .with_working_directory("C:\\Temp")
+                );
+            }
+            other => panic!("unexpected command variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_exec_target_rejects_share_paths() {
+        let error = parse_exec_target("smb://server/share").expect_err("share path should fail");
+        assert!(error.contains("without a share path"));
+    }
+
+    #[test]
+    fn parse_duration_accepts_seconds_and_milliseconds() {
+        assert_eq!(parse_duration("30s").expect("seconds should parse"), Duration::from_secs(30));
+        assert_eq!(
+            parse_duration("500ms").expect("milliseconds should parse"),
+            Duration::from_millis(500)
+        );
     }
 }
