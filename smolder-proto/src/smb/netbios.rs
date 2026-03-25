@@ -27,8 +27,24 @@ impl SessionMessage {
         }
     }
 
+    /// Serializes a payload into an RFC1002 session frame without first allocating a `SessionMessage`.
+    pub fn encode_payload(payload: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        if payload.len() > LENGTH_MASK {
+            return Err(ProtocolError::SizeLimitExceeded { field: "payload" });
+        }
+
+        let mut out = BytesMut::with_capacity(4 + payload.len());
+        out.put_u8(SESSION_MESSAGE);
+        out.put_uint(payload.len() as u64, 3);
+        out.extend_from_slice(payload);
+        Ok(out.to_vec())
+    }
+
     /// Serializes the frame into bytes.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+        if self.message_type == SESSION_MESSAGE {
+            return Self::encode_payload(&self.payload);
+        }
         if self.payload.len() > LENGTH_MASK {
             return Err(ProtocolError::SizeLimitExceeded { field: "payload" });
         }

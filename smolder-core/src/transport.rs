@@ -45,7 +45,8 @@ impl Transport for TokioTcpTransport {
         let mut payload = vec![0; payload_len];
         self.stream.read_exact(&mut payload).await?;
 
-        let mut frame = header.to_vec();
+        let mut frame = Vec::with_capacity(header.len() + payload_len);
+        frame.extend_from_slice(&header);
         frame.extend_from_slice(&payload);
         Ok(frame)
     }

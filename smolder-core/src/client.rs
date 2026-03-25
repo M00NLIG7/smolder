@@ -199,9 +199,19 @@ pub struct Connection<T, State> {
 #[derive(Debug)]
 struct TransactionFrames {
     header: Header,
-    body: Vec<u8>,
     request_packet: Vec<u8>,
     response_packet: Vec<u8>,
+}
+
+impl TransactionFrames {
+    fn body(&self) -> &[u8] {
+        &self.response_packet[Header::LEN..]
+    }
+
+    fn into_parts(mut self) -> (Header, Vec<u8>) {
+        let body = self.response_packet.split_off(Header::LEN);
+        (self.header, body)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -275,8 +285,7 @@ where
                 &[0],
             )
             .await?;
-        let header = transaction.header.clone();
-        let response = NegotiateResponse::decode(&transaction.body)?;
+        let response = NegotiateResponse::decode(transaction.body())?;
         let preauth_integrity = negotiate_preauth_integrity_state(
             request,
             &response,
@@ -284,7 +293,7 @@ where
             &transaction.response_packet,
         )?;
 
-        if header.session_id != SessionId(0) {
+        if transaction.header.session_id != SessionId(0) {
             return Err(CoreError::InvalidResponse(
                 "negotiate response must not assign a session id",
             ));
@@ -341,8 +350,8 @@ where
                     ],
                 )
                 .await?;
+            let response = SessionSetupResponse::decode(transaction.body())?;
             let header = transaction.header;
-            let response = SessionSetupResponse::decode(&transaction.body)?;
             let success = header.status == NtStatus::SUCCESS.to_u32();
             update_session_setup_preauth(
                 &mut preauth_integrity,
@@ -419,8 +428,8 @@ where
                 &[0],
             )
             .await?;
+        let response = SessionSetupResponse::decode(transaction.body())?;
         let header = transaction.header;
-        let response = SessionSetupResponse::decode(&transaction.body)?;
         let success = header.status == NtStatus::SUCCESS.to_u32();
         update_session_setup_preauth(
             &mut preauth_integrity,
@@ -836,7 +845,7 @@ where
         let transaction = self
             .transact_framed(command, body, context, accepted_statuses)
             .await?;
-        let response = decode(&transaction.body)?;
+        let response = decode(transaction.body())?;
         trace!(
             ?command,
             message_id = transaction.header.message_id.0,
@@ -857,7 +866,7 @@ where
         let transaction = self
             .transact_framed(command, body, context, accepted_statuses)
             .await?;
-        Ok((transaction.header, transaction.body))
+        Ok(transaction.into_parts())
     }
 
     async fn transact_framed(
@@ -887,7 +896,7 @@ where
         if let Some(signing) = context.signing.as_ref() {
             signing.sign_packet(&mut packet)?;
         }
-        let frame = SessionMessage::new(packet.clone()).encode()?;
+        let frame = SessionMessage::encode_payload(&packet)?;
 
         trace!(?command, message_id = message_id.0, "sending smb request");
         self.transport
@@ -951,8 +960,7 @@ where
 
             return Ok(TransactionFrames {
                 header: response_header,
-                body: response_frame.payload[Header::LEN..].to_vec(),
-                request_packet: packet.clone(),
+                request_packet: packet,
                 response_packet: response_frame.payload,
             });
         }
