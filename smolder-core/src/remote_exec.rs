@@ -11,11 +11,10 @@ use smolder_proto::rpc::{
     BindAckPdu, BindPdu, Packet, PacketFlags, RequestPdu, ResponsePdu, SyntaxId, Uuid,
 };
 use smolder_proto::smb::smb2::{
-    CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect,
-    DispositionInformation, FileAttributes, FileId, FileInfoClass, FlushRequest,
-    GlobalCapabilities, NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities,
-    PreauthIntegrityHashId, ReadRequest, SetInfoRequest, ShareAccess, SigningMode,
-    TreeConnectRequest, WriteRequest,
+    CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, DispositionInformation,
+    FileAttributes, FileId, FileInfoClass, FlushRequest, GlobalCapabilities, NegotiateContext,
+    NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest,
+    SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
 use smolder_proto::smb::status::NtStatus;
 
@@ -27,6 +26,7 @@ use crate::transport::TokioTcpTransport;
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const PIPE_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const ADMIN_SHARE_ROOT: &str = r"C:\Windows";
 const DEFAULT_STAGING_DIR: &str = r"Temp";
 const DEFAULT_PSEXEC_BINARY_NAME: &str = "smolder-psexecsvc.exe";
@@ -96,6 +96,15 @@ impl ExecRequest {
         self.timeout = Some(timeout);
         self
     }
+
+    fn command_text(&self) -> Option<&str> {
+        let command = self.command.trim();
+        if command.is_empty() {
+            None
+        } else {
+            Some(command)
+        }
+    }
 }
 
 /// Result of one remote execution.
@@ -113,6 +122,105 @@ pub struct ExecResult {
     pub stderr: Vec<u8>,
     /// Total wall time spent from service creation through output collection.
     pub duration: Duration,
+}
+
+/// One interactive psexec session split into stdin/stdout/stderr/control parts.
+pub struct InteractiveSession {
+    stdin: InteractiveStdin,
+    stdout: InteractiveReader,
+    stderr: InteractiveReader,
+    waiter: InteractiveWaiter,
+}
+
+impl InteractiveSession {
+    /// Splits the session into independent stdin/stdout/stderr handles plus a completion waiter.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        InteractiveStdin,
+        InteractiveReader,
+        InteractiveReader,
+        InteractiveWaiter,
+    ) {
+        (self.stdin, self.stdout, self.stderr, self.waiter)
+    }
+}
+
+/// Writable stdin handle for an interactive remote process.
+pub struct InteractiveStdin {
+    pipe: Option<NamedPipeClient>,
+}
+
+impl InteractiveStdin {
+    /// Writes one chunk to the remote stdin stream.
+    pub async fn write_all(&mut self, bytes: &[u8]) -> Result<(), CoreError> {
+        let pipe = self.pipe.as_mut().ok_or(CoreError::InvalidInput(
+            "interactive stdin is already closed",
+        ))?;
+        pipe.write_all(bytes).await
+    }
+
+    /// Closes the remote stdin stream and signals EOF to the child process.
+    pub async fn close(&mut self) -> Result<(), CoreError> {
+        let _ = self.pipe.take();
+        Ok(())
+    }
+}
+
+/// Readable stdout/stderr handle for an interactive remote process.
+pub struct InteractiveReader {
+    pipe: NamedPipeClient,
+}
+
+impl InteractiveReader {
+    /// Reads the next chunk from the remote stream. `None` indicates EOF.
+    pub async fn read_chunk(&mut self) -> Result<Option<Vec<u8>>, CoreError> {
+        self.pipe.read_stream_chunk().await
+    }
+}
+
+/// Completion handle for an interactive remote process.
+pub struct InteractiveWaiter {
+    control: NamedPipeClient,
+    cleanup: Option<InteractiveCleanup>,
+    timeout: Duration,
+    start: Instant,
+    buffer: Vec<u8>,
+}
+
+impl InteractiveWaiter {
+    /// Waits for the remote process to exit, then performs best-effort cleanup.
+    pub async fn wait(mut self) -> Result<i32, CoreError> {
+        let exit_code = loop {
+            let line = timeout(
+                self.remaining_time(),
+                self.control.read_control_line(&mut self.buffer),
+            )
+            .await
+            .map_err(|_| {
+                CoreError::Timeout("waiting for interactive remote command completion")
+            })??;
+            let Some(line) = line else {
+                return Err(CoreError::InvalidResponse(
+                    "interactive control pipe closed before reporting exit code",
+                ));
+            };
+            if let Some(exit_code) = parse_exit_control_line(&line)? {
+                break exit_code;
+            }
+        };
+
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup.run().await;
+        }
+        Ok(exit_code)
+    }
+
+    fn remaining_time(&self) -> Duration {
+        let elapsed = self.start.elapsed();
+        self.timeout.saturating_sub(elapsed)
+    }
 }
 
 /// Builder for a Windows remote execution client.
@@ -301,12 +409,177 @@ impl RemoteExecClient {
         self.run_with_mode(self.mode, request).await
     }
 
+    /// Starts one interactive `psexec` session and returns stream handles plus a completion waiter.
+    pub async fn spawn(&self, request: ExecRequest) -> Result<InteractiveSession, CoreError> {
+        if !matches!(self.mode, ExecMode::PsExec) {
+            return Err(CoreError::Unsupported(
+                "interactive sessions require psexec mode",
+            ));
+        }
+        let service_binary =
+            self.psexec_service_binary
+                .as_deref()
+                .ok_or(CoreError::InvalidInput(
+                    "interactive psexec requires a staged service binary",
+                ))?;
+        let timeout_budget = request.timeout.unwrap_or(self.timeout);
+        let command_paths =
+            CommandPaths::new(&self.staging_directory, &self.psexec_remote_binary_name);
+        let mut admin = AdminShare::connect(&self.config, &self.admin_share).await?;
+        let mut scm = ScmClient::connect(&self.config, &self.ipc_share).await?;
+
+        let payload = fs::read(service_binary).await.map_err(CoreError::LocalIo)?;
+        admin
+            .write_all(&command_paths.service_binary_relative, &payload)
+            .await?;
+
+        let scm_handle = scm.open_sc_manager().await?;
+        let service_command = build_psexec_interactive_service_command(&request, &command_paths);
+        let service_handle = match scm
+            .create_service(&scm_handle, &command_paths.service_name, &service_command)
+            .await
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = scm.close_handle(&scm_handle).await;
+                let _ = admin
+                    .try_remove(&command_paths.service_binary_relative)
+                    .await;
+                return Err(error);
+            }
+        };
+
+        if let Err(error) = scm.start_service(&service_handle).await {
+            let _ = scm.delete_service(&service_handle).await;
+            let _ = scm.close_handle(&service_handle).await;
+            let _ = scm.close_handle(&scm_handle).await;
+            let _ = admin
+                .try_remove(&command_paths.service_binary_relative)
+                .await;
+            return Err(error);
+        }
+
+        let stdin_pipe_name = command_paths.stdin_pipe_name();
+        let stdout_pipe_name = command_paths.stdout_pipe_name();
+        let stderr_pipe_name = command_paths.stderr_pipe_name();
+        let control_pipe_name = command_paths.control_pipe_name();
+        let pipes = tokio::try_join!(
+            NamedPipeClient::connect_with_retry(
+                &self.config,
+                &self.ipc_share,
+                &stdin_pipe_name,
+                PipeAccess::WriteOnly,
+                timeout_budget,
+            ),
+            NamedPipeClient::connect_with_retry(
+                &self.config,
+                &self.ipc_share,
+                &stdout_pipe_name,
+                PipeAccess::ReadOnly,
+                timeout_budget,
+            ),
+            NamedPipeClient::connect_with_retry(
+                &self.config,
+                &self.ipc_share,
+                &stderr_pipe_name,
+                PipeAccess::ReadOnly,
+                timeout_budget,
+            ),
+            NamedPipeClient::connect_with_retry(
+                &self.config,
+                &self.ipc_share,
+                &control_pipe_name,
+                PipeAccess::ReadOnly,
+                timeout_budget,
+            ),
+        );
+
+        let (stdin_pipe, stdout_pipe, stderr_pipe, mut control_pipe) = match pipes {
+            Ok(pipes) => pipes,
+            Err(error) => {
+                cleanup_interactive_startup(
+                    &mut admin,
+                    &mut scm,
+                    &service_handle,
+                    &scm_handle,
+                    &command_paths,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+
+        let mut control_buffer = Vec::new();
+        let ready_line = timeout(
+            timeout_budget,
+            control_pipe.read_control_line(&mut control_buffer),
+        )
+        .await
+        .map_err(|_| CoreError::Timeout("waiting for interactive psexec service readiness"))??;
+        match ready_line.as_deref() {
+            Some("READY") => {}
+            Some(_) => {
+                cleanup_interactive_startup(
+                    &mut admin,
+                    &mut scm,
+                    &service_handle,
+                    &scm_handle,
+                    &command_paths,
+                )
+                .await;
+                return Err(CoreError::InvalidResponse(
+                    "interactive control pipe returned an unexpected banner",
+                ));
+            }
+            None => {
+                cleanup_interactive_startup(
+                    &mut admin,
+                    &mut scm,
+                    &service_handle,
+                    &scm_handle,
+                    &command_paths,
+                )
+                .await;
+                return Err(CoreError::InvalidResponse(
+                    "interactive control pipe closed before readiness",
+                ));
+            }
+        }
+
+        Ok(InteractiveSession {
+            stdin: InteractiveStdin {
+                pipe: Some(stdin_pipe),
+            },
+            stdout: InteractiveReader { pipe: stdout_pipe },
+            stderr: InteractiveReader { pipe: stderr_pipe },
+            waiter: InteractiveWaiter {
+                control: control_pipe,
+                cleanup: Some(InteractiveCleanup {
+                    admin,
+                    scm,
+                    service_handle,
+                    scm_handle,
+                    command_paths,
+                    staged_service_binary: true,
+                }),
+                timeout: timeout_budget,
+                start: Instant::now(),
+                buffer: control_buffer,
+            },
+        })
+    }
+
     /// Runs one request using the provided mode.
     pub async fn run_with_mode(
         &self,
         mode: ExecMode,
         request: ExecRequest,
     ) -> Result<ExecResult, CoreError> {
+        if request.command_text().is_none() {
+            return Err(CoreError::InvalidInput(
+                "remote command must not be empty for one-shot execution",
+            ));
+        }
         let start = Instant::now();
         let timeout_budget = request.timeout.unwrap_or(self.timeout);
         let command_paths =
@@ -318,7 +591,9 @@ impl RemoteExecClient {
         let execution = async {
             if matches!(mode, ExecMode::PsExec) {
                 let script = build_psexec_script(&request);
-                admin.write_all(&command_paths.script_relative, script.as_bytes()).await?;
+                admin
+                    .write_all(&command_paths.script_relative, script.as_bytes())
+                    .await?;
                 if let Some(service_binary) = &self.psexec_service_binary {
                     let payload = fs::read(service_binary).await.map_err(CoreError::LocalIo)?;
                     admin
@@ -374,7 +649,9 @@ impl RemoteExecClient {
         if matches!(mode, ExecMode::PsExec) {
             let _ = admin.try_remove(&command_paths.script_relative).await;
             if self.psexec_service_binary.is_some() {
-                let _ = admin.try_remove(&command_paths.service_binary_relative).await;
+                let _ = admin
+                    .try_remove(&command_paths.service_binary_relative)
+                    .await;
             }
         }
 
@@ -395,9 +672,33 @@ struct SessionConfig {
     client_guid: [u8; 16],
 }
 
+struct InteractiveCleanup {
+    admin: AdminShare,
+    scm: ScmClient,
+    service_handle: ScHandle,
+    scm_handle: ScHandle,
+    command_paths: CommandPaths,
+    staged_service_binary: bool,
+}
+
+impl InteractiveCleanup {
+    async fn run(mut self) {
+        let _ = self.scm.delete_service(&self.service_handle).await;
+        let _ = self.scm.close_handle(&self.service_handle).await;
+        let _ = self.scm.close_handle(&self.scm_handle).await;
+        if self.staged_service_binary {
+            let _ = self
+                .admin
+                .try_remove(&self.command_paths.service_binary_relative)
+                .await;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CommandPaths {
     service_name: String,
+    pipe_prefix: String,
     stdout_relative: String,
     stderr_relative: String,
     exit_relative: String,
@@ -423,6 +724,7 @@ impl CommandPaths {
         let service_name = format!("SMOLDER{token:016X}");
         Self {
             service_name,
+            pipe_prefix: prefix.clone(),
             stdout_absolute: admin_absolute_path(&stdout_relative),
             stderr_absolute: admin_absolute_path(&stderr_relative),
             exit_absolute: admin_absolute_path(&exit_relative),
@@ -435,10 +737,33 @@ impl CommandPaths {
             service_binary_relative,
         }
     }
+
+    fn stdin_pipe_name(&self) -> String {
+        format!("{}.stdin", self.pipe_prefix)
+    }
+
+    fn stdout_pipe_name(&self) -> String {
+        format!("{}.stdout", self.pipe_prefix)
+    }
+
+    fn stderr_pipe_name(&self) -> String {
+        format!("{}.stderr", self.pipe_prefix)
+    }
+
+    fn control_pipe_name(&self) -> String {
+        format!("{}.control", self.pipe_prefix)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScHandle([u8; 20]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipeAccess {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
 
 struct ScmClient {
     rpc: RpcPipeClient,
@@ -607,13 +932,56 @@ impl NamedPipeClient {
         ipc_share: &str,
         pipe_name: &str,
     ) -> Result<Self, CoreError> {
+        Self::connect_with_access(config, ipc_share, pipe_name, PipeAccess::ReadWrite).await
+    }
+
+    async fn connect_with_retry(
+        config: &SessionConfig,
+        ipc_share: &str,
+        pipe_name: &str,
+        access: PipeAccess,
+        timeout_budget: Duration,
+    ) -> Result<Self, CoreError> {
+        let deadline = Instant::now() + timeout_budget;
+        loop {
+            match Self::connect_with_access(config, ipc_share, pipe_name, access).await {
+                Ok(pipe) => return Ok(pipe),
+                Err(error) if is_pipe_not_ready(&error) && Instant::now() < deadline => {
+                    sleep(PIPE_CONNECT_RETRY_INTERVAL).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn connect_with_access(
+        config: &SessionConfig,
+        ipc_share: &str,
+        pipe_name: &str,
+        access: PipeAccess,
+    ) -> Result<Self, CoreError> {
         let mut connection = connect_tree(config, ipc_share).await?;
         let mut request = CreateRequest::from_path(pipe_name);
-        request.desired_access = FILE_READ_DATA
-            | FILE_WRITE_DATA
-            | FILE_READ_ATTRIBUTES
-            | READ_CONTROL
-            | SYNCHRONIZE;
+        request.desired_access = match access {
+            PipeAccess::ReadOnly => {
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
+            }
+            PipeAccess::WriteOnly => {
+                FILE_WRITE_DATA
+                    | FILE_READ_ATTRIBUTES
+                    | FILE_WRITE_ATTRIBUTES
+                    | READ_CONTROL
+                    | SYNCHRONIZE
+            }
+            PipeAccess::ReadWrite => {
+                FILE_READ_DATA
+                    | FILE_WRITE_DATA
+                    | FILE_READ_ATTRIBUTES
+                    | FILE_WRITE_ATTRIBUTES
+                    | READ_CONTROL
+                    | SYNCHRONIZE
+            }
+        };
         request.create_disposition = CreateDisposition::Open;
         request.share_access = ShareAccess::READ | ShareAccess::WRITE;
         request.file_attributes = FileAttributes::NORMAL;
@@ -643,10 +1011,13 @@ impl NamedPipeClient {
         let mut offset = 0;
         while offset < bytes.len() {
             let chunk_end = (offset + self.fragment_size as usize).min(bytes.len());
-            let request = WriteRequest::for_file(self.file_id, 0, bytes[offset..chunk_end].to_vec());
+            let request =
+                WriteRequest::for_file(self.file_id, 0, bytes[offset..chunk_end].to_vec());
             let response = self.connection.write(&request).await?;
             if response.count == 0 {
-                return Err(CoreError::InvalidResponse("named pipe write returned zero bytes"));
+                return Err(CoreError::InvalidResponse(
+                    "named pipe write returned zero bytes",
+                ));
             }
             offset = chunk_end;
         }
@@ -657,6 +1028,17 @@ impl NamedPipeClient {
         Ok(())
     }
 
+    async fn read_stream_chunk(&mut self) -> Result<Option<Vec<u8>>, CoreError> {
+        let response = self
+            .connection
+            .read(&ReadRequest::for_file(self.file_id, 0, self.fragment_size))
+            .await?;
+        if response.data.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(response.data))
+    }
+
     async fn read_one_pdu(&mut self) -> Result<Vec<u8>, CoreError> {
         let mut buffer = Vec::new();
         let expected_len = loop {
@@ -665,7 +1047,9 @@ impl NamedPipeClient {
                 .read(&ReadRequest::for_file(self.file_id, 0, self.fragment_size))
                 .await?;
             if response.data.is_empty() {
-                return Err(CoreError::InvalidResponse("named pipe read returned no data"));
+                return Err(CoreError::InvalidResponse(
+                    "named pipe read returned no data",
+                ));
             }
             buffer.extend_from_slice(&response.data);
             if buffer.len() >= 10 {
@@ -689,6 +1073,29 @@ impl NamedPipeClient {
         buffer.truncate(expected_len);
         Ok(buffer)
     }
+
+    async fn read_control_line(
+        &mut self,
+        buffer: &mut Vec<u8>,
+    ) -> Result<Option<String>, CoreError> {
+        loop {
+            if let Some(newline_index) = buffer.iter().position(|byte| *byte == b'\n') {
+                let line = buffer.drain(..=newline_index).collect::<Vec<_>>();
+                let text = String::from_utf8_lossy(&line).trim().to_string();
+                return Ok(Some(text));
+            }
+
+            match self.read_stream_chunk().await? {
+                Some(bytes) => buffer.extend_from_slice(&bytes),
+                None if buffer.is_empty() => return Ok(None),
+                None => {
+                    return Err(CoreError::InvalidResponse(
+                        "interactive control pipe closed with a truncated line",
+                    ))
+                }
+            }
+        }
+    }
 }
 
 struct AdminShare {
@@ -710,7 +1117,10 @@ impl AdminShare {
     }
 
     async fn read_if_exists(&mut self, path: &str) -> Result<Option<Vec<u8>>, CoreError> {
-        let file_id = match self.open_file(path, FILE_READ_DATA | FILE_READ_ATTRIBUTES).await {
+        let file_id = match self
+            .open_file(path, FILE_READ_DATA | FILE_READ_ATTRIBUTES)
+            .await
+        {
             Ok(file_id) => file_id,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(error),
@@ -758,8 +1168,11 @@ impl AdminShare {
         let write_result = async {
             while (offset as usize) < data.len() {
                 let chunk_end = ((offset as usize) + self.max_write_size as usize).min(data.len());
-                let request =
-                    WriteRequest::for_file(file_id, offset, data[offset as usize..chunk_end].to_vec());
+                let request = WriteRequest::for_file(
+                    file_id,
+                    offset,
+                    data[offset as usize..chunk_end].to_vec(),
+                );
                 let response = self.connection.write(&request).await?;
                 if response.count == 0 {
                     return Err(CoreError::InvalidResponse(
@@ -829,7 +1242,10 @@ impl AdminShare {
         request.share_access = ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE;
         request.file_attributes = FileAttributes::NORMAL;
         request.create_options = CreateOptions::NON_DIRECTORY_FILE;
-        self.connection.create(&request).await.map(|response| response.file_id)
+        self.connection
+            .create(&request)
+            .await
+            .map(|response| response.file_id)
     }
 
     async fn create_file(&mut self, path: &str, desired_access: u32) -> Result<FileId, CoreError> {
@@ -840,7 +1256,10 @@ impl AdminShare {
         request.share_access = ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE;
         request.file_attributes = FileAttributes::NORMAL;
         request.create_options = CreateOptions::NON_DIRECTORY_FILE;
-        self.connection.create(&request).await.map(|response| response.file_id)
+        self.connection
+            .create(&request)
+            .await
+            .map(|response| response.file_id)
     }
 
     async fn close(&mut self, file_id: FileId) -> Result<(), CoreError> {
@@ -868,7 +1287,24 @@ async fn connect_tree(
     let connection = Connection::new(transport).negotiate(&request).await?;
     let connection = connection.authenticate(&mut auth).await?;
     let unc = format!(r"\\{}\{}", config.server, normalize_share_name(share)?);
-    connection.tree_connect(&TreeConnectRequest::from_unc(&unc)).await
+    connection
+        .tree_connect(&TreeConnectRequest::from_unc(&unc))
+        .await
+}
+
+async fn cleanup_interactive_startup(
+    admin: &mut AdminShare,
+    scm: &mut ScmClient,
+    service_handle: &ScHandle,
+    scm_handle: &ScHandle,
+    command_paths: &CommandPaths,
+) {
+    let _ = scm.delete_service(service_handle).await;
+    let _ = scm.close_handle(service_handle).await;
+    let _ = scm.close_handle(scm_handle).await;
+    let _ = admin
+        .try_remove(&command_paths.service_binary_relative)
+        .await;
 }
 
 async fn wait_for_result(
@@ -963,6 +1399,27 @@ fn build_psexec_service_command(
     }
 }
 
+fn build_psexec_interactive_service_command(
+    request: &ExecRequest,
+    command_paths: &CommandPaths,
+) -> String {
+    let mut command = format!(
+        "{} --service-name {} --pipe-prefix {}",
+        quote_windows_arg(&command_paths.service_binary_absolute),
+        quote_windows_arg(&command_paths.service_name),
+        quote_windows_arg(&command_paths.pipe_prefix),
+    );
+    if let Some(command_text) = request.command_text() {
+        command.push_str(" --command ");
+        command.push_str(&quote_windows_arg(command_text));
+    }
+    if let Some(working_directory) = &request.working_directory {
+        command.push_str(" --workdir ");
+        command.push_str(&quote_windows_arg(working_directory));
+    }
+    command
+}
+
 fn build_psexec_script(request: &ExecRequest) -> String {
     let mut script = String::from("@echo off\r\n");
     if let Some(working_directory) = &request.working_directory {
@@ -977,13 +1434,38 @@ fn build_psexec_script(request: &ExecRequest) -> String {
 fn request_command_fragment(request: &ExecRequest) -> String {
     match &request.working_directory {
         Some(working_directory) => {
-            format!(r#"cd /d "{working_directory}" && {}"#, request.command)
+            format!(
+                r#"cd /d "{working_directory}" && {}"#,
+                request.command_text().expect("validated non-empty command")
+            )
         }
-        None => request.command.clone(),
+        None => request
+            .command_text()
+            .expect("validated non-empty command")
+            .to_string(),
     }
 }
 
-fn parse_open_handle_response(response: &[u8], operation: &'static str) -> Result<ScHandle, CoreError> {
+fn parse_exit_control_line(line: &str) -> Result<Option<i32>, CoreError> {
+    if line == "READY" {
+        return Ok(None);
+    }
+    if let Some(exit_code) = line.strip_prefix("EXIT ") {
+        return exit_code
+            .trim()
+            .parse::<i32>()
+            .map(Some)
+            .map_err(|_| CoreError::InvalidResponse("interactive exit line was not numeric"));
+    }
+    Err(CoreError::InvalidResponse(
+        "interactive control pipe returned an unknown control line",
+    ))
+}
+
+fn parse_open_handle_response(
+    response: &[u8],
+    operation: &'static str,
+) -> Result<ScHandle, CoreError> {
     if response.len() < 24 {
         return Err(CoreError::InvalidResponse(
             "scmr open-handle response was too short",
@@ -1043,13 +1525,18 @@ fn parse_close_handle_response(response: &[u8]) -> Result<u32, CoreError> {
 
 fn parse_u32_status(response: &[u8], operation: &'static str) -> Result<u32, CoreError> {
     if response.len() < 4 {
-        return Err(CoreError::InvalidResponse("scmr status response was too short"));
+        return Err(CoreError::InvalidResponse(
+            "scmr status response was too short",
+        ));
     }
     let status = u32::from_le_bytes(response[..4].try_into().expect("status slice"));
     if status == 0 {
         return Ok(status);
     }
-    Err(CoreError::RemoteOperation { operation, code: status })
+    Err(CoreError::RemoteOperation {
+        operation,
+        code: status,
+    })
 }
 
 fn parse_exit_code(bytes: &[u8]) -> Result<i32, CoreError> {
@@ -1127,6 +1614,10 @@ fn is_not_found(error: &CoreError) -> bool {
             if *status == NtStatus::OBJECT_NAME_NOT_FOUND.to_u32()
                 || *status == NtStatus::OBJECT_PATH_NOT_FOUND.to_u32()
     )
+}
+
+fn is_pipe_not_ready(error: &CoreError) -> bool {
+    is_not_found(error)
 }
 
 struct NdrWriter {
@@ -1217,8 +1708,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        build_psexec_script, build_psexec_service_command, build_smbexec_service_command,
-        normalize_remote_file_name, parse_create_service_response, parse_exit_code,
+        build_psexec_interactive_service_command, build_psexec_script,
+        build_psexec_service_command, build_smbexec_service_command, normalize_remote_file_name,
+        parse_create_service_response, parse_exit_code, parse_exit_control_line,
         parse_open_handle_response, quote_windows_arg, CommandPaths, ExecMode, ExecRequest,
     };
 
@@ -1257,8 +1749,7 @@ mod tests {
     #[test]
     fn psexec_service_binary_command_uses_uploaded_payload() {
         let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
-        let command =
-            build_psexec_service_command(Some(Path::new("local.exe")), &paths);
+        let command = build_psexec_service_command(Some(Path::new("local.exe")), &paths);
         assert!(command.starts_with(r#""C:\Windows\Temp\SMOLDER-"#));
         assert!(command.contains("--service-name"));
         assert!(command.contains("--script"));
@@ -1268,11 +1759,24 @@ mod tests {
     }
 
     #[test]
+    fn interactive_psexec_command_uses_pipe_prefix_and_optional_workdir() {
+        let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
+        let request = ExecRequest::command("powershell.exe").with_working_directory(r"C:\Temp");
+        let command = build_psexec_interactive_service_command(&request, &paths);
+        assert!(command.contains("--pipe-prefix"));
+        assert!(command.contains(&paths.pipe_prefix));
+        assert!(command.contains("--command"));
+        assert!(command.contains("powershell.exe"));
+        assert!(command.contains("--workdir"));
+        assert!(command.contains(r#""C:\Temp""#));
+    }
+
+    #[test]
     fn parses_open_handle_response() {
         let mut response = vec![0x11; 20];
         response.extend_from_slice(&0_u32.to_le_bytes());
-        let handle =
-            parse_open_handle_response(&response, "open_sc_manager").expect("response should parse");
+        let handle = parse_open_handle_response(&response, "open_sc_manager")
+            .expect("response should parse");
         assert_eq!(handle.0, [0x11; 20]);
     }
 
@@ -1296,20 +1800,36 @@ mod tests {
     fn command_paths_are_mode_agnostic() {
         let paths = CommandPaths::new("Temp", "svc.exe");
         assert!(paths.service_name.starts_with("SMOLDER"));
+        assert!(paths.pipe_prefix.starts_with("SMOLDER-"));
         assert!(paths.stdout_relative.starts_with(r"Temp\SMOLDER-"));
         assert!(paths.service_binary_relative.ends_with("-svc.exe"));
         assert!(matches!(ExecMode::SmbExec, ExecMode::SmbExec));
     }
 
     #[test]
+    fn control_line_parser_accepts_ready_and_exit() {
+        assert_eq!(
+            parse_exit_control_line("READY").expect("ready line should parse"),
+            None
+        );
+        assert_eq!(
+            parse_exit_control_line("EXIT 17").expect("exit line should parse"),
+            Some(17)
+        );
+    }
+
+    #[test]
     fn remote_binary_name_rejects_separators() {
-        let error = normalize_remote_file_name(r"bad\name.exe")
-            .expect_err("separator should be rejected");
+        let error =
+            normalize_remote_file_name(r"bad\name.exe").expect_err("separator should be rejected");
         assert!(matches!(error, crate::error::CoreError::PathInvalid(_)));
     }
 
     #[test]
     fn windows_arg_quoting_doubles_inner_quotes() {
-        assert_eq!(quote_windows_arg(r#"C:\Temp\say "hi".cmd"#), r#""C:\Temp\say ""hi"".cmd""#);
+        assert_eq!(
+            quote_windows_arg(r#"C:\Temp\say "hi".cmd"#),
+            r#""C:\Temp\say ""hi"".cmd""#
+        );
     }
 }

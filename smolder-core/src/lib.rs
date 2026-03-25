@@ -21,7 +21,8 @@ pub mod prelude {
         SmbDirectoryEntry, SmbMetadata,
     };
     pub use crate::remote_exec::{
-        ExecMode, ExecRequest, ExecResult, RemoteExecBuilder, RemoteExecClient,
+        ExecMode, ExecRequest, ExecResult, InteractiveReader, InteractiveSession, InteractiveStdin,
+        InteractiveWaiter, RemoteExecBuilder, RemoteExecClient,
     };
     pub use crate::transport::{TokioTcpTransport, Transport};
 }

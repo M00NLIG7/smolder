@@ -5,8 +5,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use smolder_core::prelude::{
-    ExecMode, ExecRequest, NtlmCredentials, RemoteExecClient, SmbClient, SmbMetadata,
+    ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, NtlmCredentials, RemoteExecClient,
+    SmbClient, SmbMetadata,
 };
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const ENV_USERNAME: [&str; 2] = ["SMOLDER_SMB_USERNAME", "SMOLDER_SAMBA_USERNAME"];
 const ENV_PASSWORD: [&str; 2] = ["SMOLDER_SMB_PASSWORD", "SMOLDER_SAMBA_PASSWORD"];
@@ -41,6 +43,7 @@ enum Command {
         target: ExecTarget,
         request: ExecRequest,
         service_binary: Option<PathBuf>,
+        interactive: bool,
     },
     Cat {
         remote: RemoteLocation,
@@ -125,10 +128,14 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
             target,
             request,
             service_binary,
+            interactive,
         } => {
             let exec =
                 connect_remote_exec(&auth, &target, ExecMode::PsExec, service_binary.as_deref())
                     .await?;
+            if interactive {
+                return run_interactive_exec(&exec, request).await;
+            }
             let result = exec.run(request).await.map_err(|error| error.to_string())?;
             print!("{}", String::from_utf8_lossy(&result.stdout));
             if !result.stderr.is_empty() {
@@ -250,10 +257,7 @@ async fn connect_remote_exec(
     if let Some(service_binary) = service_binary {
         builder = builder.psexec_service_binary(service_binary.to_path_buf());
     }
-    builder
-        .connect()
-        .await
-        .map_err(|error| error.to_string())
+    builder.connect().await.map_err(|error| error.to_string())
 }
 
 fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
@@ -275,6 +279,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
     let mut workdir = None;
     let mut timeout = None;
     let mut service_binary = None;
+    let mut interactive = false;
 
     let mut index = 2;
     while index < args.len() {
@@ -347,7 +352,14 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                 timeout = Some(parse_duration(&value)?);
             }
             "--service-binary" => {
-                service_binary = Some(PathBuf::from(next_value(&args, &mut index, "--service-binary")?));
+                service_binary = Some(PathBuf::from(next_value(
+                    &args,
+                    &mut index,
+                    "--service-binary",
+                )?));
+            }
+            "--interactive" => {
+                interactive = true;
             }
             _ if token.starts_with("--") => {
                 return Err(format!("unknown option: {token}\n\n{}", usage(&program)));
@@ -360,9 +372,12 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
     }
 
     let exec_request = || -> Result<ExecRequest, String> {
-        let command_text = command_text
-            .clone()
-            .ok_or_else(|| format!("missing --command for `{command_name}`\n\n{}", usage(&program)))?;
+        let command_text = command_text.clone().ok_or_else(|| {
+            format!(
+                "missing --command for `{command_name}`\n\n{}",
+                usage(&program)
+            )
+        })?;
         let mut request = ExecRequest::command(command_text);
         if let Some(workdir) = workdir.clone() {
             request = request.with_working_directory(workdir);
@@ -393,10 +408,35 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
                     usage(&program)
                 ));
             }
+            let request = match (interactive, command_text.clone()) {
+                (true, Some(command_text)) => {
+                    let mut request = ExecRequest::command(command_text);
+                    if let Some(workdir) = workdir.clone() {
+                        request = request.with_working_directory(workdir);
+                    }
+                    if let Some(timeout) = timeout {
+                        request = request.with_timeout(timeout);
+                    }
+                    request
+                }
+                (true, None) => {
+                    let mut request = ExecRequest::command(String::new());
+                    if let Some(workdir) = workdir.clone() {
+                        request = request.with_working_directory(workdir);
+                    }
+                    if let Some(timeout) = timeout {
+                        request = request.with_timeout(timeout);
+                    }
+                    request
+                }
+                (false, _) => exec_request()?,
+            };
             Command::PsExec {
                 target: parse_exec_target(positionals[0])?,
-                request: exec_request()?,
-                service_binary: service_binary.or_else(|| env_value(&ENV_PSEXEC_SERVICE_BINARY).map(PathBuf::from)),
+                request,
+                service_binary: service_binary
+                    .or_else(|| env_value(&ENV_PSEXEC_SERVICE_BINARY).map(PathBuf::from)),
+                interactive,
             }
         }
         "cat" => {
@@ -531,6 +571,7 @@ fn usage(program: &str) -> String {
 Usage:
   {program} smbexec smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} psexec smb://host[:port] --command COMMAND [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
+  {program} psexec smb://host[:port] --interactive [--command COMMAND] [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} cat smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} ls smb://host[:port]/share[/path] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} stat smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
@@ -550,7 +591,9 @@ fn parse_exec_target(input: &str) -> Result<ExecTarget, String> {
         .strip_prefix("smb://")
         .ok_or_else(|| "remote targets must start with smb://".to_string())?;
     if authority.contains('/') {
-        return Err("remote exec targets must use smb://host[:port] without a share path".to_string());
+        return Err(
+            "remote exec targets must use smb://host[:port] without a share path".to_string(),
+        );
     }
     let (host, port) = parse_host_port(authority)?;
     Ok(ExecTarget { host, port })
@@ -652,6 +695,65 @@ fn format_time(value: Option<std::time::SystemTime>) -> String {
     value
         .map(|time| format!("{time:?}"))
         .unwrap_or_else(|| "<none>".to_string())
+}
+
+async fn run_interactive_exec(
+    exec: &RemoteExecClient,
+    request: ExecRequest,
+) -> Result<i32, String> {
+    let session = exec
+        .spawn(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    let (mut stdin, mut stdout, mut stderr, waiter) = session.into_parts();
+
+    let stdin_task = async { pump_local_stdin(&mut stdin).await };
+    let stdout_task = async { pump_remote_output(&mut stdout, tokio::io::stdout()).await };
+    let stderr_task = async { pump_remote_output(&mut stderr, tokio::io::stderr()).await };
+    let wait_task = async { waiter.wait().await.map_err(|error| error.to_string()) };
+
+    let (stdin_result, stdout_result, stderr_result, exit_result) =
+        tokio::join!(stdin_task, stdout_task, stderr_task, wait_task);
+    stdin_result?;
+    stdout_result?;
+    stderr_result?;
+    exit_result
+}
+
+async fn pump_local_stdin(stdin: &mut InteractiveStdin) -> Result<(), String> {
+    let mut local_stdin = tokio::io::stdin();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = local_stdin
+            .read(&mut buffer)
+            .await
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            return stdin.close().await.map_err(|error| error.to_string());
+        }
+        stdin
+            .write_all(&buffer[..count])
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+}
+
+async fn pump_remote_output<W>(reader: &mut InteractiveReader, mut writer: W) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(chunk) = reader
+        .read_chunk()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        writer
+            .write_all(&chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        writer.flush().await.map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -814,7 +916,11 @@ mod tests {
                         port: 1445,
                     }
                 );
-                assert_eq!(request, smolder_core::prelude::ExecRequest::command("whoami").with_timeout(Duration::from_secs(30)));
+                assert_eq!(
+                    request,
+                    smolder_core::prelude::ExecRequest::command("whoami")
+                        .with_timeout(Duration::from_secs(30))
+                );
             }
             other => panic!("unexpected command variant: {other:?}"),
         }
@@ -840,6 +946,7 @@ mod tests {
                 target,
                 request,
                 service_binary,
+                interactive,
             } => {
                 assert_eq!(
                     target,
@@ -854,6 +961,7 @@ mod tests {
                         .with_working_directory("C:\\Temp")
                 );
                 assert_eq!(service_binary, None);
+                assert!(!interactive);
             }
             other => panic!("unexpected command variant: {other:?}"),
         }
@@ -874,12 +982,47 @@ mod tests {
         .expect("parser should accept psexec service-binary arguments");
 
         match options.command {
-            Command::PsExec { service_binary, .. } => assert_eq!(
+            Command::PsExec {
                 service_binary,
-                Some(PathBuf::from(
-                    "target/x86_64-pc-windows-msvc/release/smolder-psexecsvc.exe"
-                ))
-            ),
+                interactive,
+                ..
+            } => {
+                assert!(!interactive);
+                assert_eq!(
+                    service_binary,
+                    Some(PathBuf::from(
+                        "target/x86_64-pc-windows-msvc/release/smolder-psexecsvc.exe"
+                    ))
+                )
+            }
+            other => panic!("unexpected command variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_interactive_psexec_allows_missing_command() {
+        let options = parse_cli(vec![
+            "smolder".to_string(),
+            "psexec".to_string(),
+            "smb://server".to_string(),
+            "--interactive".to_string(),
+            "--username=user".to_string(),
+            "--password=pass".to_string(),
+        ])
+        .expect("parser should accept interactive psexec arguments");
+
+        match options.command {
+            Command::PsExec {
+                interactive,
+                request,
+                ..
+            } => {
+                assert!(interactive);
+                assert_eq!(
+                    request,
+                    smolder_core::prelude::ExecRequest::command(String::new())
+                );
+            }
             other => panic!("unexpected command variant: {other:?}"),
         }
     }
@@ -892,7 +1035,10 @@ mod tests {
 
     #[test]
     fn parse_duration_accepts_seconds_and_milliseconds() {
-        assert_eq!(parse_duration("30s").expect("seconds should parse"), Duration::from_secs(30));
+        assert_eq!(
+            parse_duration("30s").expect("seconds should parse"),
+            Duration::from_secs(30)
+        );
         assert_eq!(
             parse_duration("500ms").expect("milliseconds should parse"),
             Duration::from_millis(500)
