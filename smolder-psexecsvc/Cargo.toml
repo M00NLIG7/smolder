@@ -1,0 +1,17 @@
+[package]
+name = "smolder-psexecsvc"
+version = "0.1.0"
+edition = "2021"
+authors = ["M00NLIG7"]
+description = "Windows service payload for Smolder psexec mode"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "smolder-psexecsvc"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "smolder-core",
+    "smolder-psexecsvc",
     "smolder-proto",
     "smolder-tools",
 ]
