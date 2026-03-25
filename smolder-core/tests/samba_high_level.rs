@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use smolder_core::prelude::{NtlmCredentials, OpenOptions, SmbClient, Share};
+use smolder_core::prelude::{NtlmCredentials, OpenOptions, Share, SmbClient};
 use tokio::sync::Mutex;
 
 fn required_env(name: &str) -> Option<String> {
@@ -108,6 +108,32 @@ async fn writes_and_reads_with_high_level_api_when_configured() {
 }
 
 #[tokio::test]
+async fn removes_files_from_fresh_connection_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some((_config, mut share)) = connected_share().await else {
+        return;
+    };
+
+    let remote_path = unique_name("smolder-high-level-remove");
+    share
+        .write(&remote_path, b"smolder high level remove")
+        .await
+        .expect("high-level write should succeed");
+    drop(share);
+
+    let Some((_config, mut share)) = connected_share().await else {
+        return;
+    };
+    share
+        .remove(&remote_path)
+        .await
+        .expect("fresh-connection remove should succeed");
+
+    let listing = share.list("").await.expect("listing should succeed");
+    assert!(!listing.iter().any(|entry| entry.name == remote_path));
+}
+
+#[tokio::test]
 async fn puts_and_gets_local_files_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut share)) = connected_share().await else {
@@ -169,15 +195,25 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .rename(&original_path, &renamed_path)
         .await
         .expect("rename should succeed");
-    let renamed_listing = share.list("").await.expect("listing should succeed after rename");
-    assert!(!renamed_listing.iter().any(|entry| entry.name == original_path));
-    assert!(renamed_listing.iter().any(|entry| entry.name == renamed_path));
+    let renamed_listing = share
+        .list("")
+        .await
+        .expect("listing should succeed after rename");
+    assert!(!renamed_listing
+        .iter()
+        .any(|entry| entry.name == original_path));
+    assert!(renamed_listing
+        .iter()
+        .any(|entry| entry.name == renamed_path));
 
     share
         .remove(&renamed_path)
         .await
         .expect("remove should succeed");
-    let final_listing = share.list("").await.expect("listing should succeed after remove");
+    let final_listing = share
+        .list("")
+        .await
+        .expect("listing should succeed after remove");
     assert!(!final_listing.iter().any(|entry| entry.name == renamed_path));
 }
 

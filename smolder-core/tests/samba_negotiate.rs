@@ -5,8 +5,9 @@ use smolder_core::prelude::{
 };
 use smolder_proto::smb::smb2::{
     CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, FlushRequest,
-    GlobalCapabilities, NegotiateRequest, ReadRequest, SessionId, ShareAccess, SigningMode,
-    TreeConnectRequest, TreeId, WriteRequest,
+    GlobalCapabilities, NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities,
+    PreauthIntegrityHashId, ReadRequest, SessionId, ShareAccess, SigningMode, TreeConnectRequest,
+    TreeId, WriteRequest,
 };
 
 fn required_env(name: &str) -> Option<String> {
@@ -51,6 +52,21 @@ impl SambaConfig {
     }
 }
 
+fn negotiate_request() -> NegotiateRequest {
+    NegotiateRequest {
+        security_mode: SigningMode::ENABLED,
+        capabilities: GlobalCapabilities::LARGE_MTU,
+        client_guid: *b"smolder-client01",
+        dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+        negotiate_contexts: vec![NegotiateContext::preauth_integrity(
+            PreauthIntegrityCapabilities {
+                hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
+                salt: b"smolder-negotiate-salt".to_vec(),
+            },
+        )],
+    }
+}
+
 async fn authenticated_tree_connection(
 ) -> Option<(SambaConfig, Connection<TokioTcpTransport, TreeConnected>)> {
     let Some(config) = SambaConfig::from_env() else {
@@ -66,16 +82,8 @@ async fn authenticated_tree_connection(
             .expect("should connect to configured Samba endpoint");
     let connection = Connection::new(transport);
 
-    let request = NegotiateRequest {
-        security_mode: SigningMode::ENABLED,
-        capabilities: GlobalCapabilities::LARGE_MTU,
-        client_guid: *b"smolder-client01",
-        dialects: vec![Dialect::Smb210, Dialect::Smb302],
-        negotiate_contexts: Vec::new(),
-    };
-
     let connection = connection
-        .negotiate(&request)
+        .negotiate(&negotiate_request())
         .await
         .expect("Samba should respond to SMB2 negotiate");
 
@@ -122,21 +130,16 @@ async fn negotiates_with_samba_when_configured() {
         .expect("should connect to configured Samba endpoint");
     let connection = Connection::new(transport);
 
-    let request = NegotiateRequest {
-        security_mode: SigningMode::ENABLED,
-        capabilities: GlobalCapabilities::LARGE_MTU,
-        client_guid: *b"smolder-client01",
-        dialects: vec![Dialect::Smb210, Dialect::Smb302],
-        negotiate_contexts: Vec::new(),
-    };
-
     let connection = connection
-        .negotiate(&request)
+        .negotiate(&negotiate_request())
         .await
         .expect("Samba should respond to SMB2 negotiate");
 
     let dialect = connection.state().response.dialect_revision;
-    assert!(matches!(dialect, Dialect::Smb210 | Dialect::Smb302));
+    assert!(matches!(
+        dialect,
+        Dialect::Smb210 | Dialect::Smb302 | Dialect::Smb311
+    ));
 }
 
 #[tokio::test]
@@ -235,5 +238,8 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
         .tree_disconnect()
         .await
         .expect("Samba should disconnect the tree");
-    connection.logoff().await.expect("Samba should log off the session");
+    connection
+        .logoff()
+        .await
+        .expect("Samba should log off the session");
 }

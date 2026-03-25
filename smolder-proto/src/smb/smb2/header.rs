@@ -116,6 +116,8 @@ pub struct Header {
 impl Header {
     /// The fixed SMB2 header length.
     pub const LEN: usize = 64;
+    /// Byte range containing the SMB2 signature field within an encoded header.
+    pub const SIGNATURE_RANGE: std::ops::Range<usize> = 48..64;
 
     /// Builds a new request header with zero status and signature.
     #[must_use]

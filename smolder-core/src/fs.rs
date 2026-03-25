@@ -11,9 +11,10 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use smolder_proto::smb::smb2::{
     CloseRequest, CloseResponse, CreateDisposition, CreateOptions, CreateRequest, Dialect,
     DispositionInformation, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
-    FileStandardInformation, FlushRequest, GlobalCapabilities, NegotiateRequest,
-    QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest, ReadRequest,
-    RenameInformation, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
+    FileStandardInformation, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryFlags,
+    QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation, SetInfoRequest,
+    ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
@@ -106,7 +107,7 @@ impl Default for SmbClientBuilder {
             credentials: None,
             signing_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU,
-            dialects: vec![Dialect::Smb210, Dialect::Smb302],
+            dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
             transfer_chunk_size: DEFAULT_TRANSFER_CHUNK_SIZE,
         }
@@ -183,8 +184,8 @@ impl SmbClientBuilder {
             security_mode: self.signing_mode,
             capabilities: self.capabilities,
             client_guid: self.client_guid,
+            negotiate_contexts: default_negotiate_contexts(&self.dialects),
             dialects: self.dialects,
-            negotiate_contexts: Vec::new(),
         };
         let connection = Connection::new(transport).negotiate(&request).await?;
 
@@ -456,7 +457,12 @@ where
                 OpenOptions::new().write(true).create(true).truncate(true),
             )
             .await?;
-        let operation = file.write_all(data).await;
+        let operation = async {
+            file.write_all(data).await?;
+            file.flush().await?;
+            Ok::<(), CoreError>(())
+        }
+        .await;
         let close_result = file.close().await;
 
         match operation {
@@ -498,13 +504,17 @@ where
 
         let operation = async {
             loop {
-                let read = local_file.read(&mut buffer).await.map_err(CoreError::LocalIo)?;
+                let read = local_file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(CoreError::LocalIo)?;
                 if read == 0 {
                     break;
                 }
                 remote_file.write_all(&buffer[..read]).await?;
                 written += read as u64;
             }
+            remote_file.flush().await?;
             Ok::<(), CoreError>(())
         }
         .await;
@@ -652,7 +662,7 @@ where
         let opened = self
             .create_handle(
                 path.as_ref(),
-                DELETE,
+                DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
                 CreateDisposition::Open,
                 CreateTarget::Any,
                 false,
@@ -947,6 +957,19 @@ fn create_disposition(options: OpenOptions) -> CreateDisposition {
     }
 }
 
+fn default_negotiate_contexts(dialects: &[Dialect]) -> Vec<NegotiateContext> {
+    if !dialects.contains(&Dialect::Smb311) {
+        return Vec::new();
+    }
+
+    vec![NegotiateContext::preauth_integrity(
+        PreauthIntegrityCapabilities {
+            hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
+            salt: random::<[u8; 32]>().to_vec(),
+        },
+    )]
+}
+
 fn normalize_share_name(share: &str) -> Result<String, CoreError> {
     let share = share.trim_matches(['\\', '/']);
     if share.is_empty() {
@@ -1057,15 +1080,14 @@ mod tests {
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
         CloseResponse, Command, CreateDisposition, CreateOptions, CreateRequest, CreateResponse,
-        DirectoryInformationEntry, Dialect, FileAttributes, FileBasicInformation, FileId,
-        FileInfoClass, FileStandardInformation, FlushRequest, FlushResponse,
-        GlobalCapabilities, Header, MessageId, NegotiateRequest, NegotiateResponse,
-        OplockLevel, QueryDirectoryFlags, QueryDirectoryRequest, QueryDirectoryResponse,
-        QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse, ReadResponseFlags,
-        SessionFlags, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode,
-        SetInfoRequest, SetInfoResponse, ShareFlags, ShareType, SigningMode, TreeCapabilities,
-        TreeConnectRequest, TreeConnectResponse, TreeDisconnectResponse, TreeId, WriteRequest,
-        WriteResponse,
+        Dialect, DirectoryInformationEntry, FileAttributes, FileBasicInformation, FileId,
+        FileInfoClass, FileStandardInformation, FlushRequest, FlushResponse, GlobalCapabilities,
+        Header, MessageId, NegotiateRequest, NegotiateResponse, OplockLevel, QueryDirectoryFlags,
+        QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
+        ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags, SessionSetupRequest,
+        SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse,
+        ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectRequest,
+        TreeConnectResponse, TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
@@ -1176,13 +1198,19 @@ mod tests {
         let create_new_request = create_new
             .to_create_request("docs/report.txt")
             .expect("create-new request should be valid");
-        assert_eq!(create_new_request.create_disposition, CreateDisposition::Create);
+        assert_eq!(
+            create_new_request.create_disposition,
+            CreateDisposition::Create
+        );
 
         let truncate = OpenOptions::new().write(true).truncate(true);
         let truncate_request = truncate
             .to_create_request("docs/report.txt")
             .expect("truncate request should be valid");
-        assert_eq!(truncate_request.create_disposition, CreateDisposition::Overwrite);
+        assert_eq!(
+            truncate_request.create_disposition,
+            CreateDisposition::Overwrite
+        );
     }
 
     #[test]
@@ -1206,7 +1234,10 @@ mod tests {
             .read(true)
             .to_create_request(r"/docs//nested\file.txt/")
             .expect("path should normalize");
-        assert_eq!(request.name, smolder_proto::smb::smb2::utf16le("docs\\nested\\file.txt"));
+        assert_eq!(
+            request.name,
+            smolder_proto::smb::smb2::utf16le("docs\\nested\\file.txt")
+        );
     }
 
     #[tokio::test]
@@ -1338,9 +1369,17 @@ mod tests {
                 WriteResponse { count: 3 }.encode(),
             ),
             response_frame(
-                Command::Close,
+                Command::Flush,
                 NtStatus::SUCCESS.to_u32(),
                 6,
+                11,
+                7,
+                FlushResponse.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                7,
                 11,
                 7,
                 close_response.encode(),
@@ -1364,6 +1403,9 @@ mod tests {
         let write_two = outbound_write(&writes[5]);
         assert_eq!(write_two.offset, 4);
         assert_eq!(write_two.data, b"der");
+
+        let flush = outbound_flush(&writes[6]);
+        assert_eq!(flush.file_id, create_response.file_id);
     }
 
     #[tokio::test]
@@ -1469,8 +1511,7 @@ mod tests {
                     file_attributes: FileAttributes::DIRECTORY,
                     file_name: "nested".to_string(),
                 },
-            ],
-            ),
+            ]),
         };
 
         let reads = vec![
@@ -1524,8 +1565,13 @@ mod tests {
         assert_eq!(create.file_attributes, FileAttributes::DIRECTORY);
 
         let first_query = outbound_query_directory(&writes[4]);
-        assert!(first_query.flags.contains(QueryDirectoryFlags::RESTART_SCANS));
-        assert_eq!(first_query.file_name, smolder_proto::smb::smb2::utf16le("*"));
+        assert!(first_query
+            .flags
+            .contains(QueryDirectoryFlags::RESTART_SCANS));
+        assert_eq!(
+            first_query.file_name,
+            smolder_proto::smb::smb2::utf16le("*")
+        );
 
         let second_query = outbound_query_directory(&writes[5]);
         assert!(second_query.flags.is_empty());
@@ -1616,7 +1662,10 @@ mod tests {
         assert_eq!(first_query.file_info_class, FileInfoClass::BasicInformation);
 
         let second_query = outbound_query_info(&writes[5]);
-        assert_eq!(second_query.file_info_class, FileInfoClass::StandardInformation);
+        assert_eq!(
+            second_query.file_info_class,
+            FileInfoClass::StandardInformation
+        );
     }
 
     #[tokio::test]
@@ -1729,7 +1778,10 @@ mod tests {
         ];
 
         let mut share = build_share(reads).await;
-        share.remove("notes.txt").await.expect("remove should succeed");
+        share
+            .remove("notes.txt")
+            .await
+            .expect("remove should succeed");
 
         let writes = transport_writes(share);
         let set_info = outbound_set_info(&writes[4]);
@@ -1788,8 +1840,8 @@ mod tests {
         let reconnect_header =
             Header::decode(&reconnect.payload[..Header::LEN]).expect("header should decode");
         assert_eq!(reconnect_header.command, Command::TreeConnect);
-        let reconnect_request =
-            TreeConnectRequest::decode(&reconnect.payload[Header::LEN..]).expect("request should decode");
+        let reconnect_request = TreeConnectRequest::decode(&reconnect.payload[Header::LEN..])
+            .expect("request should decode");
         assert_eq!(
             reconnect_request.path,
             smolder_proto::smb::smb2::utf16le(r"\\server\archive")
@@ -1875,7 +1927,10 @@ mod tests {
             .await
             .expect("session setup should succeed");
         let client = SmbClient::from_connection("server", connection).with_transfer_chunk_size(4);
-        client.share("share").await.expect("tree connect should succeed")
+        client
+            .share("share")
+            .await
+            .expect("tree connect should succeed")
     }
 
     fn transport_writes(share: Share<ScriptedTransport>) -> Vec<Vec<u8>> {

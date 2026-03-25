@@ -116,7 +116,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-tools --test cli_smoke -- --nocapture
+cargo test -p smolder-tools --test cli_smoke -- --nocapture --test-threads=1
 ```
 
 You can also drive the CLI manually:
@@ -137,13 +137,14 @@ docker compose -f docker/samba/compose.yaml down -v
 
 ## Current Limits
 
-The live negotiate test currently sends:
+The live negotiate path currently sends:
 
-- dialects: `SMB 2.1`, `SMB 3.0.2`
+- dialects: `SMB 2.1`, `SMB 3.0.2`, `SMB 3.1.1`
 - signing mode: enabled
 - capabilities: `LARGE_MTU`
+- SMB 3.1.1 preauth-integrity negotiate context with `SHA-512`
 
-`SMB 3.1.1` is intentionally deferred in the live test until negotiate-context handling is hooked up to the rest of the session path, including pre-auth integrity requirements.
+When Samba selects `SMB 3.1.1`, Smolder now tracks the preauth transcript across `NEGOTIATE` and `SESSION_SETUP`, derives the SMB 3.1.1 signing key from the final session-setup request hash, verifies the final signed `SESSION_SETUP` success response, and signs subsequent session and tree/file requests.
 
 ## Next External Gates
 
@@ -183,9 +184,9 @@ The current engine also handles interim async SMB2 responses (`STATUS_PENDING` w
 The next practical interop gates are:
 
 1. deeper `QUERY_INFO` coverage beyond basic file metadata
-2. SMB 3.1.1 negotiate contexts and signing hardening
+2. broader SMB 3.x response-signing verification beyond final `SESSION_SETUP`
 3. `IOCTL`
 4. leases / durable handles / compounding
-5. response-signing verification
+5. encryption and negotiate-context expansion beyond preauth integrity
 
 After those pass consistently, the next step is wiring a repeatable Samba `selftest` / `smbtorture` harness for the product surface Smolder actually exposes.

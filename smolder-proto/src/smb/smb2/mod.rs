@@ -26,7 +26,8 @@ pub use io::{
     WriteFlags, WriteRequest, WriteResponse,
 };
 pub use negotiate::{
-    Dialect, GlobalCapabilities, NegotiateContext, NegotiateRequest, NegotiateResponse, SigningMode,
+    Dialect, GlobalCapabilities, NegotiateContext, NegotiateContextType, NegotiateRequest,
+    NegotiateResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId, SigningMode,
 };
 pub use session::{
     LogoffRequest, LogoffResponse, SessionFlags, SessionSetupRequest, SessionSetupResponse,

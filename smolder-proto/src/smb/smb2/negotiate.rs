@@ -86,7 +86,148 @@ pub struct NegotiateContext {
     pub data: Vec<u8>,
 }
 
+/// SMB3.1.1 negotiate context identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum NegotiateContextType {
+    /// `SMB2_PREAUTH_INTEGRITY_CAPABILITIES`
+    PreauthIntegrityCapabilities = 0x0001,
+    /// `SMB2_ENCRYPTION_CAPABILITIES`
+    EncryptionCapabilities = 0x0002,
+    /// `SMB2_COMPRESSION_CAPABILITIES`
+    CompressionCapabilities = 0x0003,
+    /// `SMB2_NETNAME_NEGOTIATE_CONTEXT_ID`
+    Netname = 0x0005,
+    /// `SMB2_TRANSPORT_CAPABILITIES`
+    TransportCapabilities = 0x0006,
+    /// `SMB2_RDMA_TRANSFORM_CAPABILITIES`
+    RdmaTransformCapabilities = 0x0007,
+    /// `SMB2_SIGNING_CAPABILITIES`
+    SigningCapabilities = 0x0008,
+}
+
+impl TryFrom<u16> for NegotiateContextType {
+    type Error = ProtocolError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0x0001 => Ok(Self::PreauthIntegrityCapabilities),
+            0x0002 => Ok(Self::EncryptionCapabilities),
+            0x0003 => Ok(Self::CompressionCapabilities),
+            0x0005 => Ok(Self::Netname),
+            0x0006 => Ok(Self::TransportCapabilities),
+            0x0007 => Ok(Self::RdmaTransformCapabilities),
+            0x0008 => Ok(Self::SigningCapabilities),
+            _ => Err(ProtocolError::InvalidField {
+                field: "context_type",
+                reason: "unknown negotiate context type",
+            }),
+        }
+    }
+}
+
+/// Preauthentication integrity hash algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum PreauthIntegrityHashId {
+    /// `SHA-512`
+    Sha512 = 0x0001,
+}
+
+impl TryFrom<u16> for PreauthIntegrityHashId {
+    type Error = ProtocolError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0x0001 => Ok(Self::Sha512),
+            _ => Err(ProtocolError::InvalidField {
+                field: "preauth_hash_algorithm",
+                reason: "unknown preauth integrity hash algorithm",
+            }),
+        }
+    }
+}
+
+/// `SMB2_PREAUTH_INTEGRITY_CAPABILITIES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreauthIntegrityCapabilities {
+    /// Supported preauthentication hash algorithms.
+    pub hash_algorithms: Vec<PreauthIntegrityHashId>,
+    /// Client or server salt.
+    pub salt: Vec<u8>,
+}
+
+impl PreauthIntegrityCapabilities {
+    /// Serializes the context payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(4 + self.hash_algorithms.len() * 2 + self.salt.len());
+        out.put_u16_le(self.hash_algorithms.len() as u16);
+        out.put_u16_le(self.salt.len() as u16);
+        for algorithm in &self.hash_algorithms {
+            out.put_u16_le(*algorithm as u16);
+        }
+        out.extend_from_slice(&self.salt);
+        out.to_vec()
+    }
+
+    /// Parses the context payload.
+    pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = data;
+        let hash_algorithm_count = usize::from(get_u16(&mut input, "hash_algorithm_count")?);
+        let salt_length = usize::from(get_u16(&mut input, "salt_length")?);
+        if hash_algorithm_count == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "hash_algorithm_count",
+                reason: "at least one preauth hash algorithm is required",
+            });
+        }
+
+        let mut hash_algorithms = Vec::with_capacity(hash_algorithm_count);
+        for _ in 0..hash_algorithm_count {
+            hash_algorithms.push(PreauthIntegrityHashId::try_from(get_u16(
+                &mut input,
+                "hash_algorithm",
+            )?)?);
+        }
+        if input.len() < salt_length {
+            return Err(ProtocolError::UnexpectedEof { field: "salt" });
+        }
+        let salt = input[..salt_length].to_vec();
+
+        Ok(Self {
+            hash_algorithms,
+            salt,
+        })
+    }
+}
+
 impl NegotiateContext {
+    /// Returns the typed negotiate context identifier when it is known.
+    #[must_use]
+    pub fn context_type(&self) -> Option<NegotiateContextType> {
+        NegotiateContextType::try_from(self.context_type).ok()
+    }
+
+    /// Builds a preauthentication integrity negotiate context.
+    #[must_use]
+    pub fn preauth_integrity(capabilities: PreauthIntegrityCapabilities) -> Self {
+        Self {
+            context_type: NegotiateContextType::PreauthIntegrityCapabilities as u16,
+            data: capabilities.encode(),
+        }
+    }
+
+    /// Decodes a preauthentication integrity negotiate context.
+    pub fn as_preauth_integrity(
+        &self,
+    ) -> Result<Option<PreauthIntegrityCapabilities>, ProtocolError> {
+        if self.context_type() != Some(NegotiateContextType::PreauthIntegrityCapabilities) {
+            return Ok(None);
+        }
+        PreauthIntegrityCapabilities::decode(&self.data).map(Some)
+    }
+
     fn encode_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.context_type.to_le_bytes());
         out.extend_from_slice(&(self.data.len() as u16).to_le_bytes());
@@ -383,8 +524,23 @@ fn decode_contexts(
 mod tests {
     use super::{
         Dialect, GlobalCapabilities, NegotiateContext, NegotiateRequest, NegotiateResponse,
-        SigningMode,
+        PreauthIntegrityCapabilities, PreauthIntegrityHashId, SigningMode,
     };
+
+    #[test]
+    fn preauth_integrity_context_roundtrips() {
+        let capabilities = PreauthIntegrityCapabilities {
+            hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
+            salt: vec![0xaa, 0xbb, 0xcc, 0xdd],
+        };
+        let context = NegotiateContext::preauth_integrity(capabilities.clone());
+
+        let decoded = context
+            .as_preauth_integrity()
+            .expect("context should decode")
+            .expect("context should be preauth");
+        assert_eq!(decoded, capabilities);
+    }
 
     #[test]
     fn negotiate_request_roundtrips() {
@@ -393,10 +549,12 @@ mod tests {
             capabilities: GlobalCapabilities::DFS | GlobalCapabilities::LARGE_MTU,
             client_guid: *b"0123456789abcdef",
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
-            negotiate_contexts: vec![NegotiateContext {
-                context_type: 0x0001,
-                data: vec![0x01, 0x02, 0x03, 0x04],
-            }],
+            negotiate_contexts: vec![NegotiateContext::preauth_integrity(
+                PreauthIntegrityCapabilities {
+                    hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
+                    salt: vec![0x01, 0x02, 0x03, 0x04],
+                },
+            )],
         };
 
         let encoded = request.encode().expect("request should encode");
@@ -410,10 +568,12 @@ mod tests {
         let response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb311,
-            negotiate_contexts: vec![NegotiateContext {
-                context_type: 0x0002,
-                data: vec![0xaa, 0xbb, 0xcc, 0xdd],
-            }],
+            negotiate_contexts: vec![NegotiateContext::preauth_integrity(
+                PreauthIntegrityCapabilities {
+                    hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
+                    salt: vec![0xaa, 0xbb, 0xcc, 0xdd],
+                },
+            )],
             server_guid: *b"fedcba9876543210",
             capabilities: GlobalCapabilities::DFS | GlobalCapabilities::ENCRYPTION,
             max_transact_size: 65_536,
