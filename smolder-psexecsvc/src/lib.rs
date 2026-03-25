@@ -30,6 +30,26 @@ pub struct ServiceArgs {
     pub exit_code_path: PathBuf,
 }
 
+/// Payload execution mode selected by the SCM-delivered service arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayloadRequest {
+    /// One-shot command execution with file capture.
+    File(ServiceArgs),
+    /// Interactive or pipe-streamed execution via named pipes.
+    Pipe(PipeServiceArgs),
+}
+
+/// Named-pipe execution parameters consumed by the interactive service mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeServiceArgs {
+    /// Pipe namespace prefix shared by stdin/stdout/stderr/control pipes.
+    pub pipe_prefix: String,
+    /// Optional one-shot command. When omitted, the service starts an interactive shell.
+    pub command: Option<String>,
+    /// Optional working directory for the child process.
+    pub working_directory: Option<PathBuf>,
+}
+
 /// Parses the process command line into the SCM dispatch configuration.
 pub fn parse_launch_config(args: &[OsString]) -> Result<LaunchConfig, String> {
     let mut service_name = None;
@@ -99,6 +119,77 @@ pub fn parse_service_args(args: &[OsString]) -> Result<ServiceArgs, String> {
     })
 }
 
+/// Parses the SCM-delivered service arguments into either file-capture or pipe mode.
+pub fn parse_payload_request(args: &[OsString]) -> Result<PayloadRequest, String> {
+    if args
+        .iter()
+        .any(|arg| arg.to_string_lossy() == "--pipe-prefix")
+    {
+        return parse_pipe_service_args(args).map(PayloadRequest::Pipe);
+    }
+    parse_service_args(args).map(PayloadRequest::File)
+}
+
+/// Parses the SCM-delivered service arguments into one named-pipe execution request.
+pub fn parse_pipe_service_args(args: &[OsString]) -> Result<PipeServiceArgs, String> {
+    let mut pipe_prefix = None;
+    let mut command = None;
+    let mut working_directory = None;
+    let mut index = 0;
+    while index < args.len() {
+        let key = args[index].to_string_lossy();
+        let value = match key.as_ref() {
+            "--pipe-prefix" | "--command" | "--workdir" => {
+                index += 1;
+                args.get(index)
+                    .ok_or_else(|| format!("missing value for {key}"))?
+                    .clone()
+            }
+            _ => return Err(format!("unknown service argument: {key}")),
+        };
+
+        match key.as_ref() {
+            "--pipe-prefix" => pipe_prefix = Some(value.to_string_lossy().into_owned()),
+            "--command" => command = Some(value.to_string_lossy().into_owned()),
+            "--workdir" => working_directory = Some(PathBuf::from(value)),
+            _ => unreachable!(),
+        }
+        index += 1;
+    }
+
+    Ok(PipeServiceArgs {
+        pipe_prefix: pipe_prefix.ok_or_else(|| "missing --pipe-prefix".to_string())?,
+        command,
+        working_directory,
+    })
+}
+
+/// Local Windows named-pipe names derived from one prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeNames {
+    /// Full stdin pipe name.
+    pub stdin: String,
+    /// Full stdout pipe name.
+    pub stdout: String,
+    /// Full stderr pipe name.
+    pub stderr: String,
+    /// Full control pipe name.
+    pub control: String,
+}
+
+impl PipeNames {
+    /// Builds the full local pipe names for the given prefix.
+    #[must_use]
+    pub fn new(prefix: &str) -> Self {
+        Self {
+            stdin: format!(r"\\.\pipe\{prefix}.stdin"),
+            stdout: format!(r"\\.\pipe\{prefix}.stdout"),
+            stderr: format!(r"\\.\pipe\{prefix}.stderr"),
+            control: format!(r"\\.\pipe\{prefix}.control"),
+        }
+    }
+}
+
 /// Runs the requested script once and persists the resulting exit code.
 pub fn run_service_once(args: &ServiceArgs) -> io::Result<i32> {
     let stdout = File::create(&args.stdout_path)?;
@@ -115,7 +206,8 @@ pub fn run_service_once(args: &ServiceArgs) -> io::Result<i32> {
 fn child_command(script_path: &Path) -> Command {
     #[cfg(windows)]
     {
-        let mut command = Command::new(current_comspec().unwrap_or_else(|| OsString::from("cmd.exe")));
+        let mut command =
+            Command::new(current_comspec().unwrap_or_else(|| OsString::from("cmd.exe")));
         command.arg("/Q").arg("/C").arg(script_path.as_os_str());
         command
     }
@@ -145,7 +237,10 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{parse_launch_config, parse_service_args, run_service_once, LaunchConfig, ServiceArgs};
+    use super::{
+        parse_launch_config, parse_payload_request, parse_pipe_service_args, parse_service_args,
+        run_service_once, LaunchConfig, PayloadRequest, PipeNames, PipeServiceArgs, ServiceArgs,
+    };
 
     #[test]
     fn parse_launch_config_extracts_service_name_and_console_mode() {
@@ -187,6 +282,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_pipe_service_args_extracts_prefix_command_and_workdir() {
+        let args = parse_pipe_service_args(&[
+            "--pipe-prefix".into(),
+            "SMOLDER-ABC".into(),
+            "--command".into(),
+            "whoami".into(),
+            "--workdir".into(),
+            "C:\\Temp".into(),
+        ])
+        .expect("pipe service args should parse");
+        assert_eq!(
+            args,
+            PipeServiceArgs {
+                pipe_prefix: "SMOLDER-ABC".to_string(),
+                command: Some("whoami".to_string()),
+                working_directory: Some(PathBuf::from("C:\\Temp")),
+            }
+        );
+    }
+
+    #[test]
+    fn pipe_names_expand_from_prefix() {
+        let pipes = PipeNames::new("SMOLDER-ABC");
+        assert_eq!(pipes.stdin, r"\\.\pipe\SMOLDER-ABC.stdin");
+        assert_eq!(pipes.stdout, r"\\.\pipe\SMOLDER-ABC.stdout");
+        assert_eq!(pipes.stderr, r"\\.\pipe\SMOLDER-ABC.stderr");
+        assert_eq!(pipes.control, r"\\.\pipe\SMOLDER-ABC.control");
+    }
+
+    #[test]
+    fn parse_payload_request_detects_pipe_mode() {
+        let request = parse_payload_request(&[
+            "--pipe-prefix".into(),
+            "SMOLDER-ABC".into(),
+            "--command".into(),
+            "whoami".into(),
+        ])
+        .expect("payload request should parse");
+
+        assert_eq!(
+            request,
+            PayloadRequest::Pipe(PipeServiceArgs {
+                pipe_prefix: "SMOLDER-ABC".to_string(),
+                command: Some("whoami".to_string()),
+                working_directory: None,
+            })
+        );
+    }
+
+    #[test]
     fn run_service_once_executes_script_and_writes_exit_code() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -211,7 +356,9 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&path).expect("metadata should load").permissions();
+                let mut perms = fs::metadata(&path)
+                    .expect("metadata should load")
+                    .permissions();
                 perms.set_mode(0o755);
                 fs::set_permissions(&path, perms).expect("permissions should set");
             }
@@ -230,10 +377,16 @@ mod tests {
         .expect("service execution should succeed");
 
         assert_eq!(exit_code, 7);
-        assert!(fs::read_to_string(&stdout_path).expect("stdout should read").contains("hello"));
-        assert!(fs::read_to_string(&stderr_path).expect("stderr should read").contains("oops"));
+        assert!(fs::read_to_string(&stdout_path)
+            .expect("stdout should read")
+            .contains("hello"));
+        assert!(fs::read_to_string(&stderr_path)
+            .expect("stderr should read")
+            .contains("oops"));
         assert_eq!(
-            fs::read_to_string(&exit_code_path).expect("exit code should read").trim(),
+            fs::read_to_string(&exit_code_path)
+                .expect("exit code should read")
+                .trim(),
             "7"
         );
         let _ = fs::remove_dir_all(base);
