@@ -4,7 +4,8 @@ use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
 
 use super::{
-    check_fixed_structure_size, get_u16, get_u32, get_u64, slice_from_offset, utf16le, HEADER_LEN,
+    check_fixed_structure_size, get_array, get_u16, get_u32, get_u64, put_padding,
+    slice_from_offset, slice_from_offset32, utf16le, HEADER_LEN,
 };
 use crate::smb::ProtocolError;
 
@@ -18,6 +19,32 @@ bitflags! {
         const WRITE = 0x0000_0002;
         /// Shared delete.
         const DELETE = 0x0000_0004;
+    }
+}
+
+bitflags! {
+    /// SMB lease-state flags.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct LeaseState: u32 {
+        /// No lease caching rights are granted.
+        const NONE = 0x0000_0000;
+        /// Read caching is requested or granted.
+        const READ_CACHING = 0x0000_0001;
+        /// Handle caching is requested or granted.
+        const HANDLE_CACHING = 0x0000_0002;
+        /// Write caching is requested or granted.
+        const WRITE_CACHING = 0x0000_0004;
+    }
+}
+
+bitflags! {
+    /// SMB lease flags shared by lease-v2 request and response contexts.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct LeaseFlags: u32 {
+        /// A lease break is in progress for the identified lease key.
+        const BREAK_IN_PROGRESS = 0x0000_0002;
+        /// The parent lease key field is present.
+        const PARENT_LEASE_KEY_SET = 0x0000_0004;
     }
 }
 
@@ -126,6 +153,165 @@ impl FileId {
     };
 }
 
+const LEASE_CONTEXT_NAME: &[u8; 4] = b"RqLs";
+
+/// Generic SMB2 create-context container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateContext {
+    /// Create-context name encoded in network byte order.
+    pub name: Vec<u8>,
+    /// Create-context payload bytes.
+    pub data: Vec<u8>,
+}
+
+impl CreateContext {
+    /// Builds a generic create context from a name and data payload.
+    #[must_use]
+    pub fn new(name: impl Into<Vec<u8>>, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            name: name.into(),
+            data: data.into(),
+        }
+    }
+
+    /// Builds an SMB 3.x lease-v2 create context.
+    #[must_use]
+    pub fn lease_v2(lease: LeaseV2) -> Self {
+        Self::new(LEASE_CONTEXT_NAME.to_vec(), lease.encode())
+    }
+
+    /// Decodes the create context as an SMB 3.x lease-v2 payload when applicable.
+    pub fn lease_v2_data(&self) -> Result<Option<LeaseV2>, ProtocolError> {
+        if self.name != LEASE_CONTEXT_NAME {
+            return Ok(None);
+        }
+        match self.data.len() {
+            LeaseV2::LEN => LeaseV2::decode(&self.data).map(Some),
+            LeaseV2::V1_LEN => LeaseV2::decode_v1(&self.data).map(Some),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// SMB 3.x lease-v2 request/response payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LeaseV2 {
+    /// Client-generated key identifying the lease owner.
+    pub lease_key: [u8; 16],
+    /// Requested or granted lease state.
+    pub lease_state: LeaseState,
+    /// Lease flags.
+    pub flags: LeaseFlags,
+    /// Parent-directory lease key, when present.
+    pub parent_lease_key: Option<[u8; 16]>,
+    /// Lease epoch value.
+    pub epoch: u16,
+}
+
+impl LeaseV2 {
+    /// Encoded length of an SMB2 lease-v1 payload reused by some SMB 3.x servers in responses.
+    pub const V1_LEN: usize = 32;
+    /// Encoded length of an SMB 3.x lease-v2 payload.
+    pub const LEN: usize = 52;
+
+    /// Builds a lease-v2 payload with the provided key and state.
+    #[must_use]
+    pub fn new(lease_key: [u8; 16], lease_state: LeaseState) -> Self {
+        Self {
+            lease_key,
+            lease_state,
+            flags: LeaseFlags::empty(),
+            parent_lease_key: None,
+            epoch: 0,
+        }
+    }
+
+    /// Sets or clears the parent lease key.
+    #[must_use]
+    pub fn with_parent_lease_key(mut self, parent_lease_key: Option<[u8; 16]>) -> Self {
+        self.parent_lease_key = parent_lease_key;
+        self
+    }
+
+    /// Serializes the lease payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LEN);
+        let mut flags = self.flags;
+        if self.parent_lease_key.is_some() {
+            flags |= LeaseFlags::PARENT_LEASE_KEY_SET;
+        } else {
+            flags.remove(LeaseFlags::PARENT_LEASE_KEY_SET);
+        }
+        out.extend_from_slice(&self.lease_key);
+        out.put_u32_le(self.lease_state.bits());
+        out.put_u32_le(flags.bits());
+        out.put_u64_le(0);
+        out.extend_from_slice(&self.parent_lease_key.unwrap_or([0; 16]));
+        out.put_u16_le(self.epoch);
+        out.put_u16_le(0);
+        out
+    }
+
+    /// Parses a lease-v2 payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = bytes;
+        let lease_key = get_array::<16>(&mut input, "lease_key")?;
+        let lease_state = LeaseState::from_bits(get_u32(&mut input, "lease_state")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "lease_state",
+                reason: "unknown lease-state bits set",
+            },
+        )?;
+        let flags = LeaseFlags::from_bits(get_u32(&mut input, "flags")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "flags",
+                reason: "unknown lease flags set",
+            },
+        )?;
+        let _lease_duration = get_u64(&mut input, "lease_duration")?;
+        let raw_parent_lease_key = get_array::<16>(&mut input, "parent_lease_key")?;
+        let epoch = get_u16(&mut input, "epoch")?;
+        let _reserved = get_u16(&mut input, "reserved")?;
+
+        Ok(Self {
+            lease_key,
+            lease_state,
+            flags,
+            parent_lease_key: flags
+                .contains(LeaseFlags::PARENT_LEASE_KEY_SET)
+                .then_some(raw_parent_lease_key),
+            epoch,
+        })
+    }
+
+    /// Parses a lease-v1 response payload into the common lease shape.
+    pub fn decode_v1(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = bytes;
+        let lease_key = get_array::<16>(&mut input, "lease_key")?;
+        let lease_state = LeaseState::from_bits(get_u32(&mut input, "lease_state")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "lease_state",
+                reason: "unknown lease-state bits set",
+            },
+        )?;
+        let flags = LeaseFlags::from_bits(get_u32(&mut input, "flags")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "flags",
+                reason: "unknown lease flags set",
+            },
+        )?;
+        let _lease_duration = get_u64(&mut input, "lease_duration")?;
+        Ok(Self {
+            lease_key,
+            lease_state,
+            flags,
+            parent_lease_key: None,
+            epoch: 0,
+        })
+    }
+}
+
 /// SMB2 create request body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRequest {
@@ -145,6 +331,8 @@ pub struct CreateRequest {
     pub create_options: CreateOptions,
     /// File name encoded as UTF-16LE.
     pub name: Vec<u8>,
+    /// Optional create contexts attached to the request.
+    pub create_contexts: Vec<CreateContext>,
 }
 
 impl CreateRequest {
@@ -160,14 +348,16 @@ impl CreateRequest {
             create_disposition: CreateDisposition::OpenIf,
             create_options: CreateOptions::NON_DIRECTORY_FILE,
             name: utf16le(path),
+            create_contexts: Vec::new(),
         }
     }
 
     /// Serializes the request body.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let buffer_len = self.name.len().max(1);
-        let mut out = BytesMut::with_capacity(88 + buffer_len);
+        let contexts = encode_create_contexts(&self.create_contexts);
+        let buffer_len = self.name.len().max(1) + contexts.len();
+        let mut out = Vec::with_capacity(88 + buffer_len);
         out.put_u16_le(57);
         out.put_u8(self.requested_oplock_level as u8);
         out.put_u8(0);
@@ -188,6 +378,16 @@ impl CreateRequest {
         } else {
             out.extend_from_slice(&self.name);
         }
+        let contexts_offset = if contexts.is_empty() {
+            0
+        } else {
+            put_padding(&mut out, 8);
+            (HEADER_LEN + out.len()) as u32
+        };
+        let contexts_length = contexts.len() as u32;
+        out[48..52].copy_from_slice(&contexts_offset.to_le_bytes());
+        out[52..56].copy_from_slice(&contexts_length.to_le_bytes());
+        out.extend_from_slice(&contexts);
         out.to_vec()
     }
 
@@ -245,9 +445,23 @@ impl CreateRequest {
             })?;
         let name_offset = get_u16(&mut input, "name_offset")?;
         let name_length = usize::from(get_u16(&mut input, "name_length")?);
-        let _context_offset = get_u32(&mut input, "create_contexts_offset")?;
-        let _context_length = get_u32(&mut input, "create_contexts_length")?;
-        let name = slice_from_offset(body, name_offset, name_length, "name")?.to_vec();
+        let context_offset = get_u32(&mut input, "create_contexts_offset")?;
+        let context_length = get_u32(&mut input, "create_contexts_length")? as usize;
+        let name = if name_length == 0 {
+            Vec::new()
+        } else {
+            slice_from_offset(body, name_offset, name_length, "name")?.to_vec()
+        };
+        let create_contexts = if context_offset == 0 || context_length == 0 {
+            Vec::new()
+        } else {
+            decode_create_contexts(slice_from_offset32(
+                body,
+                context_offset,
+                context_length,
+                "create_contexts",
+            )?)?
+        };
 
         Ok(Self {
             requested_oplock_level,
@@ -258,7 +472,13 @@ impl CreateRequest {
             create_disposition,
             create_options,
             name,
+            create_contexts,
         })
+    }
+
+    /// Returns the first lease-v2 create context attached to the request, if present.
+    pub fn lease_v2(&self) -> Result<Option<LeaseV2>, ProtocolError> {
+        find_lease_v2(&self.create_contexts)
     }
 }
 
@@ -276,14 +496,15 @@ pub struct CreateResponse {
     /// File identifier.
     pub file_id: FileId,
     /// Optional create contexts.
-    pub create_contexts: Vec<u8>,
+    pub create_contexts: Vec<CreateContext>,
 }
 
 impl CreateResponse {
     /// Serializes the response body.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = BytesMut::with_capacity(96 + self.create_contexts.len());
+        let contexts = encode_create_contexts(&self.create_contexts);
+        let mut out = BytesMut::with_capacity(96 + contexts.len());
         out.put_u16_le(89);
         out.put_u8(self.oplock_level as u8);
         out.put_u8(0);
@@ -304,8 +525,8 @@ impl CreateResponse {
             (HEADER_LEN + 88) as u32
         };
         out.put_u32_le(offset);
-        out.put_u32_le(self.create_contexts.len() as u32);
-        out.extend_from_slice(&self.create_contexts);
+        out.put_u32_le(contexts.len() as u32);
+        out.extend_from_slice(&contexts);
         out.to_vec()
     }
 
@@ -349,13 +570,12 @@ impl CreateResponse {
         let create_contexts = if create_contexts_offset == 0 || create_contexts_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(
+            decode_create_contexts(slice_from_offset32(
                 body,
-                create_contexts_offset as u16,
+                create_contexts_offset,
                 create_contexts_length,
                 "create_contexts",
-            )?
-            .to_vec()
+            )?)?
         };
 
         Ok(Self {
@@ -366,6 +586,125 @@ impl CreateResponse {
             file_id,
             create_contexts,
         })
+    }
+
+    /// Returns the first granted lease-v2 response context, if present.
+    pub fn lease_v2(&self) -> Result<Option<LeaseV2>, ProtocolError> {
+        find_lease_v2(&self.create_contexts)
+    }
+}
+
+fn encode_create_contexts(contexts: &[CreateContext]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+
+    for (index, context) in contexts.iter().enumerate() {
+        let mut entry = Vec::with_capacity(16 + context.name.len() + context.data.len() + 8);
+        entry.put_u32_le(0);
+        let name_offset = 16u16;
+        entry.put_u16_le(name_offset);
+        entry.put_u16_le(context.name.len() as u16);
+        entry.put_u16_le(0);
+        let data_offset = if context.data.is_empty() {
+            0
+        } else {
+            let data_offset = align_up(usize::from(name_offset) + context.name.len(), 8);
+            data_offset as u16
+        };
+        entry.put_u16_le(data_offset);
+        entry.put_u32_le(context.data.len() as u32);
+        entry.extend_from_slice(&context.name);
+        put_padding(&mut entry, 8);
+        entry.extend_from_slice(&context.data);
+        put_padding(&mut entry, 8);
+        if index + 1 != contexts.len() {
+            let next = entry.len() as u32;
+            entry[0..4].copy_from_slice(&next.to_le_bytes());
+        }
+        encoded.extend_from_slice(&entry);
+    }
+
+    encoded
+}
+
+fn decode_create_contexts(buffer: &[u8]) -> Result<Vec<CreateContext>, ProtocolError> {
+    let mut contexts = Vec::new();
+    let mut cursor = buffer;
+
+    while !cursor.is_empty() {
+        if cursor.len() < 16 {
+            return Err(ProtocolError::UnexpectedEof {
+                field: "create_context",
+            });
+        }
+        let next = u32::from_le_bytes(cursor[0..4].try_into().expect("slice len"));
+        let entry_len = if next == 0 {
+            cursor.len()
+        } else {
+            next as usize
+        };
+        if entry_len > cursor.len() || entry_len < 16 || !entry_len.is_multiple_of(8) {
+            return Err(ProtocolError::InvalidField {
+                field: "next",
+                reason: "create context extends past buffer",
+            });
+        }
+
+        let entry = &cursor[..entry_len];
+        let mut input = entry;
+        let _next = get_u32(&mut input, "next")?;
+        let name_offset = usize::from(get_u16(&mut input, "name_offset")?);
+        let name_length = usize::from(get_u16(&mut input, "name_length")?);
+        let _reserved = get_u16(&mut input, "reserved")?;
+        let data_offset = usize::from(get_u16(&mut input, "data_offset")?);
+        let data_length = get_u32(&mut input, "data_length")? as usize;
+        let name = slice_from_context(entry, name_offset, name_length, "name")?.to_vec();
+        let data = if data_offset == 0 || data_length == 0 {
+            Vec::new()
+        } else {
+            slice_from_context(entry, data_offset, data_length, "data")?.to_vec()
+        };
+        contexts.push(CreateContext { name, data });
+
+        if next == 0 {
+            break;
+        }
+        cursor = &cursor[entry_len..];
+    }
+
+    Ok(contexts)
+}
+
+fn find_lease_v2(contexts: &[CreateContext]) -> Result<Option<LeaseV2>, ProtocolError> {
+    for context in contexts {
+        if let Some(lease) = context.lease_v2_data()? {
+            return Ok(Some(lease));
+        }
+    }
+    Ok(None)
+}
+
+fn slice_from_context<'a>(
+    context: &'a [u8],
+    offset: usize,
+    len: usize,
+    field: &'static str,
+) -> Result<&'a [u8], ProtocolError> {
+    let end = offset.checked_add(len).ok_or(ProtocolError::InvalidField {
+        field,
+        reason: "offset overflow",
+    })?;
+    if end > context.len() {
+        return Err(ProtocolError::UnexpectedEof { field });
+    }
+    Ok(&context[offset..end])
+}
+
+fn align_up(value: usize, alignment: usize) -> usize {
+    let remainder = value % alignment;
+    if remainder == 0 {
+        value
+    } else {
+        value + (alignment - remainder)
     }
 }
 
@@ -467,8 +806,8 @@ impl CloseResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseRequest, CloseResponse, CreateRequest, CreateResponse, FileAttributes, FileId,
-        OplockLevel, ShareAccess,
+        CloseRequest, CloseResponse, CreateContext, CreateRequest, CreateResponse, FileAttributes,
+        FileId, LeaseFlags, LeaseState, LeaseV2, OplockLevel, ShareAccess,
     };
     use super::{CreateDisposition, CreateOptions, RequestedOplockLevel};
 
@@ -483,6 +822,7 @@ mod tests {
             create_disposition: CreateDisposition::OpenIf,
             create_options: CreateOptions::NON_DIRECTORY_FILE,
             name: super::utf16le("notes.txt"),
+            create_contexts: Vec::new(),
         };
 
         let encoded = request.encode();
@@ -502,6 +842,7 @@ mod tests {
             create_disposition: CreateDisposition::Open,
             create_options: CreateOptions::DIRECTORY_FILE,
             name: Vec::new(),
+            create_contexts: Vec::new(),
         };
 
         let encoded = request.encode();
@@ -522,7 +863,7 @@ mod tests {
                 persistent: 1,
                 volatile: 2,
             },
-            create_contexts: vec![0x01, 0x02],
+            create_contexts: vec![CreateContext::new(b"ExtA".to_vec(), vec![0x01, 0x02])],
         };
 
         let encoded = response.encode();
@@ -556,5 +897,86 @@ mod tests {
         let decoded_response =
             CloseResponse::decode(&encoded_response).expect("response should decode");
         assert_eq!(decoded_response, response);
+    }
+
+    #[test]
+    fn create_request_and_response_roundtrip_lease_v2_contexts() {
+        let lease = LeaseV2::new(
+            *b"lease-key-000000",
+            LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING,
+        )
+        .with_parent_lease_key(Some(*b"parent-lease-key"));
+        let lease = LeaseV2 {
+            flags: LeaseFlags::BREAK_IN_PROGRESS | LeaseFlags::PARENT_LEASE_KEY_SET,
+            epoch: 3,
+            ..lease
+        };
+
+        let request = CreateRequest {
+            requested_oplock_level: RequestedOplockLevel::Lease,
+            impersonation_level: 2,
+            desired_access: 0x0012_019f,
+            file_attributes: FileAttributes::NORMAL,
+            share_access: ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE,
+            create_disposition: CreateDisposition::OpenIf,
+            create_options: CreateOptions::NON_DIRECTORY_FILE,
+            name: super::utf16le("notes.txt"),
+            create_contexts: vec![CreateContext::lease_v2(lease)],
+        };
+
+        let encoded_request = request.encode();
+        let decoded_request =
+            CreateRequest::decode(&encoded_request).expect("request should decode");
+        assert_eq!(decoded_request, request);
+        assert_eq!(
+            decoded_request.lease_v2().expect("lease should parse"),
+            Some(lease)
+        );
+
+        let response = CreateResponse {
+            oplock_level: OplockLevel::Lease,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4096,
+            end_of_file: 128,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: vec![CreateContext::lease_v2(lease)],
+        };
+        let encoded_response = response.encode();
+        let decoded_response =
+            CreateResponse::decode(&encoded_response).expect("response should decode");
+        assert_eq!(decoded_response, response);
+        assert_eq!(
+            decoded_response.lease_v2().expect("lease should parse"),
+            Some(lease)
+        );
+    }
+
+    #[test]
+    fn lease_v1_response_is_accepted_through_common_lease_parser() {
+        let lease_key = *b"lease-key-000000";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&lease_key);
+        payload.extend_from_slice(
+            (LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING)
+                .bits()
+                .to_le_bytes()
+                .as_ref(),
+        );
+        payload.extend_from_slice(&LeaseFlags::BREAK_IN_PROGRESS.bits().to_le_bytes());
+        payload.extend_from_slice(&0u64.to_le_bytes());
+
+        let context = CreateContext::new(b"RqLs".to_vec(), payload);
+        let lease = context
+            .lease_v2_data()
+            .expect("lease should decode")
+            .expect("lease should exist");
+
+        assert_eq!(lease.lease_key, lease_key);
+        assert_eq!(lease.epoch, 0);
+        assert!(lease.parent_lease_key.is_none());
+        assert!(lease.flags.contains(LeaseFlags::BREAK_IN_PROGRESS));
     }
 }

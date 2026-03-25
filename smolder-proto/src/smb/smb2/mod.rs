@@ -12,8 +12,9 @@ mod tree;
 use bytes::Buf;
 
 pub use create::{
-    CloseRequest, CloseResponse, CreateDisposition, CreateOptions, CreateRequest, CreateResponse,
-    FileAttributes, FileId, OplockLevel, RequestedOplockLevel, ShareAccess,
+    CloseRequest, CloseResponse, CreateContext, CreateDisposition, CreateOptions, CreateRequest,
+    CreateResponse, FileAttributes, FileId, LeaseFlags, LeaseState, LeaseV2, OplockLevel,
+    RequestedOplockLevel, ShareAccess,
 };
 pub use header::{Command, Header, HeaderFlags};
 pub use info::{

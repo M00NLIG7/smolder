@@ -45,4 +45,7 @@ pub enum CoreError {
     /// The caller supplied an invalid SMB share path or UNC path.
     #[error("invalid path: {0}")]
     PathInvalid(&'static str),
+    /// The requested operation is valid but not supported by the negotiated session or server.
+    #[error("unsupported: {0}")]
+    Unsupported(&'static str),
 }

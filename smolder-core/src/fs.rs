@@ -9,12 +9,12 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use smolder_proto::smb::smb2::{
-    CloseRequest, CloseResponse, CreateDisposition, CreateOptions, CreateRequest, Dialect,
-    DispositionInformation, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
-    FileStandardInformation, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,
-    PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryFlags,
-    QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation, SetInfoRequest,
-    ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
+    CloseRequest, CloseResponse, CreateContext, CreateDisposition, CreateOptions, CreateRequest,
+    Dialect, DispositionInformation, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
+    FileStandardInformation, FlushRequest, GlobalCapabilities, LeaseFlags, LeaseState, LeaseV2,
+    NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
+    QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation,
+    SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
@@ -86,6 +86,70 @@ pub struct SmbDirectoryEntry {
     pub metadata: SmbMetadata,
 }
 
+/// High-level lease request attached to an open operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseRequest {
+    key: [u8; 16],
+    state: LeaseState,
+    parent_key: Option<[u8; 16]>,
+}
+
+impl LeaseRequest {
+    /// Builds a lease request with an explicit lease key and desired state.
+    #[must_use]
+    pub fn new(key: [u8; 16], state: LeaseState) -> Self {
+        Self {
+            key,
+            state,
+            parent_key: None,
+        }
+    }
+
+    /// Builds a lease request with a random lease key.
+    #[must_use]
+    pub fn random(state: LeaseState) -> Self {
+        Self::new(random(), state)
+    }
+
+    /// Associates a parent-directory lease key with the request.
+    #[must_use]
+    pub fn with_parent_key(mut self, parent_key: [u8; 16]) -> Self {
+        self.parent_key = Some(parent_key);
+        self
+    }
+
+    fn into_proto(self) -> LeaseV2 {
+        LeaseV2::new(self.key, self.state).with_parent_lease_key(self.parent_key)
+    }
+}
+
+/// Lease metadata granted by the server for an open handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lease {
+    /// Lease owner key.
+    pub key: [u8; 16],
+    /// Granted lease state.
+    pub state: LeaseState,
+    /// Server-provided lease flags.
+    pub flags: LeaseFlags,
+    /// Parent lease key when present.
+    pub parent_key: Option<[u8; 16]>,
+    /// Lease epoch.
+    pub epoch: u16,
+}
+
+impl From<LeaseV2> for Lease {
+    fn from(value: LeaseV2) -> Self {
+        Self {
+            key: value.lease_key,
+            state: value.lease_state,
+            flags: value.flags,
+            parent_key: value.parent_lease_key,
+            epoch: value.epoch,
+        }
+    }
+}
+
 /// Builder for an authenticated SMB2 client session.
 #[derive(Debug, Clone)]
 pub struct SmbClientBuilder {
@@ -106,7 +170,7 @@ impl Default for SmbClientBuilder {
             port: DEFAULT_PORT,
             credentials: None,
             signing_mode: SigningMode::ENABLED,
-            capabilities: GlobalCapabilities::LARGE_MTU,
+            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::LEASING,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
             transfer_chunk_size: DEFAULT_TRANSFER_CHUNK_SIZE,
@@ -349,12 +413,20 @@ where
         path: impl AsRef<str>,
         options: OpenOptions,
     ) -> Result<RemoteFile<'a, T>, CoreError> {
+        if options.lease.is_some() {
+            self.ensure_lease_support()?;
+        }
         let request = options.to_create_request(path.as_ref())?;
         let response = self.connection.create(&request).await?;
+        let lease = response
+            .lease_v2()
+            .map_err(CoreError::from)?
+            .map(Lease::from);
 
         Ok(RemoteFile {
             share: self,
             file_id: response.file_id,
+            lease,
             position: 0,
             end_of_file: response.end_of_file,
             closed: false,
@@ -762,6 +834,27 @@ where
         let negotiated = self.connection.state().negotiated.max_transact_size;
         negotiated.min(self.transfer_chunk_size).max(1)
     }
+
+    fn ensure_lease_support(&self) -> Result<(), CoreError> {
+        let negotiated = &self.connection.state().negotiated;
+        if !matches!(
+            negotiated.dialect_revision,
+            Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311
+        ) {
+            return Err(CoreError::Unsupported(
+                "lease support currently requires an SMB 3.x dialect",
+            ));
+        }
+        if !negotiated
+            .capabilities
+            .contains(GlobalCapabilities::LEASING)
+        {
+            return Err(CoreError::Unsupported(
+                "server does not advertise SMB leasing support",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// An opened remote file handle borrowed from a share.
@@ -769,6 +862,7 @@ where
 pub struct RemoteFile<'a, T = TokioTcpTransport> {
     share: &'a mut Share<T>,
     file_id: FileId,
+    lease: Option<Lease>,
     position: u64,
     end_of_file: u64,
     closed: bool,
@@ -782,6 +876,12 @@ where
     #[must_use]
     pub fn file_id(&self) -> FileId {
         self.file_id
+    }
+
+    /// Returns the granted lease for the handle, if the open requested one and the server granted it.
+    #[must_use]
+    pub fn lease(&self) -> Option<Lease> {
+        self.lease
     }
 
     /// Reads the next chunk into the provided buffer and returns the number of bytes read.
@@ -865,6 +965,7 @@ pub struct OpenOptions {
     create: bool,
     truncate: bool,
     create_new: bool,
+    lease: Option<LeaseRequest>,
 }
 
 impl OpenOptions {
@@ -909,6 +1010,13 @@ impl OpenOptions {
         self
     }
 
+    /// Requests an SMB lease for the opened handle.
+    #[must_use]
+    pub fn lease(mut self, lease: LeaseRequest) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
     fn to_create_request(self, path: &str) -> Result<CreateRequest, CoreError> {
         if !self.read && !self.write {
             return Err(CoreError::InvalidInput(
@@ -927,6 +1035,10 @@ impl OpenOptions {
         request.file_attributes = FileAttributes::NORMAL;
         request.create_options = CreateOptions::NON_DIRECTORY_FILE;
         request.create_disposition = create_disposition(self);
+        if let Some(lease) = self.lease {
+            request.requested_oplock_level = smolder_proto::smb::smb2::RequestedOplockLevel::Lease;
+            request.create_contexts = vec![CreateContext::lease_v2(lease.into_proto())];
+        }
         Ok(request)
     }
 }
@@ -1079,12 +1191,13 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
-        CloseResponse, Command, CreateDisposition, CreateOptions, CreateRequest, CreateResponse,
-        Dialect, DirectoryInformationEntry, FileAttributes, FileBasicInformation, FileId,
-        FileInfoClass, FileStandardInformation, FlushRequest, FlushResponse, GlobalCapabilities,
-        Header, MessageId, NegotiateRequest, NegotiateResponse, OplockLevel, QueryDirectoryFlags,
-        QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
-        ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags, SessionSetupRequest,
+        CloseResponse, Command, CreateContext, CreateDisposition, CreateOptions, CreateRequest,
+        CreateResponse, Dialect, DirectoryInformationEntry, FileAttributes, FileBasicInformation,
+        FileId, FileInfoClass, FileStandardInformation, FlushRequest, FlushResponse,
+        GlobalCapabilities, Header, LeaseState, LeaseV2, MessageId, NegotiateRequest,
+        NegotiateResponse, OplockLevel, QueryDirectoryFlags, QueryDirectoryRequest,
+        QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse,
+        ReadResponseFlags, RequestedOplockLevel, SessionFlags, SessionSetupRequest,
         SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse,
         ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectRequest,
         TreeConnectResponse, TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
@@ -1093,7 +1206,7 @@ mod tests {
 
     use crate::client::Connection;
     use crate::error::CoreError;
-    use crate::fs::{OpenOptions, Share, SmbClient};
+    use crate::fs::{LeaseRequest, OpenOptions, Share, SmbClient};
     use crate::transport::Transport;
 
     #[derive(Debug)]
@@ -1238,6 +1351,79 @@ mod tests {
             request.name,
             smolder_proto::smb::smb2::utf16le("docs\\nested\\file.txt")
         );
+    }
+
+    #[tokio::test]
+    async fn open_with_lease_requests_lease_context_and_exposes_grant() {
+        let granted_lease = LeaseV2::new(
+            *b"lease-key-000000",
+            LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING,
+        );
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::Lease,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: vec![CreateContext::lease_v2(granted_lease)],
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let mut share = build_share(reads).await;
+        let requested_lease = LeaseRequest::new(
+            granted_lease.lease_key,
+            LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING,
+        );
+        let file = share
+            .open(
+                "notes.txt",
+                OpenOptions::new().read(true).lease(requested_lease),
+            )
+            .await
+            .expect("lease open should succeed");
+
+        assert_eq!(
+            file.lease().expect("lease should be present").key,
+            granted_lease.lease_key
+        );
+        assert_eq!(
+            file.lease().expect("lease should be present").state,
+            granted_lease.lease_state
+        );
+        file.close().await.expect("close should succeed");
+
+        let writes = transport_writes(share);
+        let create = outbound_create(&writes[3]);
+        assert_eq!(create.requested_oplock_level, RequestedOplockLevel::Lease);
+        let requested = create.lease_v2().expect("lease should parse");
+        assert_eq!(requested, Some(requested_lease.into_proto()));
     }
 
     #[tokio::test]
@@ -1854,7 +2040,7 @@ mod tests {
             dialect_revision: Dialect::Smb302,
             negotiate_contexts: Vec::new(),
             server_guid: *b"server-guid-0001",
-            capabilities: GlobalCapabilities::LARGE_MTU,
+            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::LEASING,
             max_transact_size: 65_536,
             max_read_size: 4,
             max_write_size: 4,

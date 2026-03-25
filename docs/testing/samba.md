@@ -14,8 +14,10 @@ This document now includes live interoperability gates against a real Samba serv
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> READ -> CLOSE`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> FLUSH -> CLOSE -> TREE_DISCONNECT -> LOGOFF`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> FLUSH -> CLOSE -> TREE_DISCONNECT -> LOGOFF`
+- `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE(LEASE_V2) -> CLOSE`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> IOCTL(FSCTL_SRV_REQUEST_RESUME_KEY) -> CLOSE`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> IOCTL(FSCTL_QUERY_NETWORK_INTERFACE_INFO)`
+- high-level `open` with lease
 - high-level `write` / `read`
 - high-level `put` / `get`
 - high-level `list` / `stat`
@@ -143,10 +145,12 @@ The live negotiate path currently sends:
 
 - dialects: `SMB 2.1`, `SMB 3.0.2`, `SMB 3.1.1`
 - signing mode: enabled
-- capabilities: `LARGE_MTU`
+- capabilities: `LARGE_MTU`, `LEASING`
 - SMB 3.1.1 preauth-integrity negotiate context with `SHA-512`
 
 When Samba selects `SMB 3.1.1`, Smolder now tracks the preauth transcript across `NEGOTIATE` and `SESSION_SETUP`, derives the SMB 3.1.1 signing key from the final session-setup request hash, verifies the final signed `SESSION_SETUP` success response, signs subsequent session and tree/file requests, and verifies signed SMB 3.x responses on the shared post-auth receive path.
+
+The current local Samba fixture accepts lease-aware opens, but it does not consistently grant a lease back under its current policy. The live lease tests therefore verify that lease-aware `CREATE` requests interoperate and only assert the granted lease details when the server actually returns them.
 
 ## Next External Gates
 
@@ -162,26 +166,28 @@ The current live coverage now reaches:
 8. `FLUSH`
 9. `TREE_DISCONNECT`
 10. `LOGOFF`
-11. `IOCTL(FSCTL_SRV_REQUEST_RESUME_KEY)`
-12. `IOCTL(FSCTL_QUERY_NETWORK_INTERFACE_INFO)` when the server advertises multi-channel support
-13. high-level `write`
-14. high-level `read`
-15. high-level `put`
-16. high-level `get`
-17. high-level `list`
-18. high-level `stat`
-19. high-level `rename`
-20. high-level `remove`
-21. high-level `flush`
-22. high-level `disconnect`
-23. high-level `logoff`
-24. CLI `cat`
-25. CLI `get`
-26. CLI `put`
-27. CLI `ls`
-28. CLI `stat`
-29. CLI `mv`
-30. CLI `rm`
+11. `CREATE(LEASE_V2)`
+12. high-level `open` with lease
+13. `IOCTL(FSCTL_SRV_REQUEST_RESUME_KEY)`
+14. `IOCTL(FSCTL_QUERY_NETWORK_INTERFACE_INFO)` when the server advertises multi-channel support
+15. high-level `write`
+16. high-level `read`
+17. high-level `put`
+18. high-level `get`
+19. high-level `list`
+20. high-level `stat`
+21. high-level `rename`
+22. high-level `remove`
+23. high-level `flush`
+24. high-level `disconnect`
+25. high-level `logoff`
+26. CLI `cat`
+27. CLI `get`
+28. CLI `put`
+29. CLI `ls`
+30. CLI `stat`
+31. CLI `mv`
+32. CLI `rm`
 
 The current engine also handles interim async SMB2 responses (`STATUS_PENDING` with `SMB2_FLAGS_ASYNC_COMMAND`) and keeps waiting for the final response on the same message id.
 
@@ -189,8 +195,9 @@ The next practical interop gates are:
 
 1. deeper `QUERY_INFO` coverage beyond basic file metadata
 2. stronger SMB 3.x response-signing coverage for more edge cases, including additional async and error paths
-3. more `IOCTL` coverage beyond `FSCTL_SRV_REQUEST_RESUME_KEY` and `FSCTL_QUERY_NETWORK_INTERFACE_INFO`
-4. leases / durable handles / compounding
-5. encryption and negotiate-context expansion beyond preauth integrity
+3. lease-break handling, lease upgrades/downgrades, and durable-handle create contexts
+4. richer `QUERY_INFO` and `SET_INFO` coverage around metadata edge cases
+5. broader `IOCTL` coverage beyond `FSCTL_SRV_REQUEST_RESUME_KEY` and `FSCTL_QUERY_NETWORK_INTERFACE_INFO`
+6. encryption and negotiate-context expansion beyond preauth integrity
 
 After those pass consistently, the next step is wiring a repeatable Samba `selftest` / `smbtorture` harness for the product surface Smolder actually exposes.

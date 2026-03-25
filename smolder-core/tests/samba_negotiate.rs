@@ -4,10 +4,10 @@ use smolder_core::prelude::{
     Connection, NtlmAuthenticator, NtlmCredentials, TokioTcpTransport, TreeConnected,
 };
 use smolder_proto::smb::smb2::{
-    CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, FlushRequest,
-    GlobalCapabilities, NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities,
-    PreauthIntegrityHashId, ReadRequest, SessionId, ShareAccess, SigningMode, TreeConnectRequest,
-    TreeId, WriteRequest,
+    CloseRequest, CreateContext, CreateDisposition, CreateOptions, CreateRequest, Dialect,
+    FlushRequest, GlobalCapabilities, LeaseState, LeaseV2, NegotiateContext, NegotiateRequest,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, RequestedOplockLevel,
+    SessionId, ShareAccess, SigningMode, TreeConnectRequest, TreeId, WriteRequest,
 };
 
 fn required_env(name: &str) -> Option<String> {
@@ -55,7 +55,7 @@ impl SambaConfig {
 fn negotiate_request() -> NegotiateRequest {
     NegotiateRequest {
         security_mode: SigningMode::ENABLED,
-        capabilities: GlobalCapabilities::LARGE_MTU,
+        capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::LEASING,
         client_guid: *b"smolder-client01",
         dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
         negotiate_contexts: vec![NegotiateContext::preauth_integrity(
@@ -309,5 +309,70 @@ async fn requests_resume_key_with_ioctl_when_configured() {
     assert!(
         resume_key.resume_key.iter().any(|byte| *byte != 0),
         "server should return a non-zero opaque resume key"
+    );
+}
+
+#[tokio::test]
+async fn grants_lease_on_create_when_configured() {
+    let Some((_config, mut connection)) = authenticated_tree_connection().await else {
+        return;
+    };
+
+    if !matches!(
+        connection.state().negotiated.dialect_revision,
+        Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311
+    ) {
+        eprintln!("skipping lease test: negotiated dialect is not SMB 3.x");
+        return;
+    }
+    if !connection
+        .state()
+        .negotiated
+        .capabilities
+        .contains(GlobalCapabilities::LEASING)
+    {
+        eprintln!("skipping lease test: server did not advertise leasing support");
+        return;
+    }
+
+    let path = unique_test_file_path();
+    let lease_key = *b"lease-key-000000";
+    let mut create_request = CreateRequest::from_path(&path);
+    create_request.requested_oplock_level = RequestedOplockLevel::Lease;
+    create_request.create_disposition = CreateDisposition::Create;
+    create_request.create_options |= CreateOptions::DELETE_ON_CLOSE;
+    create_request.desired_access |= 0x0001_0000;
+    create_request.share_access |= ShareAccess::DELETE;
+    create_request.create_contexts = vec![CreateContext::lease_v2(LeaseV2::new(
+        lease_key,
+        LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING,
+    ))];
+
+    let created = connection
+        .create(&create_request)
+        .await
+        .expect("Samba should create a leased test file");
+    let lease = created.lease_v2().expect("lease response should decode");
+    let closed = connection
+        .close(&CloseRequest {
+            flags: 0,
+            file_id: created.file_id,
+        })
+        .await
+        .expect("Samba should close the leased test file");
+
+    assert_eq!(closed.flags, 0);
+    let Some(lease) = lease else {
+        eprintln!(
+            "skipping lease grant assertion: Samba accepted the lease-aware create but did not grant a lease under the current fixture policy"
+        );
+        return;
+    };
+    assert_eq!(lease.lease_key, lease_key);
+    assert!(
+        lease
+            .lease_state
+            .contains(LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING),
+        "server should grant at least read and handle caching on the first open"
     );
 }

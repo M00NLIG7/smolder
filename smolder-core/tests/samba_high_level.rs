@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use smolder_core::prelude::{NtlmCredentials, OpenOptions, Share, SmbClient};
+use smolder_core::prelude::{LeaseRequest, NtlmCredentials, OpenOptions, Share, SmbClient};
+use smolder_proto::smb::smb2::LeaseState;
 use tokio::sync::Mutex;
 
 fn required_env(name: &str) -> Option<String> {
@@ -248,4 +249,54 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
 
     let client = share.disconnect().await.expect("disconnect should succeed");
     client.logoff().await.expect("logoff should succeed");
+}
+
+#[tokio::test]
+async fn opens_file_with_lease_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some((_config, mut share)) = connected_share().await else {
+        return;
+    };
+
+    let remote_path = unique_name("smolder-high-level-lease");
+    let lease_key = *b"lease-key-000000";
+    let file = share
+        .open(
+            &remote_path,
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .lease(LeaseRequest::new(
+                    lease_key,
+                    LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING,
+                )),
+        )
+        .await
+        .expect("lease open should succeed");
+    let lease = file.lease();
+    file.close().await.expect("close should succeed");
+    let Some(lease) = lease else {
+        eprintln!(
+            "skipping lease grant assertion: Samba accepted the lease-aware open but did not grant a lease under the current fixture policy"
+        );
+        share
+            .remove(&remote_path)
+            .await
+            .expect("remove should succeed");
+        return;
+    };
+
+    assert_eq!(lease.key, lease_key);
+    assert!(
+        lease
+            .state
+            .contains(LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING),
+        "server should grant at least read and handle caching on the first open"
+    );
+
+    share
+        .remove(&remote_path)
+        .await
+        .expect("remove should succeed");
 }

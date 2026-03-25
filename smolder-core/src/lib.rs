@@ -16,8 +16,8 @@ pub mod prelude {
     pub use crate::client::{Authenticated, Connected, Connection, Negotiated, TreeConnected};
     pub use crate::error::CoreError;
     pub use crate::fs::{
-        OpenOptions, RemoteFile, Share, SmbClient, SmbClientBuilder, SmbDirectoryEntry,
-        SmbMetadata,
+        Lease, LeaseRequest, OpenOptions, RemoteFile, Share, SmbClient, SmbClientBuilder,
+        SmbDirectoryEntry, SmbMetadata,
     };
     pub use crate::transport::{TokioTcpTransport, Transport};
 }
