@@ -4,6 +4,7 @@ use aes::Aes128;
 use cmac::Cmac;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
+use std::sync::Arc;
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
     AsyncId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect, FileId,
@@ -56,7 +57,7 @@ pub struct Authenticated {
     /// Whether the session requires signed responses and requests.
     pub signing_required: bool,
     /// Derived request-signing state for the session, if available.
-    pub signing: Option<SigningState>,
+    pub signing: Option<Arc<SigningState>>,
 }
 
 /// The transport is connected to a tree and can issue file operations.
@@ -81,7 +82,7 @@ pub struct TreeConnected {
     /// Whether the session requires signed responses and requests.
     pub signing_required: bool,
     /// Derived request-signing state for the session, if available.
-    pub signing: Option<SigningState>,
+    pub signing: Option<Arc<SigningState>>,
 }
 
 /// SMB 3.1.1 preauthentication transcript state.
@@ -249,7 +250,7 @@ struct RequestContext {
     session_id: SessionId,
     tree_id: TreeId,
     signing_required: bool,
-    signing: Option<SigningState>,
+    signing: Option<Arc<SigningState>>,
 }
 
 impl RequestContext {
@@ -257,7 +258,7 @@ impl RequestContext {
         session_id: SessionId,
         tree_id: TreeId,
         signing_required: bool,
-        signing: Option<SigningState>,
+        signing: Option<Arc<SigningState>>,
     ) -> Self {
         Self {
             session_id,
@@ -418,7 +419,7 @@ where
                     &header,
                     &transaction.response_packet,
                     signing_required,
-                    signing.as_ref(),
+                    signing.as_deref(),
                 )?;
                 auth_provider.finish(&response.security_buffer)?;
                 let Connection {
@@ -979,7 +980,7 @@ where
 
         let mut packet = header.encode();
         packet.extend_from_slice(&body);
-        if let Some(signing) = context.signing.as_ref() {
+        if let Some(signing) = context.signing.as_deref() {
             signing.sign_packet(&mut packet)?;
         }
         let frame = SessionMessage::encode_payload(&packet)?;
@@ -1090,7 +1091,7 @@ fn verify_response_signature(
     context: &RequestContext,
 ) -> Result<(), CoreError> {
     if header.flags.contains(HeaderFlags::SIGNED) {
-        let signing = context.signing.as_ref().ok_or(CoreError::InvalidResponse(
+        let signing = context.signing.as_deref().ok_or(CoreError::InvalidResponse(
             "received a signed SMB response but no signing key is available",
         ))?;
         return signing.verify_packet(response_packet);
@@ -1217,7 +1218,7 @@ fn derive_signing_state(
     dialect: Dialect,
     session_key: Option<&[u8]>,
     preauth_integrity: Option<&PreauthIntegrityState>,
-) -> Result<Option<SigningState>, CoreError> {
+) -> Result<Option<Arc<SigningState>>, CoreError> {
     let Some(session_key) = session_key else {
         return Ok(None);
     };
@@ -1252,7 +1253,7 @@ fn derive_signing_state(
         }
     };
 
-    Ok(Some(signing))
+    Ok(Some(Arc::new(signing)))
 }
 
 fn session_signing_required(
@@ -1317,6 +1318,7 @@ fn session_setup_security_mode(signing_mode: SigningMode) -> SessionSetupSecurit
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
@@ -1487,7 +1489,7 @@ mod tests {
         negotiate_response: &NegotiateResponse,
         session_request: &SessionSetupRequest,
         session_key: &[u8],
-    ) -> super::SigningState {
+    ) -> Arc<super::SigningState> {
         let negotiate_request_packet = request_packet(
             Command::Negotiate,
             0,
