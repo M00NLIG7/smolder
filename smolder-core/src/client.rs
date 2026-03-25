@@ -10,7 +10,7 @@ use smolder_proto::smb::smb2::{
     FlushRequest, FlushResponse, Header, HeaderFlags, LogoffRequest, LogoffResponse, MessageId,
     NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
     QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
-    ReadRequest, ReadResponse, SessionId, SessionSetupRequest, SessionSetupResponse,
+    ReadRequest, ReadResponse, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
     SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, SigningMode, TreeConnectRequest,
     TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse, TreeId, WriteRequest,
     WriteResponse,
@@ -31,6 +31,8 @@ pub struct Connected;
 pub struct Negotiated {
     /// The server negotiate response.
     pub response: NegotiateResponse,
+    /// Signing mode requested by the client during negotiate.
+    pub client_signing_mode: SigningMode,
     /// Preauthentication integrity state for SMB 3.1.1, if negotiated.
     pub preauth_integrity: Option<PreauthIntegrityState>,
 }
@@ -40,6 +42,8 @@ pub struct Negotiated {
 pub struct Authenticated {
     /// Negotiate details for the connection.
     pub negotiated: NegotiateResponse,
+    /// Signing mode requested by the client during negotiate.
+    pub client_signing_mode: SigningMode,
     /// Session setup response.
     pub session: SessionSetupResponse,
     /// Assigned session identifier.
@@ -48,6 +52,8 @@ pub struct Authenticated {
     pub preauth_integrity: Option<PreauthIntegrityState>,
     /// Exported session key from the authentication mechanism.
     pub session_key: Option<Vec<u8>>,
+    /// Whether the session requires signed responses and requests.
+    pub signing_required: bool,
     /// Derived request-signing state for the session, if available.
     pub signing: Option<SigningState>,
 }
@@ -57,6 +63,8 @@ pub struct Authenticated {
 pub struct TreeConnected {
     /// Negotiate details for the connection.
     pub negotiated: NegotiateResponse,
+    /// Signing mode requested by the client during negotiate.
+    pub client_signing_mode: SigningMode,
     /// Session setup response.
     pub session: SessionSetupResponse,
     /// Tree connect response.
@@ -69,6 +77,8 @@ pub struct TreeConnected {
     pub preauth_integrity: Option<PreauthIntegrityState>,
     /// Exported session key from the authentication mechanism.
     pub session_key: Option<Vec<u8>>,
+    /// Whether the session requires signed responses and requests.
+    pub signing_required: bool,
     /// Derived request-signing state for the session, if available.
     pub signing: Option<SigningState>,
 }
@@ -197,20 +207,27 @@ struct TransactionFrames {
 struct RequestContext {
     session_id: SessionId,
     tree_id: TreeId,
+    signing_required: bool,
     signing: Option<SigningState>,
 }
 
 impl RequestContext {
-    fn new(session_id: SessionId, tree_id: TreeId, signing: Option<SigningState>) -> Self {
+    fn new(
+        session_id: SessionId,
+        tree_id: TreeId,
+        signing_required: bool,
+        signing: Option<SigningState>,
+    ) -> Self {
         Self {
             session_id,
             tree_id,
+            signing_required,
             signing,
         }
     }
 
     fn unsigned(session_id: SessionId, tree_id: TreeId) -> Self {
-        Self::new(session_id, tree_id, None)
+        Self::new(session_id, tree_id, false, None)
     }
 }
 
@@ -277,6 +294,7 @@ where
             next_message_id: self.next_message_id,
             state: Negotiated {
                 response,
+                client_signing_mode: request.security_mode,
                 preauth_integrity,
             },
         })
@@ -296,8 +314,9 @@ where
         A: AuthProvider,
     {
         let negotiated = self.state.response.clone();
+        let client_signing_mode = self.state.client_signing_mode;
         let mut preauth_integrity = self.state.preauth_integrity.clone();
-        let security_mode = session_setup_security_mode(negotiated.security_mode);
+        let security_mode = session_setup_security_mode(client_signing_mode);
         let mut session_id = SessionId(0);
         let mut next_token = auth_provider.initial_token(&negotiated)?;
 
@@ -345,6 +364,11 @@ where
             session_id = header.session_id;
             if success {
                 let session_key = auth_provider.session_key().map(ToOwned::to_owned);
+                let signing_required = session_signing_required(
+                    client_signing_mode,
+                    negotiated.security_mode,
+                    response.session_flags,
+                );
                 let signing = derive_signing_state(
                     negotiated.dialect_revision,
                     session_key.as_deref(),
@@ -354,6 +378,7 @@ where
                     negotiated.dialect_revision,
                     &header,
                     &transaction.response_packet,
+                    signing_required,
                     signing.as_ref(),
                 )?;
                 auth_provider.finish(&response.security_buffer)?;
@@ -362,10 +387,12 @@ where
                     next_message_id: self.next_message_id,
                     state: Authenticated {
                         negotiated,
+                        client_signing_mode,
                         session: response,
                         session_id,
                         preauth_integrity,
                         session_key,
+                        signing_required,
                         signing,
                     },
                 });
@@ -381,6 +408,7 @@ where
         request: &SessionSetupRequest,
     ) -> Result<Connection<T, Authenticated>, CoreError> {
         let negotiated = self.state.response.clone();
+        let client_signing_mode = self.state.client_signing_mode;
         let mut preauth_integrity = self.state.preauth_integrity.clone();
         let transaction = self
             .transact_framed(
@@ -409,18 +437,28 @@ where
             negotiated.dialect_revision,
             &header,
             &transaction.response_packet,
+            request
+                .security_mode
+                .contains(SessionSetupSecurityMode::SIGNING_REQUIRED),
             None,
         )?;
+        let signing_required = session_signing_required(
+            client_signing_mode,
+            negotiated.security_mode,
+            response.session_flags,
+        );
 
         Ok(Connection {
             transport: self.transport,
             next_message_id: self.next_message_id,
             state: Authenticated {
                 negotiated,
+                client_signing_mode,
                 session: response,
                 session_id: header.session_id,
                 preauth_integrity,
                 session_key: None,
+                signing_required,
                 signing: None,
             },
         })
@@ -435,8 +473,12 @@ where
     pub async fn logoff(mut self) -> Result<Connection<T, Negotiated>, CoreError> {
         let negotiated = self.state.negotiated.clone();
         let preauth_integrity = self.state.preauth_integrity.clone();
-        let context =
-            RequestContext::new(self.state.session_id, TreeId(0), self.state.signing.clone());
+        let context = RequestContext::new(
+            self.state.session_id,
+            TreeId(0),
+            self.state.signing_required,
+            self.state.signing.clone(),
+        );
         let _ = self
             .transact(
                 Command::Logoff,
@@ -452,6 +494,7 @@ where
             next_message_id: self.next_message_id,
             state: Negotiated {
                 response: negotiated,
+                client_signing_mode: self.state.client_signing_mode,
                 preauth_integrity,
             },
         })
@@ -466,6 +509,7 @@ where
         let context = RequestContext::new(
             authenticated.session_id,
             TreeId(0),
+            authenticated.signing_required,
             authenticated.signing.clone(),
         );
         let (header, response) = self
@@ -489,12 +533,14 @@ where
             next_message_id: self.next_message_id,
             state: TreeConnected {
                 negotiated: authenticated.negotiated,
+                client_signing_mode: authenticated.client_signing_mode,
                 session: authenticated.session,
                 tree: response,
                 session_id: authenticated.session_id,
                 tree_id: header.tree_id,
                 preauth_integrity: authenticated.preauth_integrity,
                 session_key: authenticated.session_key,
+                signing_required: authenticated.signing_required,
                 signing: authenticated.signing,
             },
         })
@@ -509,15 +555,18 @@ where
     pub async fn tree_disconnect(mut self) -> Result<Connection<T, Authenticated>, CoreError> {
         let authenticated = Authenticated {
             negotiated: self.state.negotiated.clone(),
+            client_signing_mode: self.state.client_signing_mode,
             session: self.state.session.clone(),
             session_id: self.state.session_id,
             preauth_integrity: self.state.preauth_integrity.clone(),
             session_key: self.state.session_key.clone(),
+            signing_required: self.state.signing_required,
             signing: self.state.signing.clone(),
         };
         let context = RequestContext::new(
             authenticated.session_id,
             self.state.tree_id,
+            authenticated.signing_required,
             authenticated.signing.clone(),
         );
         let _ = self
@@ -542,6 +591,7 @@ where
         let context = RequestContext::new(
             self.state.session_id,
             self.state.tree_id,
+            self.state.signing_required,
             self.state.signing.clone(),
         );
         let (_, response) = self
@@ -561,6 +611,7 @@ where
         let context = RequestContext::new(
             self.state.session_id,
             self.state.tree_id,
+            self.state.signing_required,
             self.state.signing.clone(),
         );
         let (_, response) = self
@@ -580,6 +631,7 @@ where
         let context = RequestContext::new(
             self.state.session_id,
             self.state.tree_id,
+            self.state.signing_required,
             self.state.signing.clone(),
         );
         let (_, response) = self
@@ -599,6 +651,7 @@ where
         let context = RequestContext::new(
             self.state.session_id,
             self.state.tree_id,
+            self.state.signing_required,
             self.state.signing.clone(),
         );
         let (_, response) = self
@@ -618,6 +671,7 @@ where
         let context = RequestContext::new(
             self.state.session_id,
             self.state.tree_id,
+            self.state.signing_required,
             self.state.signing.clone(),
         );
         let (_, response) = self
@@ -640,6 +694,7 @@ where
         let context = RequestContext::new(
             self.state.session_id,
             self.state.tree_id,
+            self.state.signing_required,
             self.state.signing.clone(),
         );
         let (header, body) = self
@@ -664,6 +719,7 @@ where
         let context = RequestContext::new(
             self.state.session_id,
             self.state.tree_id,
+            self.state.signing_required,
             self.state.signing.clone(),
         );
         let (_, response) = self
@@ -686,6 +742,7 @@ where
         let context = RequestContext::new(
             self.state.session_id,
             self.state.tree_id,
+            self.state.signing_required,
             self.state.signing.clone(),
         );
         let (_, response) = self
@@ -771,6 +828,11 @@ where
         let mut header = Header::new(command, message_id);
         header.session_id = context.session_id;
         header.tree_id = context.tree_id;
+        if context.signing_required && context.signing.is_none() {
+            return Err(CoreError::InvalidInput(
+                "session requires signing but no signing key is available",
+            ));
+        }
         if context.signing.is_some() {
             header.flags |= HeaderFlags::SIGNED;
         }
@@ -831,6 +893,10 @@ where
                 validate_async_final_response(&response_header, async_id)?;
             }
 
+            if command != Command::SessionSetup {
+                verify_response_signature(&response_header, &response_frame.payload, &context)?;
+            }
+
             if !accepted_statuses.contains(&response_header.status) {
                 return Err(CoreError::UnexpectedStatus {
                     command,
@@ -876,6 +942,27 @@ fn validate_async_final_response(header: &Header, async_id: AsyncId) -> Result<(
             "final async response async id did not match the interim response",
         ));
     }
+    Ok(())
+}
+
+fn verify_response_signature(
+    header: &Header,
+    response_packet: &[u8],
+    context: &RequestContext,
+) -> Result<(), CoreError> {
+    if header.flags.contains(HeaderFlags::SIGNED) {
+        let signing = context.signing.as_ref().ok_or(CoreError::InvalidResponse(
+            "received a signed SMB response but no signing key is available",
+        ))?;
+        return signing.verify_packet(response_packet);
+    }
+
+    if context.signing_required {
+        return Err(CoreError::InvalidResponse(
+            "session requires signed SMB responses",
+        ));
+    }
+
     Ok(())
 }
 
@@ -964,21 +1051,25 @@ fn verify_final_session_setup_response(
     dialect: Dialect,
     header: &Header,
     response_packet: &[u8],
+    signing_required: bool,
     signing: Option<&SigningState>,
 ) -> Result<(), CoreError> {
     if header.status != NtStatus::SUCCESS.to_u32() || dialect != Dialect::Smb311 {
         return Ok(());
     }
 
+    if !header.flags.contains(HeaderFlags::SIGNED) {
+        if signing_required {
+            return Err(CoreError::InvalidResponse(
+                "SMB 3.1.1 final session setup response must be signed",
+            ));
+        }
+        return Ok(());
+    }
+
     let Some(signing) = signing else {
         return Ok(());
     };
-
-    if !header.flags.contains(HeaderFlags::SIGNED) {
-        return Err(CoreError::InvalidResponse(
-            "SMB 3.1.1 final session setup response must be signed",
-        ));
-    }
 
     signing.verify_packet(response_packet)
 }
@@ -1023,6 +1114,21 @@ fn derive_signing_state(
     };
 
     Ok(Some(signing))
+}
+
+fn session_signing_required(
+    client_signing_mode: SigningMode,
+    server_signing_mode: SigningMode,
+    session_flags: SessionFlags,
+) -> bool {
+    if session_flags
+        .intersects(SessionFlags::IS_GUEST | SessionFlags::IS_NULL | SessionFlags::ENCRYPT_DATA)
+    {
+        return false;
+    }
+
+    client_signing_mode.contains(SigningMode::REQUIRED)
+        || server_signing_mode.contains(SigningMode::REQUIRED)
 }
 
 fn derive_key(
@@ -1089,6 +1195,7 @@ mod tests {
 
     use crate::auth::{AuthError, AuthProvider};
     use crate::client::Connection;
+    use crate::error::CoreError;
     use crate::transport::Transport;
 
     #[derive(Debug)]
@@ -1222,6 +1329,52 @@ mod tests {
                 salt: salt.to_vec(),
             },
         )
+    }
+
+    fn sign_response_packet(signing: &super::SigningState, packet: &mut [u8]) {
+        let mut header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
+        header.flags |= HeaderFlags::SIGNED | HeaderFlags::SERVER_TO_REDIR;
+        packet[..Header::LEN].copy_from_slice(&header.encode());
+        signing.sign_packet(packet).expect("response should sign");
+    }
+
+    fn smb311_signing_state(
+        negotiate_request: &NegotiateRequest,
+        negotiate_response: &NegotiateResponse,
+        session_request: &SessionSetupRequest,
+        session_key: &[u8],
+    ) -> super::SigningState {
+        let negotiate_request_packet = request_packet(
+            Command::Negotiate,
+            0,
+            0,
+            0,
+            negotiate_request.encode().expect("request should encode"),
+        );
+        let negotiate_response_packet = response_packet(
+            Command::Negotiate,
+            NtStatus::SUCCESS.to_u32(),
+            0,
+            0,
+            0,
+            negotiate_response.encode(),
+        );
+        let mut preauth = super::negotiate_preauth_integrity_state(
+            negotiate_request,
+            negotiate_response,
+            &negotiate_request_packet,
+            &negotiate_response_packet,
+        )
+        .expect("preauth state should derive")
+        .expect("SMB 3.1.1 should negotiate preauth");
+        let session_request_packet =
+            request_packet(Command::SessionSetup, 1, 0, 0, session_request.encode());
+        preauth
+            .update(&session_request_packet)
+            .expect("session request should update preauth state");
+        super::derive_signing_state(Dialect::Smb311, Some(session_key), Some(&preauth))
+            .expect("signing key should derive")
+            .expect("signing state should be present")
     }
 
     #[derive(Debug)]
@@ -1629,7 +1782,7 @@ mod tests {
         let first_setup = outbound_session_setup(&transport.writes[1]);
         assert_eq!(
             first_setup.security_mode,
-            SessionSetupSecurityMode::SIGNING_ENABLED | SessionSetupSecurityMode::SIGNING_REQUIRED
+            SessionSetupSecurityMode::SIGNING_ENABLED
         );
         assert_eq!(first_setup.security_buffer, vec![0x01, 0x02]);
 
@@ -1679,38 +1832,12 @@ mod tests {
             security_buffer: vec![0x01, 0x02],
             previous_session_id: 0,
         };
-        let negotiate_request_packet = request_packet(
-            Command::Negotiate,
-            0,
-            0,
-            0,
-            negotiate_request.encode().expect("request should encode"),
-        );
-        let negotiate_response_packet = response_packet(
-            Command::Negotiate,
-            NtStatus::SUCCESS.to_u32(),
-            0,
-            0,
-            0,
-            negotiate_response.encode(),
-        );
-        let mut preauth = super::negotiate_preauth_integrity_state(
+        let signing = smb311_signing_state(
             &negotiate_request,
             &negotiate_response,
-            &negotiate_request_packet,
-            &negotiate_response_packet,
-        )
-        .expect("preauth state should derive")
-        .expect("SMB 3.1.1 should negotiate preauth");
-        let session_request_packet =
-            request_packet(Command::SessionSetup, 1, 0, 0, session_request.encode());
-        preauth
-            .update(&session_request_packet)
-            .expect("session request should update preauth state");
-        let signing =
-            super::derive_signing_state(Dialect::Smb311, Some(&[0x55; 16]), Some(&preauth))
-                .expect("signing key should derive")
-                .expect("signing state should be present");
+            &session_request,
+            &[0x55; 16],
+        );
         let mut signed_session_response_packet = response_packet(
             Command::SessionSetup,
             NtStatus::SUCCESS.to_u32(),
@@ -1719,13 +1846,7 @@ mod tests {
             0,
             session_response.encode(),
         );
-        let mut session_header = Header::decode(&signed_session_response_packet[..Header::LEN])
-            .expect("header should decode");
-        session_header.flags |= HeaderFlags::SIGNED;
-        signed_session_response_packet[..Header::LEN].copy_from_slice(&session_header.encode());
-        signing
-            .sign_packet(&mut signed_session_response_packet)
-            .expect("response should sign");
+        sign_response_packet(&signing, &mut signed_session_response_packet);
 
         let transport = ScriptedTransport::new(vec![
             response_frame(
@@ -1772,6 +1893,218 @@ mod tests {
         let header = outbound_header(&transport.writes[2]);
         assert!(header.flags.contains(HeaderFlags::SIGNED));
         assert_ne!(header.signature, [0; 16]);
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_signed_tree_connect_response() {
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0003",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client-salt-0003")],
+        };
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![preauth_context(b"server-salt-0003")],
+            server_guid: *b"server-guid-0003",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x01, 0x02],
+            previous_session_id: 0,
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: Vec::new(),
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+
+        let signing = smb311_signing_state(
+            &negotiate_request,
+            &negotiate_response,
+            &session_request,
+            &[0x55; 16],
+        );
+        let mut signed_session_response_packet = response_packet(
+            Command::SessionSetup,
+            NtStatus::SUCCESS.to_u32(),
+            1,
+            77,
+            0,
+            session_response.encode(),
+        );
+        sign_response_packet(&signing, &mut signed_session_response_packet);
+
+        let mut signed_tree_response_packet = response_packet(
+            Command::TreeConnect,
+            NtStatus::SUCCESS.to_u32(),
+            2,
+            77,
+            9,
+            tree_response.encode(),
+        );
+        sign_response_packet(&signing, &mut signed_tree_response_packet);
+        let last = signed_tree_response_packet
+            .last_mut()
+            .expect("tree response packet should be non-empty");
+        *last ^= 0xff;
+
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            SessionMessage::new(signed_session_response_packet)
+                .encode()
+                .expect("response should frame"),
+            SessionMessage::new(signed_tree_response_packet)
+                .encode()
+                .expect("response should frame"),
+        ]);
+
+        let mut auth_provider = MockAuthProvider {
+            initial_token: vec![0x01, 0x02],
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: Some(vec![0x55; 16]),
+            finished: false,
+        };
+
+        let error = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut auth_provider)
+            .await
+            .expect("authenticate should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect_err("tampered signed response should be rejected");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "SMB response signature did not match the derived signing key"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_unsigned_tree_connect_response_when_signing_is_required() {
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::REQUIRED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0004",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
+            server_guid: *b"server-guid-0004",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: Vec::new(),
+        };
+        let challenge_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: vec![0xaa, 0xbb, 0xcc],
+        };
+        let success_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: Vec::new(),
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::MORE_PROCESSING_REQUIRED.to_u32(),
+                1,
+                77,
+                0,
+                challenge_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                77,
+                0,
+                success_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                77,
+                9,
+                tree_response.encode(),
+            ),
+        ]);
+
+        let mut auth_provider = MockAuthProvider {
+            initial_token: vec![0x01, 0x02],
+            challenge_token: vec![0xaa, 0xbb, 0xcc],
+            final_token: vec![0x03, 0x04, 0x05],
+            session_key: Some(vec![0x55; 16]),
+            finished: false,
+        };
+
+        let error = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut auth_provider)
+            .await
+            .expect("authenticate should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect_err("unsigned response should be rejected when signing is required");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse("session requires signed SMB responses")
+        ));
     }
 
     #[tokio::test]

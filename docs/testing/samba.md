@@ -144,7 +144,7 @@ The live negotiate path currently sends:
 - capabilities: `LARGE_MTU`
 - SMB 3.1.1 preauth-integrity negotiate context with `SHA-512`
 
-When Samba selects `SMB 3.1.1`, Smolder now tracks the preauth transcript across `NEGOTIATE` and `SESSION_SETUP`, derives the SMB 3.1.1 signing key from the final session-setup request hash, verifies the final signed `SESSION_SETUP` success response, and signs subsequent session and tree/file requests.
+When Samba selects `SMB 3.1.1`, Smolder now tracks the preauth transcript across `NEGOTIATE` and `SESSION_SETUP`, derives the SMB 3.1.1 signing key from the final session-setup request hash, verifies the final signed `SESSION_SETUP` success response, signs subsequent session and tree/file requests, and verifies signed SMB 3.x responses on the shared post-auth receive path.
 
 ## Next External Gates
 
@@ -184,7 +184,7 @@ The current engine also handles interim async SMB2 responses (`STATUS_PENDING` w
 The next practical interop gates are:
 
 1. deeper `QUERY_INFO` coverage beyond basic file metadata
-2. broader SMB 3.x response-signing verification beyond final `SESSION_SETUP`
+2. stronger SMB 3.x response-signing coverage for more edge cases, including additional async and error paths
 3. `IOCTL`
 4. leases / durable handles / compounding
 5. encryption and negotiate-context expansion beyond preauth integrity
