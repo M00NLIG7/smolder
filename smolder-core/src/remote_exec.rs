@@ -1,8 +1,10 @@
 //! Windows remote execution support built on top of SMB2/3 and SCMR over `IPC$`.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rand::random;
+use tokio::fs;
 use tokio::time::{sleep, timeout, Instant};
 
 use smolder_proto::rpc::{
@@ -27,6 +29,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ADMIN_SHARE_ROOT: &str = r"C:\Windows";
 const DEFAULT_STAGING_DIR: &str = r"Temp";
+const DEFAULT_PSEXEC_BINARY_NAME: &str = "smolder-psexecsvc.exe";
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
@@ -125,6 +128,8 @@ pub struct RemoteExecBuilder {
     admin_share: String,
     ipc_share: String,
     staging_directory: String,
+    psexec_service_binary: Option<PathBuf>,
+    psexec_remote_binary_name: String,
     mode: ExecMode,
     timeout: Duration,
     poll_interval: Duration,
@@ -143,6 +148,8 @@ impl Default for RemoteExecBuilder {
             admin_share: "ADMIN$".to_string(),
             ipc_share: "IPC$".to_string(),
             staging_directory: DEFAULT_STAGING_DIR.to_string(),
+            psexec_service_binary: None,
+            psexec_remote_binary_name: DEFAULT_PSEXEC_BINARY_NAME.to_string(),
             mode: ExecMode::SmbExec,
             timeout: DEFAULT_TIMEOUT,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -206,6 +213,20 @@ impl RemoteExecBuilder {
         self
     }
 
+    /// Sets the local Windows service executable staged for `psexec` mode.
+    #[must_use]
+    pub fn psexec_service_binary(mut self, path: impl Into<PathBuf>) -> Self {
+        self.psexec_service_binary = Some(path.into());
+        self
+    }
+
+    /// Overrides the remote executable filename used under `ADMIN$` for `psexec`.
+    #[must_use]
+    pub fn psexec_remote_binary_name(mut self, name: impl Into<String>) -> Self {
+        self.psexec_remote_binary_name = name.into();
+        self
+    }
+
     /// Overrides the default execution timeout.
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
@@ -245,6 +266,8 @@ impl RemoteExecBuilder {
             admin_share,
             ipc_share,
             staging_directory,
+            psexec_service_binary: self.psexec_service_binary,
+            psexec_remote_binary_name: normalize_remote_file_name(&self.psexec_remote_binary_name)?,
             mode: self.mode,
             timeout: self.timeout,
             poll_interval: self.poll_interval,
@@ -259,6 +282,8 @@ pub struct RemoteExecClient {
     admin_share: String,
     ipc_share: String,
     staging_directory: String,
+    psexec_service_binary: Option<PathBuf>,
+    psexec_remote_binary_name: String,
     mode: ExecMode,
     timeout: Duration,
     poll_interval: Duration,
@@ -284,7 +309,8 @@ impl RemoteExecClient {
     ) -> Result<ExecResult, CoreError> {
         let start = Instant::now();
         let timeout_budget = request.timeout.unwrap_or(self.timeout);
-        let command_paths = CommandPaths::new(&self.staging_directory);
+        let command_paths =
+            CommandPaths::new(&self.staging_directory, &self.psexec_remote_binary_name);
         let mut admin = AdminShare::connect(&self.config, &self.admin_share).await?;
         let mut scm = ScmClient::connect(&self.config, &self.ipc_share).await?;
 
@@ -293,6 +319,12 @@ impl RemoteExecClient {
             if matches!(mode, ExecMode::PsExec) {
                 let script = build_psexec_script(&request);
                 admin.write_all(&command_paths.script_relative, script.as_bytes()).await?;
+                if let Some(service_binary) = &self.psexec_service_binary {
+                    let payload = fs::read(service_binary).await.map_err(CoreError::LocalIo)?;
+                    admin
+                        .write_all(&command_paths.service_binary_relative, &payload)
+                        .await?;
+                }
             }
 
             let service_command = match mode {
@@ -302,10 +334,8 @@ impl RemoteExecClient {
                     &command_paths.exit_absolute,
                 ),
                 ExecMode::PsExec => build_psexec_service_command(
-                    &command_paths.script_absolute,
-                    &command_paths.stdout_absolute,
-                    &command_paths.stderr_absolute,
-                    &command_paths.exit_absolute,
+                    self.psexec_service_binary.as_deref(),
+                    &command_paths,
                 ),
             };
 
@@ -343,6 +373,9 @@ impl RemoteExecClient {
         let _ = admin.try_remove(&command_paths.exit_relative).await;
         if matches!(mode, ExecMode::PsExec) {
             let _ = admin.try_remove(&command_paths.script_relative).await;
+            if self.psexec_service_binary.is_some() {
+                let _ = admin.try_remove(&command_paths.service_binary_relative).await;
+            }
         }
 
         let mut result = execution?;
@@ -369,20 +402,24 @@ struct CommandPaths {
     stderr_relative: String,
     exit_relative: String,
     script_relative: String,
+    service_binary_relative: String,
     stdout_absolute: String,
     stderr_absolute: String,
     exit_absolute: String,
     script_absolute: String,
+    service_binary_absolute: String,
 }
 
 impl CommandPaths {
-    fn new(staging_directory: &str) -> Self {
+    fn new(staging_directory: &str, psexec_binary_name: &str) -> Self {
         let token = random::<u64>();
         let prefix = format!("SMOLDER-{token:016x}");
         let stdout_relative = join_share_path(staging_directory, &format!("{prefix}.out"));
         let stderr_relative = join_share_path(staging_directory, &format!("{prefix}.err"));
         let exit_relative = join_share_path(staging_directory, &format!("{prefix}.exit"));
         let script_relative = join_share_path(staging_directory, &format!("{prefix}.cmd"));
+        let service_binary_relative =
+            join_share_path(staging_directory, &format!("{prefix}-{psexec_binary_name}"));
         let service_name = format!("SMOLDER{token:016X}");
         Self {
             service_name,
@@ -390,10 +427,12 @@ impl CommandPaths {
             stderr_absolute: admin_absolute_path(&stderr_relative),
             exit_absolute: admin_absolute_path(&exit_relative),
             script_absolute: admin_absolute_path(&script_relative),
+            service_binary_absolute: admin_absolute_path(&service_binary_relative),
             stdout_relative,
             stderr_relative,
             exit_relative,
             script_relative,
+            service_binary_relative,
         }
     }
 }
@@ -901,14 +940,27 @@ fn build_smbexec_service_command(
 }
 
 fn build_psexec_service_command(
-    script_absolute: &str,
-    stdout_absolute: &str,
-    stderr_absolute: &str,
-    exit_absolute: &str,
+    psexec_service_binary: Option<&Path>,
+    command_paths: &CommandPaths,
 ) -> String {
-    format!(
-        r#"%COMSPEC% /Q /V:ON /c ""{script_absolute}" 1> "{stdout_absolute}" 2> "{stderr_absolute}" & echo !ERRORLEVEL! > "{exit_absolute}"""#
-    )
+    match psexec_service_binary {
+        Some(_) => format!(
+            "{} --service-name {} --script {} --stdout {} --stderr {} --exit-code {}",
+            quote_windows_arg(&command_paths.service_binary_absolute),
+            quote_windows_arg(&command_paths.service_name),
+            quote_windows_arg(&command_paths.script_absolute),
+            quote_windows_arg(&command_paths.stdout_absolute),
+            quote_windows_arg(&command_paths.stderr_absolute),
+            quote_windows_arg(&command_paths.exit_absolute),
+        ),
+        None => format!(
+            r#"%COMSPEC% /Q /V:ON /c ""{}" 1> "{}" 2> "{}" & echo !ERRORLEVEL! > "{}"""#,
+            command_paths.script_absolute,
+            command_paths.stdout_absolute,
+            command_paths.stderr_absolute,
+            command_paths.exit_absolute
+        ),
+    }
 }
 
 fn build_psexec_script(request: &ExecRequest) -> String {
@@ -1018,6 +1070,26 @@ fn join_share_path(base: &str, leaf: &str) -> String {
     } else {
         format!(r"{}\{}", base.trim_matches(['\\', '/']), leaf)
     }
+}
+
+fn normalize_remote_file_name(name: &str) -> Result<String, CoreError> {
+    let name = name.trim_matches(['\\', '/']);
+    if name.is_empty() {
+        return Err(CoreError::PathInvalid(
+            "remote psexec binary name must not be empty",
+        ));
+    }
+    if name.contains(['\\', '/', '\0']) {
+        return Err(CoreError::PathInvalid(
+            "remote psexec binary name must not contain separators or NUL bytes",
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn quote_windows_arg(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 fn normalize_share_name(share: &str) -> Result<String, CoreError> {
@@ -1142,10 +1214,12 @@ impl NdrWriter {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         build_psexec_script, build_psexec_service_command, build_smbexec_service_command,
-        parse_create_service_response, parse_exit_code, parse_open_handle_response, CommandPaths,
-        ExecMode, ExecRequest,
+        normalize_remote_file_name, parse_create_service_response, parse_exit_code,
+        parse_open_handle_response, quote_windows_arg, CommandPaths, ExecMode, ExecRequest,
     };
 
     #[test]
@@ -1172,15 +1246,25 @@ mod tests {
 
     #[test]
     fn psexec_command_redirects_stdout_and_stderr_separately() {
-        let command = build_psexec_service_command(
-            r"C:\Windows\Temp\runner.cmd",
-            r"C:\Windows\Temp\stdout.txt",
-            r"C:\Windows\Temp\stderr.txt",
-            r"C:\Windows\Temp\exit.txt",
-        );
-        assert!(command.contains(r#""C:\Windows\Temp\runner.cmd" 1> "C:\Windows\Temp\stdout.txt""#));
-        assert!(command.contains(r#"2> "C:\Windows\Temp\stderr.txt""#));
-        assert!(command.contains(r#"echo !ERRORLEVEL! > "C:\Windows\Temp\exit.txt""#));
+        let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
+        let command = build_psexec_service_command(None, &paths);
+        assert!(command.contains(r#""C:\Windows\Temp\SMOLDER-"#));
+        assert!(command.contains(r#".cmd" 1> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(command.contains(r#"2> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(command.contains(r#"echo !ERRORLEVEL! > "C:\Windows\Temp\SMOLDER-"#));
+    }
+
+    #[test]
+    fn psexec_service_binary_command_uses_uploaded_payload() {
+        let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
+        let command =
+            build_psexec_service_command(Some(Path::new("local.exe")), &paths);
+        assert!(command.starts_with(r#""C:\Windows\Temp\SMOLDER-"#));
+        assert!(command.contains("--service-name"));
+        assert!(command.contains("--script"));
+        assert!(command.contains("--stdout"));
+        assert!(command.contains("--stderr"));
+        assert!(command.contains("--exit-code"));
     }
 
     #[test]
@@ -1210,9 +1294,22 @@ mod tests {
 
     #[test]
     fn command_paths_are_mode_agnostic() {
-        let paths = CommandPaths::new("Temp");
+        let paths = CommandPaths::new("Temp", "svc.exe");
         assert!(paths.service_name.starts_with("SMOLDER"));
         assert!(paths.stdout_relative.starts_with(r"Temp\SMOLDER-"));
+        assert!(paths.service_binary_relative.ends_with("-svc.exe"));
         assert!(matches!(ExecMode::SmbExec, ExecMode::SmbExec));
+    }
+
+    #[test]
+    fn remote_binary_name_rejects_separators() {
+        let error = normalize_remote_file_name(r"bad\name.exe")
+            .expect_err("separator should be rejected");
+        assert!(matches!(error, crate::error::CoreError::PathInvalid(_)));
+    }
+
+    #[test]
+    fn windows_arg_quoting_doubles_inner_quotes() {
+        assert_eq!(quote_windows_arg(r#"C:\Temp\say "hi".cmd"#), r#""C:\Temp\say ""hi"".cmd""#);
     }
 }

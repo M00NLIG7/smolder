@@ -12,6 +12,7 @@ const ENV_USERNAME: [&str; 2] = ["SMOLDER_SMB_USERNAME", "SMOLDER_SAMBA_USERNAME
 const ENV_PASSWORD: [&str; 2] = ["SMOLDER_SMB_PASSWORD", "SMOLDER_SAMBA_PASSWORD"];
 const ENV_DOMAIN: [&str; 2] = ["SMOLDER_SMB_DOMAIN", "SMOLDER_SAMBA_DOMAIN"];
 const ENV_WORKSTATION: [&str; 2] = ["SMOLDER_SMB_WORKSTATION", "SMOLDER_SAMBA_WORKSTATION"];
+const ENV_PSEXEC_SERVICE_BINARY: [&str; 1] = ["SMOLDER_PSEXEC_SERVICE_BINARY"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliOptions {
@@ -39,6 +40,7 @@ enum Command {
     PsExec {
         target: ExecTarget,
         request: ExecRequest,
+        service_binary: Option<PathBuf>,
     },
     Cat {
         remote: RemoteLocation,
@@ -111,7 +113,7 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
     };
     match command {
         Command::SmbExec { target, request } => {
-            let exec = connect_remote_exec(&auth, &target, ExecMode::SmbExec).await?;
+            let exec = connect_remote_exec(&auth, &target, ExecMode::SmbExec, None).await?;
             let result = exec.run(request).await.map_err(|error| error.to_string())?;
             print!("{}", String::from_utf8_lossy(&result.stdout));
             if !result.stderr.is_empty() {
@@ -119,8 +121,14 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
             }
             return Ok(result.exit_code);
         }
-        Command::PsExec { target, request } => {
-            let exec = connect_remote_exec(&auth, &target, ExecMode::PsExec).await?;
+        Command::PsExec {
+            target,
+            request,
+            service_binary,
+        } => {
+            let exec =
+                connect_remote_exec(&auth, &target, ExecMode::PsExec, service_binary.as_deref())
+                    .await?;
             let result = exec.run(request).await.map_err(|error| error.to_string())?;
             print!("{}", String::from_utf8_lossy(&result.stdout));
             if !result.stderr.is_empty() {
@@ -225,6 +233,7 @@ async fn connect_remote_exec(
     options: &AuthOptions,
     target: &ExecTarget,
     mode: ExecMode,
+    service_binary: Option<&std::path::Path>,
 ) -> Result<RemoteExecClient, String> {
     let mut credentials = NtlmCredentials::new(&options.username, &options.password);
     if let Some(domain) = &options.domain {
@@ -233,12 +242,15 @@ async fn connect_remote_exec(
     if let Some(workstation) = &options.workstation {
         credentials = credentials.with_workstation(workstation.as_str());
     }
-
-    RemoteExecClient::builder()
+    let mut builder = RemoteExecClient::builder()
         .server(target.host.as_str())
         .port(target.port)
         .credentials(credentials)
-        .mode(mode)
+        .mode(mode);
+    if let Some(service_binary) = service_binary {
+        builder = builder.psexec_service_binary(service_binary.to_path_buf());
+    }
+    builder
         .connect()
         .await
         .map_err(|error| error.to_string())
@@ -262,6 +274,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
     let mut command_text = None;
     let mut workdir = None;
     let mut timeout = None;
+    let mut service_binary = None;
 
     let mut index = 2;
     while index < args.len() {
@@ -304,6 +317,11 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
             index += 1;
             continue;
         }
+        if let Some(value) = token.strip_prefix("--service-binary=") {
+            service_binary = Some(PathBuf::from(value));
+            index += 1;
+            continue;
+        }
 
         match token.as_str() {
             "--username" => {
@@ -327,6 +345,9 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
             "--timeout" => {
                 let value = next_value(&args, &mut index, "--timeout")?;
                 timeout = Some(parse_duration(&value)?);
+            }
+            "--service-binary" => {
+                service_binary = Some(PathBuf::from(next_value(&args, &mut index, "--service-binary")?));
             }
             _ if token.starts_with("--") => {
                 return Err(format!("unknown option: {token}\n\n{}", usage(&program)));
@@ -375,6 +396,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliOptions, String> {
             Command::PsExec {
                 target: parse_exec_target(positionals[0])?,
                 request: exec_request()?,
+                service_binary: service_binary.or_else(|| env_value(&ENV_PSEXEC_SERVICE_BINARY).map(PathBuf::from)),
             }
         }
         "cat" => {
@@ -508,7 +530,7 @@ fn usage(program: &str) -> String {
         "\
 Usage:
   {program} smbexec smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
-  {program} psexec smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
+  {program} psexec smb://host[:port] --command COMMAND [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} cat smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} ls smb://host[:port]/share[/path] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
   {program} stat smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]
@@ -814,7 +836,11 @@ mod tests {
         .expect("parser should accept psexec arguments");
 
         match options.command {
-            Command::PsExec { target, request } => {
+            Command::PsExec {
+                target,
+                request,
+                service_binary,
+            } => {
                 assert_eq!(
                     target,
                     ExecTarget {
@@ -827,7 +853,33 @@ mod tests {
                     smolder_core::prelude::ExecRequest::command("dir")
                         .with_working_directory("C:\\Temp")
                 );
+                assert_eq!(service_binary, None);
             }
+            other => panic!("unexpected command variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_psexec_command_accepts_service_binary() {
+        let options = parse_cli(vec![
+            "smolder".to_string(),
+            "psexec".to_string(),
+            "smb://server".to_string(),
+            "--command=dir".to_string(),
+            "--service-binary".to_string(),
+            "target/x86_64-pc-windows-msvc/release/smolder-psexecsvc.exe".to_string(),
+            "--username=user".to_string(),
+            "--password=pass".to_string(),
+        ])
+        .expect("parser should accept psexec service-binary arguments");
+
+        match options.command {
+            Command::PsExec { service_binary, .. } => assert_eq!(
+                service_binary,
+                Some(PathBuf::from(
+                    "target/x86_64-pc-windows-msvc/release/smolder-psexecsvc.exe"
+                ))
+            ),
             other => panic!("unexpected command variant: {other:?}"),
         }
     }
