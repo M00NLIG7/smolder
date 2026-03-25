@@ -323,12 +323,11 @@ where
     where
         A: AuthProvider,
     {
-        let negotiated = self.state.response.clone();
         let client_signing_mode = self.state.client_signing_mode;
-        let mut preauth_integrity = self.state.preauth_integrity.clone();
+        let mut preauth_integrity = self.state.preauth_integrity.take();
         let security_mode = session_setup_security_mode(client_signing_mode);
         let mut session_id = SessionId(0);
-        let mut next_token = auth_provider.initial_token(&negotiated)?;
+        let mut next_token = auth_provider.initial_token(&self.state.response)?;
 
         loop {
             let request = SessionSetupRequest {
@@ -376,25 +375,35 @@ where
                 let session_key = auth_provider.session_key().map(ToOwned::to_owned);
                 let signing_required = session_signing_required(
                     client_signing_mode,
-                    negotiated.security_mode,
+                    self.state.response.security_mode,
                     response.session_flags,
                 );
                 let signing = derive_signing_state(
-                    negotiated.dialect_revision,
+                    self.state.response.dialect_revision,
                     session_key.as_deref(),
                     preauth_integrity.as_ref(),
                 )?;
                 verify_final_session_setup_response(
-                    negotiated.dialect_revision,
+                    self.state.response.dialect_revision,
                     &header,
                     &transaction.response_packet,
                     signing_required,
                     signing.as_ref(),
                 )?;
                 auth_provider.finish(&response.security_buffer)?;
+                let Connection {
+                    transport,
+                    next_message_id,
+                    state,
+                } = self;
+                let Negotiated {
+                    response: negotiated,
+                    client_signing_mode,
+                    ..
+                } = state;
                 return Ok(Connection {
-                    transport: self.transport,
-                    next_message_id: self.next_message_id,
+                    transport,
+                    next_message_id,
                     state: Authenticated {
                         negotiated,
                         client_signing_mode,
@@ -417,9 +426,8 @@ where
         mut self,
         request: &SessionSetupRequest,
     ) -> Result<Connection<T, Authenticated>, CoreError> {
-        let negotiated = self.state.response.clone();
         let client_signing_mode = self.state.client_signing_mode;
-        let mut preauth_integrity = self.state.preauth_integrity.clone();
+        let mut preauth_integrity = self.state.preauth_integrity.take();
         let transaction = self
             .transact_framed(
                 Command::SessionSetup,
@@ -444,7 +452,7 @@ where
             ));
         }
         verify_final_session_setup_response(
-            negotiated.dialect_revision,
+            self.state.response.dialect_revision,
             &header,
             &transaction.response_packet,
             request
@@ -454,13 +462,23 @@ where
         )?;
         let signing_required = session_signing_required(
             client_signing_mode,
-            negotiated.security_mode,
+            self.state.response.security_mode,
             response.session_flags,
         );
+        let Connection {
+            transport,
+            next_message_id,
+            state,
+        } = self;
+        let Negotiated {
+            response: negotiated,
+            client_signing_mode,
+            ..
+        } = state;
 
         Ok(Connection {
-            transport: self.transport,
-            next_message_id: self.next_message_id,
+            transport,
+            next_message_id,
             state: Authenticated {
                 negotiated,
                 client_signing_mode,
@@ -481,8 +499,6 @@ where
 {
     /// Performs `LOGOFF` and transitions back into the negotiated state.
     pub async fn logoff(mut self) -> Result<Connection<T, Negotiated>, CoreError> {
-        let negotiated = self.state.negotiated.clone();
-        let preauth_integrity = self.state.preauth_integrity.clone();
         let context = RequestContext::new(
             self.state.session_id,
             TreeId(0),
@@ -498,13 +514,24 @@ where
                 LogoffResponse::decode,
             )
             .await?;
+        let Connection {
+            transport,
+            next_message_id,
+            state,
+        } = self;
+        let Authenticated {
+            negotiated: response,
+            client_signing_mode,
+            preauth_integrity,
+            ..
+        } = state;
 
         Ok(Connection {
-            transport: self.transport,
-            next_message_id: self.next_message_id,
+            transport,
+            next_message_id,
             state: Negotiated {
-                response: negotiated,
-                client_signing_mode: self.state.client_signing_mode,
+                response,
+                client_signing_mode,
                 preauth_integrity,
             },
         })
@@ -515,12 +542,11 @@ where
         mut self,
         request: &TreeConnectRequest,
     ) -> Result<Connection<T, TreeConnected>, CoreError> {
-        let authenticated = self.state.clone();
         let context = RequestContext::new(
-            authenticated.session_id,
+            self.state.session_id,
             TreeId(0),
-            authenticated.signing_required,
-            authenticated.signing.clone(),
+            self.state.signing_required,
+            self.state.signing.clone(),
         );
         let (header, response) = self
             .transact(
@@ -537,21 +563,36 @@ where
                 "tree connect response must assign a tree id",
             ));
         }
+        let Connection {
+            transport,
+            next_message_id,
+            state,
+        } = self;
+        let Authenticated {
+            negotiated,
+            client_signing_mode,
+            session,
+            session_id,
+            preauth_integrity,
+            session_key,
+            signing_required,
+            signing,
+        } = state;
 
         Ok(Connection {
-            transport: self.transport,
-            next_message_id: self.next_message_id,
+            transport,
+            next_message_id,
             state: TreeConnected {
-                negotiated: authenticated.negotiated,
-                client_signing_mode: authenticated.client_signing_mode,
-                session: authenticated.session,
+                negotiated,
+                client_signing_mode,
+                session,
                 tree: response,
-                session_id: authenticated.session_id,
+                session_id,
                 tree_id: header.tree_id,
-                preauth_integrity: authenticated.preauth_integrity,
-                session_key: authenticated.session_key,
-                signing_required: authenticated.signing_required,
-                signing: authenticated.signing,
+                preauth_integrity,
+                session_key,
+                signing_required,
+                signing,
             },
         })
     }
@@ -563,21 +604,11 @@ where
 {
     /// Performs a `TREE_DISCONNECT` request and returns to the authenticated state.
     pub async fn tree_disconnect(mut self) -> Result<Connection<T, Authenticated>, CoreError> {
-        let authenticated = Authenticated {
-            negotiated: self.state.negotiated.clone(),
-            client_signing_mode: self.state.client_signing_mode,
-            session: self.state.session.clone(),
-            session_id: self.state.session_id,
-            preauth_integrity: self.state.preauth_integrity.clone(),
-            session_key: self.state.session_key.clone(),
-            signing_required: self.state.signing_required,
-            signing: self.state.signing.clone(),
-        };
         let context = RequestContext::new(
-            authenticated.session_id,
+            self.state.session_id,
             self.state.tree_id,
-            authenticated.signing_required,
-            authenticated.signing.clone(),
+            self.state.signing_required,
+            self.state.signing.clone(),
         );
         let _ = self
             .transact(
@@ -588,11 +619,36 @@ where
                 TreeDisconnectResponse::decode,
             )
             .await?;
+        let Connection {
+            transport,
+            next_message_id,
+            state,
+        } = self;
+        let TreeConnected {
+            negotiated,
+            client_signing_mode,
+            session,
+            session_id,
+            preauth_integrity,
+            session_key,
+            signing_required,
+            signing,
+            ..
+        } = state;
 
         Ok(Connection {
-            transport: self.transport,
-            next_message_id: self.next_message_id,
-            state: authenticated,
+            transport,
+            next_message_id,
+            state: Authenticated {
+                negotiated,
+                client_signing_mode,
+                session,
+                session_id,
+                preauth_integrity,
+                session_key,
+                signing_required,
+                signing,
+            },
         })
     }
 
