@@ -7,9 +7,7 @@ use rand::random;
 use tokio::fs;
 use tokio::time::{sleep, timeout, Instant};
 
-use smolder_proto::rpc::{
-    BindAckPdu, BindPdu, Packet, PacketFlags, RequestPdu, ResponsePdu, SyntaxId, Uuid,
-};
+use smolder_proto::rpc::{SyntaxId, Uuid};
 use smolder_proto::smb::smb2::{
     CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, DispositionInformation,
     FileAttributes, FileId, FileInfoClass, FlushRequest, GlobalCapabilities, ReadRequest,
@@ -21,6 +19,7 @@ use smolder_core::auth::NtlmCredentials;
 use smolder_core::client::{Connection, TreeConnected};
 use smolder_core::error::CoreError;
 use smolder_core::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
+use smolder_core::rpc::PipeRpcClient;
 use smolder_core::transport::TokioTcpTransport;
 
 const DEFAULT_PORT: u16 = 445;
@@ -797,14 +796,14 @@ impl CommandPaths {
 struct ScHandle([u8; 20]);
 
 struct ScmClient {
-    rpc: RpcPipeClient,
+    rpc: PipeRpcClient,
 }
 
 impl ScmClient {
     async fn connect(config: &SmbSessionConfig, ipc_share: &str) -> Result<Self, CoreError> {
         let pipe = NamedPipe::connect(config, ipc_share, "svcctl", PipeAccess::ReadWrite).await?;
-        let mut rpc = RpcPipeClient::new(pipe);
-        rpc.bind(SVCCTL_SYNTAX).await?;
+        let mut rpc = PipeRpcClient::new(pipe);
+        rpc.bind_context(SVCCTL_CONTEXT_ID, SVCCTL_SYNTAX).await?;
         Ok(Self { rpc })
     }
 
@@ -813,7 +812,10 @@ impl ScmClient {
         stub.write_unique_wide_string(None);
         stub.write_unique_wide_string(Some("ServicesActive"));
         stub.write_u32(SC_MANAGER_CREATE_SERVICE | SC_MANAGER_CONNECT);
-        let response = self.rpc.call(15, stub.into_bytes()).await?;
+        let response = self
+            .rpc
+            .call(SVCCTL_CONTEXT_ID, 15, stub.into_bytes())
+            .await?;
         parse_open_handle_response(&response, "open_sc_manager")
     }
 
@@ -839,7 +841,10 @@ impl ScmClient {
         stub.write_unique_wide_string(None);
         stub.write_u32(0);
         stub.write_unique_bytes(None);
-        let response = self.rpc.call(12, stub.into_bytes()).await?;
+        let response = self
+            .rpc
+            .call(SVCCTL_CONTEXT_ID, 12, stub.into_bytes())
+            .await?;
         parse_create_service_response(&response)
     }
 
@@ -848,7 +853,10 @@ impl ScmClient {
         stub.write_context_handle(service_handle);
         stub.write_u32(0);
         stub.write_u32(0);
-        let response = self.rpc.call(19, stub.into_bytes()).await?;
+        let response = self
+            .rpc
+            .call(SVCCTL_CONTEXT_ID, 19, stub.into_bytes())
+            .await?;
         let status = read_u32_status(&response)?;
         if status == 0 || status == ERROR_SERVICE_REQUEST_TIMEOUT {
             return Ok(());
@@ -862,7 +870,10 @@ impl ScmClient {
     async fn delete_service(&mut self, service_handle: &ScHandle) -> Result<(), CoreError> {
         let mut stub = NdrWriter::new();
         stub.write_context_handle(service_handle);
-        let response = self.rpc.call(2, stub.into_bytes()).await?;
+        let response = self
+            .rpc
+            .call(SVCCTL_CONTEXT_ID, 2, stub.into_bytes())
+            .await?;
         let status = read_u32_status(&response)?;
         if status == 0 {
             return Ok(());
@@ -895,14 +906,20 @@ impl ScmClient {
     async fn query_service_status(&mut self, service_handle: &ScHandle) -> Result<u32, CoreError> {
         let mut stub = NdrWriter::new();
         stub.write_context_handle(service_handle);
-        let response = self.rpc.call(6, stub.into_bytes()).await?;
+        let response = self
+            .rpc
+            .call(SVCCTL_CONTEXT_ID, 6, stub.into_bytes())
+            .await?;
         parse_query_service_status_response(&response)
     }
 
     async fn close_handle(&mut self, handle: &ScHandle) -> Result<(), CoreError> {
         let mut stub = NdrWriter::new();
         stub.write_context_handle(handle);
-        let response = self.rpc.call(0, stub.into_bytes()).await?;
+        let response = self
+            .rpc
+            .call(SVCCTL_CONTEXT_ID, 0, stub.into_bytes())
+            .await?;
         let status = parse_close_handle_response(&response)?;
         if status == 0 {
             return Ok(());
@@ -911,75 +928,6 @@ impl ScmClient {
             operation: "close_service_handle",
             code: status,
         })
-    }
-}
-
-struct RpcPipeClient {
-    pipe: NamedPipe,
-    call_id: u32,
-}
-
-impl RpcPipeClient {
-    fn new(pipe: NamedPipe) -> Self {
-        Self { pipe, call_id: 1 }
-    }
-
-    async fn bind(&mut self, abstract_syntax: SyntaxId) -> Result<(), CoreError> {
-        let bind = Packet::Bind(BindPdu {
-            call_id: self.next_call_id(),
-            max_xmit_frag: self.pipe.fragment_size() as u16,
-            max_recv_frag: self.pipe.fragment_size() as u16,
-            assoc_group_id: 0,
-            context_id: SVCCTL_CONTEXT_ID,
-            abstract_syntax,
-            transfer_syntax: SyntaxId::NDR32,
-        });
-        let response = self.pipe.call(bind.encode()).await?;
-        let packet = Packet::decode(&response)?;
-        if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
-            eprintln!("rpc bind packet={:?}", packet);
-        }
-        let Packet::BindAck(BindAckPdu { result, .. }) = packet else {
-            return Err(CoreError::InvalidResponse("expected rpc bind ack"));
-        };
-        if result.result == 0 {
-            return Ok(());
-        }
-        Err(CoreError::RemoteOperation {
-            operation: "rpc_bind",
-            code: u32::from(result.reason),
-        })
-    }
-
-    async fn call(&mut self, opnum: u16, stub_data: Vec<u8>) -> Result<Vec<u8>, CoreError> {
-        let request = Packet::Request(RequestPdu {
-            call_id: self.next_call_id(),
-            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
-            alloc_hint: stub_data.len() as u32,
-            context_id: SVCCTL_CONTEXT_ID,
-            opnum,
-            object_uuid: None,
-            stub_data,
-        });
-        let response = self.pipe.call(request.encode()).await?;
-        let packet = Packet::decode(&response)?;
-        if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
-            eprintln!("rpc call opnum={} packet={:?}", opnum, packet);
-        }
-        match packet {
-            Packet::Response(ResponsePdu { stub_data, .. }) => Ok(stub_data),
-            Packet::Fault(fault) => Err(CoreError::RemoteOperation {
-                operation: "rpc_fault",
-                code: fault.status,
-            }),
-            _ => Err(CoreError::InvalidResponse("unexpected rpc packet type")),
-        }
-    }
-
-    fn next_call_id(&mut self) -> u32 {
-        let current = self.call_id;
-        self.call_id += 1;
-        current
     }
 }
 
