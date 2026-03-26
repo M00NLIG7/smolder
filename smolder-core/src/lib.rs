@@ -12,6 +12,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod dfs;
 pub mod error;
 pub mod pipe;
 pub mod rpc;
@@ -26,6 +27,7 @@ pub mod prelude {
         Authenticated, CompoundRequest, CompoundResponse, Connected, Connection, DurableHandle,
         DurableOpenOptions, Negotiated, ResilientHandle, TreeConnected,
     };
+    pub use crate::dfs::{resolve_unc_path, DfsReferral, UncPath};
     pub use crate::error::CoreError;
     pub use crate::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::rpc::PipeRpcClient;
