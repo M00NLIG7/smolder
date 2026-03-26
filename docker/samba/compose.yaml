@@ -12,3 +12,15 @@ services:
       - ./data:/data
       - ./share:/samba/share
       - ./share-encrypted:/samba/share-encrypted
+  samba-global-encryption:
+    image: crazymax/samba:latest
+    container_name: smolder-samba-global-encryption
+    environment:
+      TZ: UTC
+      SAMBA_WORKGROUP: WORKGROUP
+      SAMBA_LOG_LEVEL: "1"
+    ports:
+      - "1446:445"
+    volumes:
+      - ./data-global-encryption:/data
+      - ./share:/samba/share

@@ -37,6 +37,12 @@ impl<T> PipeRpcClient<T> {
         &self.pipe
     }
 
+    /// Consumes the RPC client and returns the underlying named pipe.
+    #[must_use]
+    pub fn into_pipe(self) -> NamedPipe<T> {
+        self.pipe
+    }
+
     /// Enables automatic NTLM RPC packet-integrity signing and verification.
     #[must_use]
     pub fn with_ntlm_packet_integrity(
@@ -362,6 +368,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn into_pipe_returns_underlying_named_pipe() {
+        let pipe = open_pipe(vec![]).await;
+        let file_id = pipe.file_id();
+
+        let rpc = PipeRpcClient::new(pipe);
+        let pipe = rpc.into_pipe();
+
+        assert_eq!(pipe.file_id(), file_id);
+    }
+
+    #[tokio::test]
     async fn bind_preserves_auth_verifier_on_bind_ack() {
         let verifier = AuthVerifier::new(
             AuthType::WinNt,
@@ -396,9 +413,10 @@ mod tests {
 
     #[tokio::test]
     async fn bind_uses_standard_rpc_fragment_size() {
-        let verifier = AuthVerifier::new(AuthType::WinNt, AuthLevel::Connect, 79_231, vec![0x11; 8]);
-        let (pipe, writes) = open_pipe_with_writes(vec![rpc_response_frame(Packet::BindAck(
-            BindAckPdu {
+        let verifier =
+            AuthVerifier::new(AuthType::WinNt, AuthLevel::Connect, 79_231, vec![0x11; 8]);
+        let (pipe, writes) =
+            open_pipe_with_writes(vec![rpc_response_frame(Packet::BindAck(BindAckPdu {
                 call_id: 1,
                 flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
                 max_xmit_frag: 4280,
@@ -411,9 +429,8 @@ mod tests {
                     transfer_syntax: SyntaxId::NDR32,
                 },
                 auth_verifier: None,
-            },
-        ))])
-        .await;
+            }))])
+            .await;
         let mut rpc = PipeRpcClient::new(pipe);
 
         rpc.bind_with_auth(0, TEST_SYNTAX, Some(verifier))
@@ -878,7 +895,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         if reverse_index >= rpc_writes.len() {
-            panic!("requested rpc write index {reverse_index} but only {} writes were captured", rpc_writes.len());
+            panic!(
+                "requested rpc write index {reverse_index} but only {} writes were captured",
+                rpc_writes.len()
+            );
         }
         Ok(rpc_writes.remove(reverse_index))
     }
