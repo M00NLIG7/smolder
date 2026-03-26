@@ -519,7 +519,9 @@ impl RemoteExecClient {
         let mut control_buffer = Vec::new();
         let ready_line = timeout(timeout_budget, control_pipe.read_line(&mut control_buffer))
             .await
-            .map_err(|_| CoreError::Timeout("waiting for interactive psexec service readiness"))??;
+            .map_err(|_| {
+                CoreError::Timeout("waiting for interactive psexec service readiness")
+            })??;
         match ready_line.as_deref() {
             Some("READY") => {}
             Some(_) => {
@@ -1679,7 +1681,9 @@ mod tests {
     #[test]
     fn remote_exec_builder_defaults_enable_encryption() {
         let builder = RemoteExecBuilder::new();
-        assert!(builder.capabilities.contains(GlobalCapabilities::ENCRYPTION));
+        assert!(builder
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION));
     }
 
     #[test]
