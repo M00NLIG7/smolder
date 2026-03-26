@@ -77,6 +77,37 @@ If your network requires additional CA certificates or proxy customization, use
 an untracked local override under `docker/cross/private/` or
 `docker/cross/*.local`.
 
+## Live SMB Encryption Fixture
+
+The tools-layer encryption tests are opt-in. On Tiny11, create an encrypted
+share once and point the tests at it:
+
+```powershell
+$path = 'C:\SmolderEncrypted'
+New-Item -ItemType Directory -Path $path -Force | Out-Null
+icacls $path /grant 'Everyone:(OI)(CI)F' /T /C | Out-Null
+
+if (Get-SmbShare -Name 'SMOLDERENC' -ErrorAction SilentlyContinue) {
+    Set-SmbShare -Name 'SMOLDERENC' -EncryptData $true | Out-Null
+} else {
+    New-SmbShare -Name 'SMOLDERENC' -Path $path -FullAccess 'Everyone' -EncryptData $true | Out-Null
+}
+
+Get-SmbShare -Name 'SMOLDERENC' | Select-Object Name, Path, EncryptData
+```
+
+Then run the positive Windows encryption test:
+
+```bash
+SMOLDER_WINDOWS_HOST=127.0.0.1 \
+SMOLDER_WINDOWS_USERNAME=windowsfixture \
+SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
+cargo test -p smolder-tools --test windows_encryption -- --nocapture
+```
+
+Samba can use the same opt-in pattern via `SMOLDER_SAMBA_ENCRYPTED_SHARE`.
+
 ## Security Notice
 
 This tool is designed for security research and penetration testing. Always ensure you have proper authorization before testing any systems or networks.
