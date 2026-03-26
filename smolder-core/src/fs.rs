@@ -533,6 +533,41 @@ where
         })
     }
 
+    /// Reopens a previously captured durable handle on the current tree connection.
+    pub async fn reopen_durable<'a>(
+        &'a mut self,
+        handle: &DurableHandle,
+    ) -> Result<RemoteFile<'a, T>, CoreError> {
+        let reopened = self.connection_mut().reconnect_durable(handle).await?;
+        let response = reopened.create_response().clone();
+        let lease = response
+            .lease_v2()
+            .map_err(CoreError::from)?
+            .map(Lease::from);
+        let max_read_size = self.max_read_size();
+        let max_write_size = self.max_write_size();
+        let connection = self.take_connection();
+
+        Ok(RemoteFile {
+            share: self,
+            connection: Some(connection),
+            file_id: response.file_id,
+            lease,
+            durable: Some(reopened),
+            resilient: None,
+            position: 0,
+            end_of_file: response.end_of_file,
+            max_read_size,
+            max_write_size,
+            read_buffer: BytesMut::with_capacity(max_read_size as usize),
+            write_buffer: Vec::with_capacity(max_write_size as usize),
+            pending_read: None,
+            pending_write: None,
+            pending_flush: None,
+            closed: false,
+        })
+    }
+
     /// Reads the full contents of a remote file into memory.
     pub async fn read(&mut self, path: impl AsRef<str>) -> Result<Vec<u8>, CoreError> {
         let buffer_size = self.max_read_size() as usize;
@@ -2178,6 +2213,124 @@ mod tests {
                 .expect("resiliency request should decode"),
             NetworkResiliencyRequest { timeout: 45_000 }
         );
+    }
+
+    #[tokio::test]
+    async fn reopen_durable_rebinds_handle_on_new_share_connection() {
+        let original_file_id = FileId {
+            persistent: 0x55,
+            volatile: 0x66,
+        };
+        let reopened_file_id = FileId {
+            persistent: 0x77,
+            volatile: 0x88,
+        };
+        let original_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_id: original_file_id,
+            create_contexts: vec![CreateContext::new(
+                b"DH2Q".to_vec(),
+                DurableHandleResponseV2 {
+                    timeout: 30_000,
+                    flags: DurableHandleFlags::empty(),
+                }
+                .encode(),
+            )],
+        };
+        let reopened_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_id: reopened_file_id,
+            create_contexts: vec![CreateContext::new(
+                b"DH2Q".to_vec(),
+                DurableHandleResponseV2 {
+                    timeout: 30_000,
+                    flags: DurableHandleFlags::empty(),
+                }
+                .encode(),
+            )],
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+
+        let mut original_share = build_share(vec![response_frame(
+            Command::Create,
+            NtStatus::SUCCESS.to_u32(),
+            3,
+            11,
+            7,
+            original_response.encode(),
+        )])
+        .await;
+        let durable = original_share
+            .open(
+                "notes.txt",
+                OpenOptions::new()
+                    .read(true)
+                    .durable(DurableOpenOptions::new().with_timeout(30_000)),
+            )
+            .await
+            .expect("durable open should succeed")
+            .durable_handle()
+            .expect("durable state should be present")
+            .clone();
+
+        let reconnect_reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                reopened_response.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+        let mut reconnected_share = build_share(reconnect_reads).await;
+        let file = reconnected_share
+            .reopen_durable(&durable)
+            .await
+            .expect("durable reconnect should succeed");
+
+        assert_eq!(file.file_id(), reopened_file_id);
+        assert_eq!(
+            file.durable_handle()
+                .expect("durable state should remain present")
+                .file_id(),
+            reopened_file_id
+        );
+        file.close().await.expect("close should succeed");
+
+        let writes = transport_writes(reconnected_share);
+        let reconnect = outbound_create(&writes[3]);
+        let requested = reconnect
+            .create_contexts
+            .iter()
+            .find_map(|context| {
+                context
+                    .durable_handle_reconnect_v2_data()
+                    .expect("durable reconnect should decode")
+            })
+            .expect("durable reconnect context should be present");
+        assert_eq!(requested.file_id, original_file_id);
+        assert_eq!(requested.flags, DurableHandleFlags::empty());
+        assert_ne!(requested.create_guid, [0; 16]);
     }
 
     #[tokio::test]
