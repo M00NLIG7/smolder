@@ -1513,8 +1513,6 @@ where
             if command != Command::SessionSetup && !encrypted_response {
                 verify_response_signature(&response_header, &response_payload, &context)?;
             }
-
-
             self.apply_credit_grant(u32::from(response_header.credit_request_response))?;
             if !accepted_statuses.contains(&response_header.status) {
                 return Err(CoreError::UnexpectedStatus {
@@ -1667,10 +1665,6 @@ where
 
         Ok(packets)
     }
-}
-
-fn session_setup_debug_enabled() -> bool {
-    std::env::var_os("SMOLDER_NTLM_DEBUG").is_some()
 }
 
 fn align_to_8(len: usize) -> usize {
