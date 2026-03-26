@@ -9,6 +9,7 @@ const RPC_VERSION: u8 = 5;
 const RPC_VERSION_MINOR: u8 = 0;
 const DATA_REPRESENTATION_LITTLE_ENDIAN: [u8; 4] = [0x10, 0x00, 0x00, 0x00];
 const COMMON_HEADER_LEN: usize = 16;
+const SEC_TRAILER_LEN: usize = 8;
 const BIND_CONTEXT_ITEM_LEN: usize = 44;
 const BIND_ACK_RESULT_LEN: usize = 24;
 const NDR32_UUID: Uuid = Uuid::new(
@@ -67,6 +68,120 @@ impl TryFrom<u8> for PacketType {
                 field: "packet_type",
                 reason: "unknown packet type",
             }),
+        }
+    }
+}
+
+/// DCE/RPC authentication service identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum AuthType {
+    /// No authentication.
+    None = 0x00,
+    /// GSS-API negotiate (SPNEGO).
+    GssNegotiate = 0x09,
+    /// NTLM / SSPI WinNT provider.
+    WinNt = 0x0a,
+    /// Schannel.
+    GssSchannel = 0x0e,
+    /// Kerberos.
+    GssKerberos = 0x10,
+    /// Netlogon secure channel.
+    Netlogon = 0x44,
+    /// Runtime default authentication service.
+    Default = 0xff,
+}
+
+impl TryFrom<u8> for AuthType {
+    type Error = ProtocolError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(Self::None),
+            0x09 => Ok(Self::GssNegotiate),
+            0x0a => Ok(Self::WinNt),
+            0x0e => Ok(Self::GssSchannel),
+            0x10 => Ok(Self::GssKerberos),
+            0x44 => Ok(Self::Netlogon),
+            0xff => Ok(Self::Default),
+            _ => Err(ProtocolError::InvalidField {
+                field: "auth_type",
+                reason: "unknown authentication type",
+            }),
+        }
+    }
+}
+
+/// DCE/RPC authentication protection level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum AuthLevel {
+    /// Runtime default protection level.
+    Default = 0x00,
+    /// No protection.
+    None = 0x01,
+    /// Authenticate the connection establishment only.
+    Connect = 0x02,
+    /// Authenticate each call.
+    Call = 0x03,
+    /// Authenticate every packet.
+    Packet = 0x04,
+    /// Provide per-packet integrity.
+    PacketIntegrity = 0x05,
+    /// Provide per-packet privacy/confidentiality.
+    PacketPrivacy = 0x06,
+}
+
+impl TryFrom<u8> for AuthLevel {
+    type Error = ProtocolError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(Self::Default),
+            0x01 => Ok(Self::None),
+            0x02 => Ok(Self::Connect),
+            0x03 => Ok(Self::Call),
+            0x04 => Ok(Self::Packet),
+            0x05 => Ok(Self::PacketIntegrity),
+            0x06 => Ok(Self::PacketPrivacy),
+            _ => Err(ProtocolError::InvalidField {
+                field: "auth_level",
+                reason: "unknown authentication level",
+            }),
+        }
+    }
+}
+
+/// Connection-oriented DCE/RPC authentication verifier appended to a PDU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthVerifier {
+    /// Authentication service identifier.
+    pub auth_type: AuthType,
+    /// Requested protection level.
+    pub auth_level: AuthLevel,
+    /// Reserved byte carried in the security trailer.
+    pub auth_reserved: u8,
+    /// Authentication context identifier.
+    pub auth_context_id: u32,
+    /// Authentication token or signature bytes.
+    pub auth_value: Vec<u8>,
+}
+
+impl AuthVerifier {
+    /// Builds an authentication verifier with a zero reserved byte.
+    #[must_use]
+    pub fn new(
+        auth_type: AuthType,
+        auth_level: AuthLevel,
+        auth_context_id: u32,
+        auth_value: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            auth_type,
+            auth_level,
+            auth_reserved: 0,
+            auth_context_id,
+            auth_value: auth_value.into(),
         }
     }
 }
@@ -164,7 +279,7 @@ pub struct CommonHeader {
     pub flags: PacketFlags,
     /// Fragment length including the header.
     pub frag_length: u16,
-    /// Authentication trailer length.
+    /// Authentication token length, excluding the fixed security trailer.
     pub auth_length: u16,
     /// Client-assigned call identifier.
     pub call_id: u32,
@@ -251,51 +366,51 @@ pub struct BindPdu {
     pub abstract_syntax: SyntaxId,
     /// Transfer syntax being requested.
     pub transfer_syntax: SyntaxId,
+    /// Optional authentication verifier appended to the PDU.
+    pub auth_verifier: Option<AuthVerifier>,
 }
 
 impl BindPdu {
     /// Encodes the bind PDU.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let body_len = 12 + BIND_CONTEXT_ITEM_LEN;
-        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body_len);
+        let mut body = Vec::with_capacity(12 + BIND_CONTEXT_ITEM_LEN + SEC_TRAILER_LEN + 16);
+        body.put_u16_le(self.max_xmit_frag);
+        body.put_u16_le(self.max_recv_frag);
+        body.put_u32_le(self.assoc_group_id);
+        body.put_u8(1);
+        body.put_u8(0);
+        body.put_u16_le(0);
+        body.put_u16_le(self.context_id);
+        body.put_u8(1);
+        body.put_u8(0);
+        self.abstract_syntax.encode_into(&mut body);
+        self.transfer_syntax.encode_into(&mut body);
+        let auth_length = append_auth_verifier(&mut body, self.auth_verifier.as_ref());
+
+        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body.len());
         CommonHeader {
             packet_type: PacketType::Bind,
             flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
-            frag_length: (COMMON_HEADER_LEN + body_len) as u16,
-            auth_length: 0,
+            frag_length: (COMMON_HEADER_LEN + body.len()) as u16,
+            auth_length,
             call_id: self.call_id,
         }
         .encode_into(&mut out);
-        out.put_u16_le(self.max_xmit_frag);
-        out.put_u16_le(self.max_recv_frag);
-        out.put_u32_le(self.assoc_group_id);
-        out.put_u8(1);
-        out.put_u8(0);
-        out.put_u16_le(0);
-        out.put_u16_le(self.context_id);
-        out.put_u8(1);
-        out.put_u8(0);
-        self.abstract_syntax.encode_into(&mut out);
-        self.transfer_syntax.encode_into(&mut out);
+        out.extend_from_slice(&body);
         out
     }
 
     /// Decodes a bind PDU.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let (header, mut body) = CommonHeader::decode(bytes)?;
+        let (header, body) = CommonHeader::decode(bytes)?;
         if header.packet_type != PacketType::Bind {
             return Err(ProtocolError::InvalidField {
                 field: "packet_type",
                 reason: "expected bind pdu",
             });
         }
-        if header.auth_length != 0 {
-            return Err(ProtocolError::InvalidField {
-                field: "auth_length",
-                reason: "authenticated bind pdus are not supported",
-            });
-        }
+        let (mut body, auth_verifier) = split_auth_verifier(body, header.auth_length)?;
         let max_xmit_frag = get_u16(&mut body, "max_xmit_frag")?;
         let max_recv_frag = get_u16(&mut body, "max_recv_frag")?;
         let assoc_group_id = get_u32(&mut body, "assoc_group_id")?;
@@ -327,6 +442,7 @@ impl BindPdu {
             context_id,
             abstract_syntax,
             transfer_syntax,
+            auth_verifier,
         })
     }
 }
@@ -357,6 +473,8 @@ pub struct BindAckPdu {
     pub secondary_address: Vec<u8>,
     /// Presentation context result.
     pub result: BindAckResult,
+    /// Optional authentication verifier appended to the PDU.
+    pub auth_verifier: Option<AuthVerifier>,
 }
 
 impl BindAckPdu {
@@ -364,52 +482,56 @@ impl BindAckPdu {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let address_padding = padding_len(self.secondary_address.len() + 2);
-        let body_len = 10 + self.secondary_address.len() + address_padding + 4 + BIND_ACK_RESULT_LEN;
-        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body_len);
+        let mut body = Vec::with_capacity(
+            10 + self.secondary_address.len() + address_padding + 4 + BIND_ACK_RESULT_LEN,
+        );
+        body.put_u16_le(self.max_xmit_frag);
+        body.put_u16_le(self.max_recv_frag);
+        body.put_u32_le(self.assoc_group_id);
+        body.put_u16_le(self.secondary_address.len() as u16);
+        body.extend_from_slice(&self.secondary_address);
+        pad_to_4(&mut body);
+        body.put_u8(1);
+        body.put_u8(0);
+        body.put_u16_le(0);
+        body.put_u16_le(self.result.result);
+        body.put_u16_le(self.result.reason);
+        self.result.transfer_syntax.encode_into(&mut body);
+        let auth_length = append_auth_verifier(&mut body, self.auth_verifier.as_ref());
+
+        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body.len());
         CommonHeader {
             packet_type: PacketType::BindAck,
             flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
-            frag_length: (COMMON_HEADER_LEN + body_len) as u16,
-            auth_length: 0,
+            frag_length: (COMMON_HEADER_LEN + body.len()) as u16,
+            auth_length,
             call_id: self.call_id,
         }
         .encode_into(&mut out);
-        out.put_u16_le(self.max_xmit_frag);
-        out.put_u16_le(self.max_recv_frag);
-        out.put_u32_le(self.assoc_group_id);
-        out.put_u16_le(self.secondary_address.len() as u16);
-        out.extend_from_slice(&self.secondary_address);
-        pad_to_4(&mut out);
-        out.put_u8(1);
-        out.put_u8(0);
-        out.put_u16_le(0);
-        out.put_u16_le(self.result.result);
-        out.put_u16_le(self.result.reason);
-        self.result.transfer_syntax.encode_into(&mut out);
+        out.extend_from_slice(&body);
         out
     }
 
     /// Decodes a bind-ack PDU.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let (header, mut body) = CommonHeader::decode(bytes)?;
+        let (header, body) = CommonHeader::decode(bytes)?;
         if header.packet_type != PacketType::BindAck {
             return Err(ProtocolError::InvalidField {
                 field: "packet_type",
                 reason: "expected bind-ack pdu",
             });
         }
-        if header.auth_length != 0 {
-            return Err(ProtocolError::InvalidField {
-                field: "auth_length",
-                reason: "authenticated bind-ack pdus are not supported",
-            });
-        }
+        let (mut body, auth_verifier) = split_auth_verifier(body, header.auth_length)?;
         let max_xmit_frag = get_u16(&mut body, "max_xmit_frag")?;
         let max_recv_frag = get_u16(&mut body, "max_recv_frag")?;
         let assoc_group_id = get_u32(&mut body, "assoc_group_id")?;
         let secondary_address_len = get_u16(&mut body, "secondary_address_len")? as usize;
         let secondary_address = get_vec(&mut body, secondary_address_len, "secondary_address")?;
-        skip_padding(&mut body, padding_len(secondary_address_len + 2), "secondary_address_padding")?;
+        skip_padding(
+            &mut body,
+            padding_len(secondary_address_len + 2),
+            "secondary_address_padding",
+        )?;
         let num_results = get_u8(&mut body, "num_results")?;
         let _reserved = get_u8(&mut body, "reserved")?;
         let _reserved2 = get_u16(&mut body, "reserved2")?;
@@ -433,11 +555,12 @@ impl BindAckPdu {
                 reason,
                 transfer_syntax,
             },
+            auth_verifier,
         })
     }
 }
 
-/// DCE/RPC request PDU without an authentication trailer.
+/// DCE/RPC request PDU with an optional authentication verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestPdu {
     /// Call identifier.
@@ -454,6 +577,8 @@ pub struct RequestPdu {
     pub object_uuid: Option<Uuid>,
     /// Marshaled stub data.
     pub stub_data: Vec<u8>,
+    /// Optional authentication verifier appended to the PDU.
+    pub auth_verifier: Option<AuthVerifier>,
 }
 
 impl RequestPdu {
@@ -465,41 +590,40 @@ impl RequestPdu {
             flags |= PacketFlags::OBJECT_UUID;
         }
         let object_len = usize::from(self.object_uuid.is_some()) * 16;
-        let body_len = 8 + object_len + self.stub_data.len();
-        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body_len);
+        let mut body =
+            Vec::with_capacity(8 + object_len + self.stub_data.len() + SEC_TRAILER_LEN + 16);
+        body.put_u32_le(self.alloc_hint);
+        body.put_u16_le(self.context_id);
+        body.put_u16_le(self.opnum);
+        if let Some(object_uuid) = self.object_uuid {
+            object_uuid.encode_into(&mut body);
+        }
+        body.extend_from_slice(&self.stub_data);
+        let auth_length = append_auth_verifier(&mut body, self.auth_verifier.as_ref());
+
+        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body.len());
         CommonHeader {
             packet_type: PacketType::Request,
             flags,
-            frag_length: (COMMON_HEADER_LEN + body_len) as u16,
-            auth_length: 0,
+            frag_length: (COMMON_HEADER_LEN + body.len()) as u16,
+            auth_length,
             call_id: self.call_id,
         }
         .encode_into(&mut out);
-        out.put_u32_le(self.alloc_hint);
-        out.put_u16_le(self.context_id);
-        out.put_u16_le(self.opnum);
-        if let Some(object_uuid) = self.object_uuid {
-            object_uuid.encode_into(&mut out);
-        }
-        out.extend_from_slice(&self.stub_data);
+        out.extend_from_slice(&body);
         out
     }
 
     /// Decodes the request PDU.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let (header, mut body) = CommonHeader::decode(bytes)?;
+        let (header, body) = CommonHeader::decode(bytes)?;
         if header.packet_type != PacketType::Request {
             return Err(ProtocolError::InvalidField {
                 field: "packet_type",
                 reason: "expected request pdu",
             });
         }
-        if header.auth_length != 0 {
-            return Err(ProtocolError::InvalidField {
-                field: "auth_length",
-                reason: "authenticated request pdus are not supported",
-            });
-        }
+        let (mut body, auth_verifier) = split_auth_verifier(body, header.auth_length)?;
         let alloc_hint = get_u32(&mut body, "alloc_hint")?;
         let context_id = get_u16(&mut body, "context_id")?;
         let opnum = get_u16(&mut body, "opnum")?;
@@ -516,11 +640,12 @@ impl RequestPdu {
             opnum,
             object_uuid,
             stub_data: body.to_vec(),
+            auth_verifier,
         })
     }
 }
 
-/// DCE/RPC response PDU without an authentication trailer.
+/// DCE/RPC response PDU with an optional authentication verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponsePdu {
     /// Call identifier.
@@ -535,45 +660,45 @@ pub struct ResponsePdu {
     pub cancel_count: u8,
     /// Marshaled stub data.
     pub stub_data: Vec<u8>,
+    /// Optional authentication verifier appended to the PDU.
+    pub auth_verifier: Option<AuthVerifier>,
 }
 
 impl ResponsePdu {
     /// Encodes the response PDU.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let body_len = 8 + self.stub_data.len();
-        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body_len);
+        let mut body = Vec::with_capacity(8 + self.stub_data.len() + SEC_TRAILER_LEN + 16);
+        body.put_u32_le(self.alloc_hint);
+        body.put_u16_le(self.context_id);
+        body.put_u8(self.cancel_count);
+        body.put_u8(0);
+        body.extend_from_slice(&self.stub_data);
+        let auth_length = append_auth_verifier(&mut body, self.auth_verifier.as_ref());
+
+        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body.len());
         CommonHeader {
             packet_type: PacketType::Response,
             flags: self.flags,
-            frag_length: (COMMON_HEADER_LEN + body_len) as u16,
-            auth_length: 0,
+            frag_length: (COMMON_HEADER_LEN + body.len()) as u16,
+            auth_length,
             call_id: self.call_id,
         }
         .encode_into(&mut out);
-        out.put_u32_le(self.alloc_hint);
-        out.put_u16_le(self.context_id);
-        out.put_u8(self.cancel_count);
-        out.put_u8(0);
-        out.extend_from_slice(&self.stub_data);
+        out.extend_from_slice(&body);
         out
     }
 
     /// Decodes the response PDU.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let (header, mut body) = CommonHeader::decode(bytes)?;
+        let (header, body) = CommonHeader::decode(bytes)?;
         if header.packet_type != PacketType::Response {
             return Err(ProtocolError::InvalidField {
                 field: "packet_type",
                 reason: "expected response pdu",
             });
         }
-        if header.auth_length != 0 {
-            return Err(ProtocolError::InvalidField {
-                field: "auth_length",
-                reason: "authenticated response pdus are not supported",
-            });
-        }
+        let (mut body, auth_verifier) = split_auth_verifier(body, header.auth_length)?;
         let alloc_hint = get_u32(&mut body, "alloc_hint")?;
         let context_id = get_u16(&mut body, "context_id")?;
         let cancel_count = get_u8(&mut body, "cancel_count")?;
@@ -585,11 +710,12 @@ impl ResponsePdu {
             context_id,
             cancel_count,
             stub_data: body.to_vec(),
+            auth_verifier,
         })
     }
 }
 
-/// DCE/RPC fault PDU without an authentication trailer.
+/// DCE/RPC fault PDU with an optional authentication verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultPdu {
     /// Call identifier.
@@ -604,46 +730,46 @@ pub struct FaultPdu {
     pub status: u32,
     /// Optional stub bytes.
     pub stub_data: Vec<u8>,
+    /// Optional authentication verifier appended to the PDU.
+    pub auth_verifier: Option<AuthVerifier>,
 }
 
 impl FaultPdu {
     /// Encodes the fault PDU.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let body_len = 12 + self.stub_data.len();
-        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body_len);
+        let mut body = Vec::with_capacity(12 + self.stub_data.len() + SEC_TRAILER_LEN + 16);
+        body.put_u32_le(self.alloc_hint);
+        body.put_u16_le(self.context_id);
+        body.put_u8(0);
+        body.put_u8(0);
+        body.put_u32_le(self.status);
+        body.extend_from_slice(&self.stub_data);
+        let auth_length = append_auth_verifier(&mut body, self.auth_verifier.as_ref());
+
+        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body.len());
         CommonHeader {
             packet_type: PacketType::Fault,
             flags: self.flags,
-            frag_length: (COMMON_HEADER_LEN + body_len) as u16,
-            auth_length: 0,
+            frag_length: (COMMON_HEADER_LEN + body.len()) as u16,
+            auth_length,
             call_id: self.call_id,
         }
         .encode_into(&mut out);
-        out.put_u32_le(self.alloc_hint);
-        out.put_u16_le(self.context_id);
-        out.put_u8(0);
-        out.put_u8(0);
-        out.put_u32_le(self.status);
-        out.extend_from_slice(&self.stub_data);
+        out.extend_from_slice(&body);
         out
     }
 
     /// Decodes the fault PDU.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let (header, mut body) = CommonHeader::decode(bytes)?;
+        let (header, body) = CommonHeader::decode(bytes)?;
         if header.packet_type != PacketType::Fault {
             return Err(ProtocolError::InvalidField {
                 field: "packet_type",
                 reason: "expected fault pdu",
             });
         }
-        if header.auth_length != 0 {
-            return Err(ProtocolError::InvalidField {
-                field: "auth_length",
-                reason: "authenticated fault pdus are not supported",
-            });
-        }
+        let (mut body, auth_verifier) = split_auth_verifier(body, header.auth_length)?;
         let alloc_hint = get_u32(&mut body, "alloc_hint")?;
         let context_id = get_u16(&mut body, "context_id")?;
         let _cancel_count = get_u8(&mut body, "cancel_count")?;
@@ -656,6 +782,7 @@ impl FaultPdu {
             context_id,
             status,
             stub_data: body.to_vec(),
+            auth_verifier,
         })
     }
 }
@@ -701,6 +828,79 @@ impl Packet {
     }
 }
 
+fn append_auth_verifier(body: &mut Vec<u8>, auth_verifier: Option<&AuthVerifier>) -> u16 {
+    let Some(auth_verifier) = auth_verifier else {
+        return 0;
+    };
+
+    let auth_pad_length = padding_len_to_alignment(body.len(), 16);
+    body.resize(body.len() + auth_pad_length, 0);
+    body.put_u8(auth_verifier.auth_type as u8);
+    body.put_u8(auth_verifier.auth_level as u8);
+    body.put_u8(auth_pad_length as u8);
+    body.put_u8(auth_verifier.auth_reserved);
+    body.put_u32_le(auth_verifier.auth_context_id);
+    body.extend_from_slice(&auth_verifier.auth_value);
+    auth_verifier.auth_value.len() as u16
+}
+
+fn split_auth_verifier<'a>(
+    body: &'a [u8],
+    auth_length: u16,
+) -> Result<(&'a [u8], Option<AuthVerifier>), ProtocolError> {
+    if auth_length == 0 {
+        return Ok((body, None));
+    }
+
+    let auth_length = usize::from(auth_length);
+    if body.len() < auth_length + SEC_TRAILER_LEN {
+        return Err(ProtocolError::UnexpectedEof {
+            field: "auth_verifier",
+        });
+    }
+
+    let sec_trailer_offset = body.len() - auth_length - SEC_TRAILER_LEN;
+    if !sec_trailer_offset.is_multiple_of(16) {
+        return Err(ProtocolError::InvalidField {
+            field: "auth_verifier",
+            reason: "security trailer is not 16-byte aligned",
+        });
+    }
+
+    let mut sec_trailer = &body[sec_trailer_offset..sec_trailer_offset + SEC_TRAILER_LEN];
+    let auth_type = AuthType::try_from(get_u8(&mut sec_trailer, "auth_type")?)?;
+    let auth_level = AuthLevel::try_from(get_u8(&mut sec_trailer, "auth_level")?)?;
+    let auth_pad_length = usize::from(get_u8(&mut sec_trailer, "auth_pad_length")?);
+    let auth_reserved = get_u8(&mut sec_trailer, "auth_reserved")?;
+    let auth_context_id = get_u32(&mut sec_trailer, "auth_context_id")?;
+
+    if sec_trailer_offset < auth_pad_length {
+        return Err(ProtocolError::InvalidField {
+            field: "auth_pad_length",
+            reason: "authentication padding exceeds body length",
+        });
+    }
+
+    let body_len = sec_trailer_offset - auth_pad_length;
+    if padding_len_to_alignment(body_len, 16) != auth_pad_length {
+        return Err(ProtocolError::InvalidField {
+            field: "auth_pad_length",
+            reason: "authentication padding does not align the security trailer",
+        });
+    }
+
+    Ok((
+        &body[..body_len],
+        Some(AuthVerifier {
+            auth_type,
+            auth_level,
+            auth_reserved,
+            auth_context_id,
+            auth_value: body[sec_trailer_offset + SEC_TRAILER_LEN..].to_vec(),
+        }),
+    ))
+}
+
 fn get_u8(input: &mut &[u8], field: &'static str) -> Result<u8, ProtocolError> {
     if input.remaining() < 1 {
         return Err(ProtocolError::UnexpectedEof { field });
@@ -734,11 +934,7 @@ fn get_array<const N: usize>(
     Ok(value)
 }
 
-fn get_vec(
-    input: &mut &[u8],
-    len: usize,
-    field: &'static str,
-) -> Result<Vec<u8>, ProtocolError> {
+fn get_vec(input: &mut &[u8], len: usize, field: &'static str) -> Result<Vec<u8>, ProtocolError> {
     if input.remaining() < len {
         return Err(ProtocolError::UnexpectedEof { field });
     }
@@ -749,7 +945,11 @@ fn get_vec(
 }
 
 fn padding_len(length: usize) -> usize {
-    (4 - (length % 4)) % 4
+    padding_len_to_alignment(length, 4)
+}
+
+fn padding_len_to_alignment(length: usize, alignment: usize) -> usize {
+    (alignment - (length % alignment)) % alignment
 }
 
 fn pad_to_4(out: &mut Vec<u8>) {
@@ -757,11 +957,7 @@ fn pad_to_4(out: &mut Vec<u8>) {
     out.resize(out.len() + padding, 0);
 }
 
-fn skip_padding(
-    input: &mut &[u8],
-    len: usize,
-    field: &'static str,
-) -> Result<(), ProtocolError> {
+fn skip_padding(input: &mut &[u8], len: usize, field: &'static str) -> Result<(), ProtocolError> {
     if input.remaining() < len {
         return Err(ProtocolError::UnexpectedEof { field });
     }
@@ -772,8 +968,8 @@ fn skip_padding(
 #[cfg(test)]
 mod tests {
     use super::{
-        BindAckPdu, BindAckResult, BindPdu, Packet, PacketFlags, RequestPdu, ResponsePdu,
-        SyntaxId, Uuid,
+        AuthLevel, AuthType, AuthVerifier, BindAckPdu, BindAckResult, BindPdu, Packet, PacketFlags,
+        RequestPdu, ResponsePdu, SyntaxId, Uuid,
     };
 
     const SVCCTL_SYNTAX: SyntaxId = SyntaxId::new(
@@ -797,9 +993,32 @@ mod tests {
             context_id: 0,
             abstract_syntax: SVCCTL_SYNTAX,
             transfer_syntax: SyntaxId::NDR32,
+            auth_verifier: None,
         };
         let encoded = packet.encode();
         let decoded = BindPdu::decode(&encoded).expect("bind should decode");
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn bind_roundtrips_with_auth_verifier() {
+        let packet = BindPdu {
+            call_id: 3,
+            max_xmit_frag: 4280,
+            max_recv_frag: 4280,
+            assoc_group_id: 9,
+            context_id: 0,
+            abstract_syntax: SVCCTL_SYNTAX,
+            transfer_syntax: SyntaxId::NDR32,
+            auth_verifier: Some(AuthVerifier::new(
+                AuthType::WinNt,
+                AuthLevel::PacketIntegrity,
+                0x1234,
+                vec![0xaa; 16],
+            )),
+        };
+        let encoded = packet.encode();
+        let decoded = BindPdu::decode(&encoded).expect("bind with auth should decode");
         assert_eq!(decoded, packet);
     }
 
@@ -816,6 +1035,7 @@ mod tests {
                 reason: 0,
                 transfer_syntax: SyntaxId::NDR32,
             },
+            auth_verifier: None,
         };
         let encoded = packet.encode();
         let decoded = BindAckPdu::decode(&encoded).expect("bind ack should decode");
@@ -832,16 +1052,34 @@ mod tests {
             alloc_hint: 12,
             context_id: 0,
             opnum: 15,
-            object_uuid: Some(Uuid::new(
-                1,
-                2,
-                3,
-                [4, 5, 6, 7, 8, 9, 10, 11],
-            )),
+            object_uuid: Some(Uuid::new(1, 2, 3, [4, 5, 6, 7, 8, 9, 10, 11])),
             stub_data: vec![0xaa, 0xbb, 0xcc, 0xdd],
+            auth_verifier: None,
         };
         let encoded = packet.encode();
         let decoded = RequestPdu::decode(&encoded).expect("request should decode");
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn request_roundtrips_with_auth_verifier() {
+        let packet = RequestPdu {
+            call_id: 7,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 12,
+            context_id: 0,
+            opnum: 15,
+            object_uuid: None,
+            stub_data: vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            auth_verifier: Some(AuthVerifier::new(
+                AuthType::WinNt,
+                AuthLevel::PacketIntegrity,
+                0,
+                vec![0x11; 16],
+            )),
+        };
+        let encoded = packet.encode();
+        let decoded = RequestPdu::decode(&encoded).expect("request with auth should decode");
         assert_eq!(decoded, packet);
     }
 
@@ -854,6 +1092,7 @@ mod tests {
             context_id: 0,
             cancel_count: 0,
             stub_data: vec![1, 2, 3, 4],
+            auth_verifier: None,
         };
         let encoded = packet.encode();
         let decoded = ResponsePdu::decode(&encoded).expect("response should decode");
@@ -873,6 +1112,7 @@ mod tests {
                 reason: 0,
                 transfer_syntax: SyntaxId::NDR32,
             },
+            auth_verifier: None,
         });
         let encoded = packet.encode();
         let decoded = Packet::decode(&encoded).expect("packet should decode");

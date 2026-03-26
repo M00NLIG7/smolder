@@ -56,6 +56,7 @@ where
             context_id,
             abstract_syntax,
             transfer_syntax: SyntaxId::NDR32,
+            auth_verifier: None,
         });
         let response = self.pipe.call(bind.encode()).await?;
         let packet = Packet::decode(&response)?;
@@ -88,7 +89,8 @@ where
         opnum: u16,
         stub_data: Vec<u8>,
     ) -> Result<Vec<u8>, CoreError> {
-        self.call_with_object(context_id, opnum, None, stub_data).await
+        self.call_with_object(context_id, opnum, None, stub_data)
+            .await
     }
 
     /// Sends a request PDU with an optional object UUID.
@@ -107,6 +109,7 @@ where
             opnum,
             object_uuid,
             stub_data,
+            auth_verifier: None,
         });
         let response = self.pipe.call(request.encode()).await?;
         let packet = Packet::decode(&response)?;
@@ -209,6 +212,7 @@ mod tests {
             context_id: 0,
             cancel_count: 0,
             stub_data: vec![1, 2, 3, 4],
+            auth_verifier: None,
         }))])
         .await;
         let mut rpc = PipeRpcClient::new(pipe);
@@ -230,6 +234,7 @@ mod tests {
             context_id: 0,
             status: 0x1c01_0003,
             stub_data: Vec::new(),
+            auth_verifier: None,
         }))])
         .await;
         let mut rpc = PipeRpcClient::new(pipe);
@@ -267,6 +272,7 @@ mod tests {
                 reason: 0,
                 transfer_syntax: SyntaxId::NDR32,
             },
+            auth_verifier: None,
         }))
     }
 
