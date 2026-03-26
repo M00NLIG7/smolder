@@ -1,7 +1,8 @@
 use std::sync::OnceLock;
 
 use smolder_core::prelude::{
-    connect_tree, NamedPipe, NtlmCredentials, PipeAccess, PipeRpcClient, SmbSessionConfig,
+    connect_tree, CoreError, NamedPipe, NtlmCredentials, PipeAccess, PipeRpcClient,
+    SmbSessionConfig,
 };
 use smolder_proto::rpc::{SyntaxId, Uuid};
 use smolder_proto::smb::smb2::{SessionId, TreeId};
@@ -50,9 +51,69 @@ const SRVSVC_SYNTAX: SyntaxId = SyntaxId::new(
     3,
     0,
 );
+const SRVSVC_CONTEXT_ID: u16 = 0;
+const NETR_REMOTE_TOD_OPNUM: u16 = 28;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimeOfDayInfo {
+    hours: u32,
+    minutes: u32,
+    seconds: u32,
+    day: u32,
+    month: u32,
+    year: u32,
+    weekday: u32,
+}
+
+fn remote_tod_stub() -> Vec<u8> {
+    0_u32.to_le_bytes().to_vec()
+}
+
+fn parse_remote_tod_response(response: &[u8]) -> Result<TimeOfDayInfo, CoreError> {
+    const STRUCT_OFFSET: usize = 4;
+    const STRUCT_LEN: usize = 48;
+    const STATUS_OFFSET: usize = STRUCT_OFFSET + STRUCT_LEN;
+    if response.len() < STATUS_OFFSET + 4 {
+        return Err(CoreError::InvalidResponse(
+            "NetrRemoteTOD response was too short",
+        ));
+    }
+
+    let referent = u32::from_le_bytes(response[0..4].try_into().expect("referent slice"));
+    if referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "NetrRemoteTOD did not return a TIME_OF_DAY_INFO buffer",
+        ));
+    }
+
+    let read_u32 = |offset: usize| -> u32 {
+        u32::from_le_bytes(
+            response[offset..offset + 4]
+                .try_into()
+                .expect("DWORD slice should decode"),
+        )
+    };
+    let status = read_u32(STATUS_OFFSET);
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "NetrRemoteTOD",
+            code: status,
+        });
+    }
+
+    Ok(TimeOfDayInfo {
+        hours: read_u32(STRUCT_OFFSET + 8),
+        minutes: read_u32(STRUCT_OFFSET + 12),
+        seconds: read_u32(STRUCT_OFFSET + 16),
+        day: read_u32(STRUCT_OFFSET + 32),
+        month: read_u32(STRUCT_OFFSET + 36),
+        year: read_u32(STRUCT_OFFSET + 40),
+        weekday: read_u32(STRUCT_OFFSET + 44),
+    })
+}
 
 #[tokio::test]
-async fn binds_srvsvc_over_encrypted_ipc_when_configured() {
+async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaRpcEncryptionConfig::from_env() else {
         eprintln!(
@@ -86,12 +147,26 @@ async fn binds_srvsvc_over_encrypted_ipc_when_configured() {
         .expect("should open srvsvc named pipe");
     let mut rpc = PipeRpcClient::new(pipe);
     let bind_ack = rpc
-        .bind_context(0, SRVSVC_SYNTAX)
+        .bind_context(SRVSVC_CONTEXT_ID, SRVSVC_SYNTAX)
         .await
         .expect("srvsvc bind should succeed over encrypted IPC$");
 
     assert_eq!(bind_ack.result.result, 0);
     assert_eq!(bind_ack.result.reason, 0);
+
+    let response = rpc
+        .call(SRVSVC_CONTEXT_ID, NETR_REMOTE_TOD_OPNUM, remote_tod_stub())
+        .await
+        .expect("NetrRemoteTOD should succeed over encrypted IPC$");
+    let time_of_day = parse_remote_tod_response(&response)
+        .expect("NetrRemoteTOD response should contain TIME_OF_DAY_INFO");
+    assert!(time_of_day.hours < 24);
+    assert!(time_of_day.minutes < 60);
+    assert!(time_of_day.seconds < 60);
+    assert!((1..=31).contains(&time_of_day.day));
+    assert!((1..=12).contains(&time_of_day.month));
+    assert!(time_of_day.year >= 2020);
+    assert!(time_of_day.weekday < 7);
 
     let connection = rpc
         .into_pipe()

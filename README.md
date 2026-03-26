@@ -144,7 +144,7 @@ cargo test -p smolder-core --test samba_encryption -- --nocapture
 
 For encrypted `IPC$` / named-pipe RPC coverage, the local Samba compose stack
 also exposes a second instance on port `1446` with `server smb encrypt =
-required`. Run the core RPC bind test with:
+required`. Run the core `srvsvc` RPC call test with:
 
 ```bash
 SMOLDER_SAMBA_HOST=127.0.0.1 \

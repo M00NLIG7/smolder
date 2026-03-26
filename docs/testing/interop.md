@@ -78,7 +78,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Samba | negotiate, auth, file I/O, IOCTLs, lease-aware create, durable reconnect attempt | `samba_negotiate.rs` |
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
-| `smolder-core` | Samba | encrypted RPC bind over `srvsvc` | `samba_rpc_encryption.rs` |
+| `smolder-core` | Samba | encrypted `srvsvc` RPC call over `IPC$` | `samba_rpc_encryption.rs` |
 | `smolder-tools` | Windows | durable reconnect helper | `windows_reconnect.rs` |
 | `smolder-tools` | Windows | encrypted-share requirement enforcement | `windows_encryption.rs` |
 | `smolder-tools` | Windows | DFS path resolution and CLI `mv` | `windows_dfs.rs` |
@@ -220,7 +220,7 @@ cargo test -p smolder-core --test named_pipe_interop \
   exchanges_srvsvc_bind_over_samba_named_pipe_when_configured -- --nocapture
 ```
 
-Encrypted RPC bind:
+Encrypted `srvsvc` RPC call:
 
 ```bash
 SMOLDER_SAMBA_HOST=127.0.0.1 \
