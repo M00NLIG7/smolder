@@ -1,11 +1,18 @@
 [package]
-name = "smolder-core"
+name = "smolder-smb-core"
 version = "0.1.0"
 edition = "2021"
 authors = ["M00NLIG7"]
 description = "SMB/RPC protocol, transport, and session primitives for Smolder"
 repository = "https://github.com/M00NLIG7/smolder"
 license = "MIT"
+readme = "README.md"
+keywords = ["smb", "smb2", "rpc", "ntlm"]
+categories = ["network-programming"]
+
+[lib]
+name = "smolder_core"
+path = "src/lib.rs"
 
 [dependencies]
 aes = "0.8"
@@ -20,7 +27,7 @@ md-5 = "0.10"
 md4 = "0.10"
 rand = "0.8"
 sha2 = "0.10"
-smolder-proto = { path = "../smolder-proto" }
+smolder-proto = { path = "../smolder-proto", version = "0.1.0" }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = "0.1"

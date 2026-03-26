@@ -131,7 +131,7 @@ Tasks:
 
 Verification:
 
-- `cargo test -p smolder-core`
+- `cargo test -p smolder-smb-core`
 - targeted integration tests using a fake transport and canned packet transcripts
 
 Exit criteria:

@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2021"
 authors = ["M00NLIG7"]
 description = "Windows service payload for Smolder psexec mode"
+repository = "https://github.com/M00NLIG7/smolder"
 license = "MIT"
+readme = "README.md"
+keywords = ["windows", "service", "psexec", "smb"]
+categories = ["command-line-utilities", "network-programming"]
 
 [lib]
 path = "src/lib.rs"

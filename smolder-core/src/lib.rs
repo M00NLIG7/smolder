@@ -1,9 +1,11 @@
 //! Protocol and transport primitives for Smolder.
 //!
-//! `smolder-core` is the reusable library layer. It owns SMB auth/session
-//! state, request dispatch, and transport logic. High-level SMB file facades,
-//! execution flows, and other operator workflows belong in `smolder-tools`,
-//! not this crate.
+//! The published package name is `smolder-smb-core`, while the Rust library
+//! crate name remains `smolder_core`.
+//!
+//! It owns SMB auth/session state, request dispatch, and transport logic.
+//! High-level SMB file facades, execution flows, and other operator workflows
+//! belong in the `smolder` package, not this crate.
 //!
 //! Copyright (c) 2025 M00NLIG7
 

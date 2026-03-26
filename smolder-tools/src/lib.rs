@@ -1,8 +1,11 @@
 //! High-level tools and integrations built on top of Smolder primitives.
 //!
-//! `smolder-tools` owns ergonomic SMB file APIs, remote execution, and CLI
-//! integrations. It depends on `smolder-core` for SMB/RPC primitives rather
-//! than extending the core crate with tool-specific behavior.
+//! The published package name is `smolder`, while the Rust library crate name
+//! remains `smolder_tools`.
+//!
+//! It owns ergonomic SMB file APIs, remote execution, and CLI integrations. It
+//! depends on the `smolder-smb-core` package for SMB/RPC primitives rather than
+//! extending the core crate with tool-specific behavior.
 //!
 //! Copyright (c) 2025 M00NLIG7
 

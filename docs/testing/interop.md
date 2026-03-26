@@ -140,7 +140,7 @@ Baseline SMB session/file path:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
-cargo test -p smolder-core --test windows_interop -- --nocapture
+cargo test -p smolder-smb-core --test windows_interop -- --nocapture
 ```
 
 Durable reconnect:
@@ -149,7 +149,7 @@ Durable reconnect:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
-cargo test -p smolder-core --test windows_reconnect -- --nocapture
+cargo test -p smolder-smb-core --test windows_reconnect -- --nocapture
 ```
 
 Encrypted file I/O:
@@ -159,7 +159,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-core --test windows_encryption -- --nocapture
+cargo test -p smolder-smb-core --test windows_encryption -- --nocapture
 ```
 
 Named-pipe interop:
@@ -168,7 +168,7 @@ Named-pipe interop:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
-cargo test -p smolder-core --test named_pipe_interop \
+cargo test -p smolder-smb-core --test named_pipe_interop \
   exchanges_srvsvc_bind_over_windows_named_pipe_when_configured -- --nocapture
 ```
 
@@ -178,7 +178,7 @@ RPC interop:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
-cargo test -p smolder-core --test rpc_interop -- --nocapture
+cargo test -p smolder-smb-core --test rpc_interop -- --nocapture
 ```
 
 Encrypted `IPC$` / RPC interop:
@@ -187,7 +187,7 @@ Encrypted `IPC$` / RPC interop:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
-cargo test -p smolder-core --test windows_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test windows_rpc_encryption -- --nocapture
 ```
 
 ### Samba
@@ -201,7 +201,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
 ```
 
 Encrypted file I/O:
@@ -212,7 +212,7 @@ SMOLDER_SAMBA_PORT=1445 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-core --test samba_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_encryption -- --nocapture
 ```
 
 Named-pipe interop on encrypted `IPC$`:
@@ -222,7 +222,7 @@ SMOLDER_SAMBA_HOST=127.0.0.1 \
 SMOLDER_SAMBA_PORT=1446 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
-cargo test -p smolder-core --test named_pipe_interop \
+cargo test -p smolder-smb-core --test named_pipe_interop \
   exchanges_srvsvc_bind_over_samba_named_pipe_when_configured -- --nocapture
 ```
 
@@ -233,7 +233,7 @@ SMOLDER_SAMBA_HOST=127.0.0.1 \
 SMOLDER_SAMBA_PORT=1446 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
-cargo test -p smolder-core --test samba_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_rpc_encryption -- --nocapture
 ```
 
 ## Tools Commands
@@ -247,7 +247,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-tools --test windows_encryption -- --nocapture
+cargo test -p smolder --test windows_encryption -- --nocapture
 ```
 
 Reconnect helper:
@@ -256,7 +256,7 @@ Reconnect helper:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
-cargo test -p smolder-tools --test windows_reconnect -- --nocapture
+cargo test -p smolder --test windows_reconnect -- --nocapture
 ```
 
 DFS path resolution:
@@ -266,7 +266,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
 SMOLDER_WINDOWS_DFS_ROOT='\\\\127.0.0.1\\your-dfs-root' \
-cargo test -p smolder-tools --test windows_dfs -- --nocapture
+cargo test -p smolder --test windows_dfs -- --nocapture
 ```
 
 Remote execution smoke checks:
@@ -287,7 +287,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-tools --test samba_high_level -- --nocapture
+cargo test -p smolder --test samba_high_level -- --nocapture
 ```
 
 CLI smoke:
@@ -299,7 +299,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-tools --test cli_smoke -- --nocapture --test-threads=1
+cargo test -p smolder --test cli_smoke -- --nocapture --test-threads=1
 ```
 
 ## Expected Policy Boundaries

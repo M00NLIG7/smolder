@@ -2,6 +2,13 @@
 name = "smolder-proto"
 version = "0.1.0"
 edition = "2021"
+authors = ["M00NLIG7"]
+description = "Typed SMB2/3 and DCE/RPC wire codecs for Smolder"
+repository = "https://github.com/M00NLIG7/smolder"
+license = "MIT"
+readme = "README.md"
+keywords = ["smb", "smb2", "rpc", "protocol"]
+categories = ["encoding", "network-programming"]
 
 [dependencies]
 bitflags = "2"

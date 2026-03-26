@@ -56,7 +56,7 @@ export SMOLDER_SAMBA_PORT=445
 Then run:
 
 ```bash
-cargo test -p smolder-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
 ```
 
 If `SMOLDER_SAMBA_HOST` is unset, the test exits early and reports that it was skipped.
@@ -101,7 +101,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
 ```
 
 Run the high-level API gates with the same environment:
@@ -113,7 +113,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-core --test samba_high_level -- --nocapture
+cargo test -p smolder-smb-core --test samba_high_level -- --nocapture
 ```
 
 Run the CLI smoke tests:
@@ -125,7 +125,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-tools --test cli_smoke -- --nocapture --test-threads=1
+cargo test -p smolder --test cli_smoke -- --nocapture --test-threads=1
 ```
 
 You can also drive the CLI manually:
@@ -134,7 +134,7 @@ You can also drive the CLI manually:
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo run -p smolder-tools -- \
+cargo run -p smolder -- \
   cat smb://127.0.0.1:1445/share/example.txt
 ```
 

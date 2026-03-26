@@ -10,6 +10,13 @@ Smolder is organized as a small workspace:
 - `smolder-core`: reusable SMB/RPC primitives, transport logic, and auth/session state.
 - `smolder-tools`: CLI commands and higher-level integrations such as SMB file workflows and remote execution.
 
+Published package names:
+
+- `smolder-proto`: wire-format crate
+- `smolder-smb-core`: library package for the `smolder_core` crate
+- `smolder`: CLI package and library package for the `smolder_tools` crate
+- `smolder-psexecsvc`: Windows service payload package
+
 Boundary rule:
 
 - `smolder-core` stays library-only and protocol-focused.
@@ -110,7 +117,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-tools --test windows_encryption -- --nocapture
+cargo test -p smolder --test windows_encryption -- --nocapture
 ```
 
 For encrypted `IPC$` / named-pipe / RPC coverage on Tiny11, enable SMB server
@@ -127,7 +134,7 @@ Then run the core encrypted `IPC$` test:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
-cargo test -p smolder-core --test windows_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test windows_rpc_encryption -- --nocapture
 ```
 
 The local Samba fixture now includes an encrypted share named `SMOLDERENC` on
@@ -139,7 +146,7 @@ SMOLDER_SAMBA_PORT=1445 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-core --test samba_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_encryption -- --nocapture
 ```
 
 For encrypted `IPC$` / named-pipe RPC coverage, the local Samba compose stack
@@ -151,7 +158,7 @@ SMOLDER_SAMBA_HOST=127.0.0.1 \
 SMOLDER_SAMBA_PORT=1446 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
-cargo test -p smolder-core --test samba_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_rpc_encryption -- --nocapture
 ```
 
 ## Live Interop Matrix

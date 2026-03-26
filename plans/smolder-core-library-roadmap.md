@@ -82,9 +82,9 @@ Tasks:
 
 Verification:
 
-- `cargo build -p smolder-core -p smolder-tools`
-- `cargo test -p smolder-core`
-- `cargo test -p smolder-tools`
+- `cargo build -p smolder-smb-core -p smolder`
+- `cargo test -p smolder-smb-core`
+- `cargo test -p smolder`
 
 Exit criteria:
 
@@ -115,9 +115,9 @@ Tasks:
 
 Verification:
 
-- `cargo build -p smolder-core -p smolder-tools`
-- `cargo test -p smolder-core`
-- `cargo test -p smolder-tools`
+- `cargo build -p smolder-smb-core -p smolder`
+- `cargo test -p smolder-smb-core`
+- `cargo test -p smolder`
 - `target/debug/smolder psexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture`
 
 Exit criteria:
@@ -149,10 +149,10 @@ Tasks:
 
 Verification:
 
-- `cargo build -p smolder-proto -p smolder-core -p smolder-tools`
+- `cargo build -p smolder-proto -p smolder-smb-core -p smolder`
 - `cargo test -p smolder-proto`
-- `cargo test -p smolder-core`
-- `cargo test -p smolder-tools`
+- `cargo test -p smolder-smb-core`
+- `cargo test -p smolder`
 - `target/debug/smolder psexec smb://127.0.0.1 --command hostname --username windowsfixture --password windowsfixture`
 
 Exit criteria:
@@ -216,8 +216,8 @@ Tasks:
 
 Verification:
 
-- `cargo build -p smolder-core`
-- `cargo test -p smolder-core`
+- `cargo build -p smolder-smb-core`
+- `cargo test -p smolder-smb-core`
 
 Exit criteria:
 
@@ -246,9 +246,9 @@ Tasks:
 
 Verification:
 
-- `cargo build -p smolder-core -p smolder-tools`
-- `cargo test -p smolder-core`
-- `cargo test -p smolder-tools`
+- `cargo build -p smolder-smb-core -p smolder`
+- `cargo test -p smolder-smb-core`
+- `cargo test -p smolder`
 
 Exit criteria:
 
@@ -277,9 +277,9 @@ Tasks:
 
 Verification:
 
-- `cargo build -p smolder-proto -p smolder-core`
+- `cargo build -p smolder-proto -p smolder-smb-core`
 - `cargo test -p smolder-proto`
-- `cargo test -p smolder-core`
+- `cargo test -p smolder-smb-core`
 
 Exit criteria:
 
@@ -307,9 +307,9 @@ Tasks:
 
 Verification:
 
-- `cargo build -p smolder-core -p smolder-tools`
-- `cargo test -p smolder-core`
-- `cargo test -p smolder-tools`
+- `cargo build -p smolder-smb-core -p smolder`
+- `cargo test -p smolder-smb-core`
+- `cargo test -p smolder`
 
 Exit criteria:
 
@@ -342,8 +342,8 @@ Verification:
 
 - `cargo build`
 - `cargo test -p smolder-proto`
-- `cargo test -p smolder-core`
-- `cargo test -p smolder-tools`
+- `cargo test -p smolder-smb-core`
+- `cargo test -p smolder`
 - `target/debug/smolder smbexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture`
 - `target/debug/smolder psexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture`
 

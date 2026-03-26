@@ -1,11 +1,18 @@
 [package]
-name = "smolder-tools"
+name = "smolder"
 version = "0.1.0"
 edition = "2021"
 authors = ["M00NLIG7"]
 description = "CLI tools and high-level operator workflows for Smolder"
 repository = "https://github.com/M00NLIG7/smolder"
 license = "MIT"
+readme = "README.md"
+keywords = ["smb", "smb2", "rpc", "cli"]
+categories = ["command-line-utilities", "network-programming"]
+
+[lib]
+name = "smolder_tools"
+path = "src/lib.rs"
 
 [[bin]]
 name = "smolder"
@@ -14,8 +21,8 @@ path = "src/main.rs"
 [dependencies]
 bytes = "1"
 rand = "0.8"
-smolder-core = { path = "../smolder-core" }
-smolder-proto = { path = "../smolder-proto" }
+smolder-core = { package = "smolder-smb-core", path = "../smolder-core", version = "0.1.0" }
+smolder-proto = { path = "../smolder-proto", version = "0.1.0" }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt", "sync", "time"] }
 
 [dev-dependencies]

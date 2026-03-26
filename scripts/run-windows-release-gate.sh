@@ -12,8 +12,8 @@ usage() {
 Usage: scripts/run-windows-release-gate.sh [options]
 
 Runs the full Tiny11 / Windows release-style verification pass:
-  - smolder-core Windows interop gates
-  - smolder-tools Windows interop gates
+  - smolder-smb-core package Windows interop gates
+  - smolder package Windows interop gates
   - smbexec/psexec smoke commands by default
 
 Options:
