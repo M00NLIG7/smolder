@@ -38,14 +38,13 @@ impl SambaConfig {
     }
 }
 
-async fn connected_share() -> Option<(SambaConfig, Share)> {
-    let Some(config) = SambaConfig::from_env() else {
-        eprintln!(
-            "skipping high-level Samba test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, SMOLDER_SAMBA_PASSWORD, and SMOLDER_SAMBA_SHARE must be set"
-        );
-        return None;
-    };
+fn encrypted_share_config() -> Option<SambaConfig> {
+    let mut config = SambaConfig::from_env()?;
+    config.share = required_env("SMOLDER_SAMBA_ENCRYPTED_SHARE")?;
+    Some(config)
+}
 
+async fn connect_share(config: &SambaConfig, require_encryption: bool) -> Share {
     let mut credentials = NtlmCredentials::new(config.username.clone(), config.password.clone());
     if let Some(domain) = &config.domain {
         credentials = credentials.with_domain(domain.clone());
@@ -54,18 +53,32 @@ async fn connected_share() -> Option<(SambaConfig, Share)> {
         credentials = credentials.with_workstation(workstation.clone());
     }
 
-    let client = SmbClient::builder()
+    let mut builder = SmbClient::builder()
         .server(config.host.clone())
         .port(config.port)
-        .credentials(credentials)
+        .credentials(credentials);
+    if require_encryption {
+        builder = builder.require_encryption(true);
+    }
+
+    let client = builder
         .connect()
         .await
         .expect("should connect high-level SMB client");
-    let share = client
+    client
         .share(config.share.clone())
         .await
-        .expect("should connect high-level share");
+        .expect("should connect high-level share")
+}
 
+async fn connected_share() -> Option<(SambaConfig, Share)> {
+    let Some(config) = SambaConfig::from_env() else {
+        eprintln!(
+            "skipping high-level Samba test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, SMOLDER_SAMBA_PASSWORD, and SMOLDER_SAMBA_SHARE must be set"
+        );
+        return None;
+    };
+    let share = connect_share(&config, false).await;
     Some((config, share))
 }
 
@@ -200,8 +213,12 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .list("")
         .await
         .expect("listing should succeed after rename");
-    assert!(!renamed_listing.iter().any(|entry| entry.name == original_path));
-    assert!(renamed_listing.iter().any(|entry| entry.name == renamed_path));
+    assert!(!renamed_listing
+        .iter()
+        .any(|entry| entry.name == original_path));
+    assert!(renamed_listing
+        .iter()
+        .any(|entry| entry.name == renamed_path));
 
     share
         .remove(&renamed_path)
@@ -277,7 +294,9 @@ async fn opens_file_with_lease_when_configured() {
     assert_eq!(granted.key, lease_key);
     assert!(granted.state.contains(LeaseState::READ_CACHING));
 
-    file.write_all(b"lease test").await.expect("write should succeed");
+    file.write_all(b"lease test")
+        .await
+        .expect("write should succeed");
     file.flush().await.expect("flush should succeed");
     file.close().await.expect("close should succeed");
 
@@ -285,4 +304,34 @@ async fn opens_file_with_lease_when_configured() {
         .remove(&remote_path)
         .await
         .expect("remove should succeed");
+}
+
+#[tokio::test]
+async fn writes_and_reads_with_required_encryption_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some(config) = encrypted_share_config() else {
+        eprintln!(
+            "skipping encrypted Samba test: SMOLDER_SAMBA_ENCRYPTED_SHARE must be set to a share that requires SMB encryption"
+        );
+        return;
+    };
+
+    let mut share = connect_share(&config, true).await;
+    let remote_path = unique_name("smolder-high-level-encrypted");
+    let payload = b"smolder high level encrypted io";
+
+    share
+        .write(&remote_path, payload)
+        .await
+        .expect("encrypted high-level write should succeed");
+    let round_trip = share
+        .read(&remote_path)
+        .await
+        .expect("encrypted high-level read should succeed");
+    share
+        .remove(&remote_path)
+        .await
+        .expect("encrypted high-level remove should succeed");
+
+    assert_eq!(round_trip, payload);
 }

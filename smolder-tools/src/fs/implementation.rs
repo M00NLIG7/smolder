@@ -14,8 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, R
 
 use smolder_core::auth::{NtlmAuthenticator, NtlmCredentials};
 use smolder_core::client::{
-    Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle,
-    TreeConnected,
+    Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle, TreeConnected,
 };
 use smolder_core::dfs::{referrals_from_response, resolve_unc_path, DfsReferral, UncPath};
 use smolder_core::error::CoreError;
@@ -168,6 +167,7 @@ pub struct SmbClientBuilder {
     server: Option<String>,
     port: u16,
     credentials: Option<NtlmCredentials>,
+    require_encryption: bool,
     signing_mode: SigningMode,
     capabilities: GlobalCapabilities,
     dialects: Vec<Dialect>,
@@ -181,6 +181,7 @@ impl Default for SmbClientBuilder {
             server: None,
             port: DEFAULT_PORT,
             credentials: None,
+            require_encryption: false,
             signing_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU
                 | GlobalCapabilities::LEASING
@@ -217,6 +218,14 @@ impl SmbClientBuilder {
     #[must_use]
     pub fn credentials(mut self, credentials: NtlmCredentials) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Fails closed unless the authenticated SMB session/tree actually uses
+    /// SMB 3.x encryption for subsequent requests.
+    #[must_use]
+    pub fn require_encryption(mut self, require_encryption: bool) -> Self {
+        self.require_encryption = require_encryption;
         self
     }
 
@@ -279,6 +288,7 @@ impl SmbClientBuilder {
         Ok(SmbClient {
             server,
             connection,
+            require_encryption: self.require_encryption,
             transfer_chunk_size: self.transfer_chunk_size,
         })
     }
@@ -303,6 +313,7 @@ impl SmbClientBuilder {
 pub struct SmbClient<T = TokioTcpTransport> {
     server: String,
     connection: Connection<T, Authenticated>,
+    require_encryption: bool,
     transfer_chunk_size: u32,
 }
 
@@ -324,6 +335,7 @@ impl<T> SmbClient<T> {
         Self {
             server: server.into(),
             connection,
+            require_encryption: false,
             transfer_chunk_size: DEFAULT_TRANSFER_CHUNK_SIZE,
         }
     }
@@ -355,11 +367,17 @@ where
             .connection
             .tree_connect(&TreeConnectRequest::from_unc(&unc))
             .await?;
+        if self.require_encryption && !connection.state().encryption_required {
+            return Err(CoreError::Unsupported(
+                "SMB encryption was required but the connected share did not require encryption",
+            ));
+        }
 
         Ok(Share {
             server: self.server,
             name: share,
             connection: Some(connection),
+            require_encryption: self.require_encryption,
             transfer_chunk_size: self.transfer_chunk_size,
         })
     }
@@ -487,11 +505,9 @@ where
                 DEFAULT_DFS_REFERRAL_MAX_RESPONSE,
             ))
             .await?;
-        let referrals = referrals_from_response(
-            &response.dfs_referral_response()?.ok_or(CoreError::InvalidResponse(
-                "DFS referral IOCTL did not return a DFS referral response",
-            ))?,
-        )?;
+        let referrals = referrals_from_response(&response.dfs_referral_response()?.ok_or(
+            CoreError::InvalidResponse("DFS referral IOCTL did not return a DFS referral response"),
+        )?)?;
         let client = ipc.disconnect().await?;
         Ok((client, referrals))
     }
@@ -503,6 +519,7 @@ pub struct Share<T = TokioTcpTransport> {
     server: String,
     name: String,
     connection: Option<Connection<T, TreeConnected>>,
+    require_encryption: bool,
     transfer_chunk_size: u32,
 }
 
@@ -518,6 +535,7 @@ impl<T> Share<T> {
             server: server.into(),
             name: name.into(),
             connection: Some(connection),
+            require_encryption: false,
             transfer_chunk_size: DEFAULT_TRANSFER_CHUNK_SIZE,
         }
     }
@@ -577,6 +595,7 @@ where
         let Share {
             server,
             connection,
+            require_encryption,
             transfer_chunk_size,
             ..
         } = self;
@@ -588,6 +607,7 @@ where
         Ok(SmbClient {
             server,
             connection,
+            require_encryption,
             transfer_chunk_size,
         })
     }
@@ -628,7 +648,9 @@ where
             None
         };
         let durable = match (durable, resilient) {
-            (Some(handle), Some(resilient)) => Some(handle.with_resilient_timeout(resilient.timeout)),
+            (Some(handle), Some(resilient)) => {
+                Some(handle.with_resilient_timeout(resilient.timeout))
+            }
             (handle, _) => handle,
         };
         let lease = response
@@ -1386,7 +1408,9 @@ where
         if self.closed {
             return Err(CoreError::InvalidInput("remote file already closed"));
         }
-        if self.pending_read.is_some() || self.pending_write.is_some() || self.pending_flush.is_some()
+        if self.pending_read.is_some()
+            || self.pending_write.is_some()
+            || self.pending_flush.is_some()
         {
             return Err(CoreError::InvalidInput(
                 "cannot close remote file while an async I/O operation is pending",
@@ -2002,9 +2026,9 @@ fn should_fallback_direct_share_after_dfs_query(error: &CoreError) -> bool {
         {
             true
         }
-        CoreError::InvalidResponse(
-            "DFS referral IOCTL did not return a DFS referral response",
-        ) => true,
+        CoreError::InvalidResponse("DFS referral IOCTL did not return a DFS referral response") => {
+            true
+        }
         _ => false,
     }
 }
@@ -2058,7 +2082,9 @@ mod tests {
     #[test]
     fn smb_client_builder_defaults_enable_encryption() {
         let builder = super::SmbClientBuilder::new();
-        assert!(builder.capabilities.contains(GlobalCapabilities::ENCRYPTION));
+        assert!(builder
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION));
 
         let contexts = super::default_negotiate_contexts(&builder.dialects, builder.capabilities);
         assert_eq!(contexts.len(), 2);
@@ -2092,6 +2118,12 @@ mod tests {
             .as_encryption_capabilities()
             .expect("encryption context decode should succeed")
             .is_none());
+    }
+
+    #[test]
+    fn smb_client_builder_can_require_encryption() {
+        let builder = super::SmbClientBuilder::new().require_encryption(true);
+        assert!(builder.require_encryption);
     }
 
     #[async_trait]
@@ -3679,6 +3711,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn share_rejects_tree_connects_that_do_not_require_encryption() {
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+
+        let mut client = build_client_with_tree_response("server", tree_response, Vec::new()).await;
+        client.require_encryption = true;
+
+        let error = client
+            .share("share")
+            .await
+            .expect_err("unencrypted share should be rejected");
+        assert!(matches!(
+            error,
+            CoreError::Unsupported(
+                "SMB encryption was required but the connected share did not require encryption"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn share_accepts_tree_connects_that_require_encryption() {
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::ENCRYPT_DATA,
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+
+        let mut client = build_client_with_tree_response("server", tree_response, Vec::new()).await;
+        client.require_encryption = true;
+
+        let share = client
+            .share("share")
+            .await
+            .expect("encrypted share should be accepted");
+        assert_eq!(share.server(), "server");
+        assert_eq!(share.name(), "share");
+    }
+
+    #[tokio::test]
     async fn share_path_with_referrals_connects_to_resolved_backend_share() {
         let tree_response = TreeConnectResponse {
             share_type: ShareType::Disk,
@@ -3813,8 +3889,7 @@ mod tests {
             Header::decode(&disconnect.payload[..Header::LEN]).expect("header should decode");
         assert_eq!(disconnect_header.command, Command::TreeDisconnect);
 
-        let share_tree_connect =
-            SessionMessage::decode(&writes[5]).expect("frame should decode");
+        let share_tree_connect = SessionMessage::decode(&writes[5]).expect("frame should decode");
         let share_request = TreeConnectRequest::decode(&share_tree_connect.payload[Header::LEN..])
             .expect("request should decode");
         assert_eq!(
@@ -3974,34 +4049,28 @@ mod tests {
         let attempts = Arc::new(Mutex::new(Vec::new()));
         let attempts_ref = Arc::clone(&attempts);
         let clients = Arc::new(Mutex::new(BTreeMap::from([
-            (
-                "namespace".to_string(),
-                VecDeque::from([namespace_client]),
-            ),
-            (
-                "backend".to_string(),
-                VecDeque::from([backend_client]),
-            ),
+            ("namespace".to_string(), VecDeque::from([namespace_client])),
+            ("backend".to_string(), VecDeque::from([backend_client])),
         ])));
         let clients_ref = Arc::clone(&clients);
 
-        let (share, relative_path) = super::connect_share_path_with_resolver::<
-            ScriptedTransport,
-            _,
-            _,
-        >(r"\\namespace\dfs\team\report.txt", move |server: String| {
-                attempts_ref
-                    .lock()
-                    .expect("attempt log should remain accessible")
-                    .push(server.clone());
-                let client = clients_ref
-                    .lock()
-                    .expect("client registry should remain accessible")
-                    .get_mut(&server)
-                    .and_then(VecDeque::pop_front)
-                    .ok_or(CoreError::InvalidInput("missing scripted DFS client"));
-                std::future::ready(client)
-            })
+        let (share, relative_path) =
+            super::connect_share_path_with_resolver::<ScriptedTransport, _, _>(
+                r"\\namespace\dfs\team\report.txt",
+                move |server: String| {
+                    attempts_ref
+                        .lock()
+                        .expect("attempt log should remain accessible")
+                        .push(server.clone());
+                    let client = clients_ref
+                        .lock()
+                        .expect("client registry should remain accessible")
+                        .get_mut(&server)
+                        .and_then(VecDeque::pop_front)
+                        .ok_or(CoreError::InvalidInput("missing scripted DFS client"));
+                    std::future::ready(client)
+                },
+            )
             .await
             .expect("cross-server DFS target should reconnect with a fresh client");
 
@@ -4094,15 +4163,17 @@ mod tests {
         let dfs_request =
             DfsReferralRequest::decode(&ioctl.input).expect("DFS request should decode");
         assert_eq!(dfs_request.max_referral_level, 4);
-        assert_eq!(dfs_request.request_file_name, r"\\server\dfs\team\report.txt");
+        assert_eq!(
+            dfs_request.request_file_name,
+            r"\\server\dfs\team\report.txt"
+        );
 
         let disconnect = SessionMessage::decode(&writes[4]).expect("frame should decode");
         let disconnect_header =
             Header::decode(&disconnect.payload[..Header::LEN]).expect("header should decode");
         assert_eq!(disconnect_header.command, Command::TreeDisconnect);
 
-        let share_tree_connect =
-            SessionMessage::decode(&writes[5]).expect("frame should decode");
+        let share_tree_connect = SessionMessage::decode(&writes[5]).expect("frame should decode");
         let share_request = TreeConnectRequest::decode(&share_tree_connect.payload[Header::LEN..])
             .expect("request should decode");
         assert_eq!(
