@@ -1,6 +1,4 @@
-/target
-**/*.rs.bk
+.cross-target-static/
+.tmp/
+target/
 Cargo.lock
-.idea/
-.vscode/
-*.swp
