@@ -138,6 +138,9 @@ Use [scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop
 entrypoint that fans out to the enabled Windows and Samba gates from the current
 environment. The Samba-backed subset is also wired into GitHub Actions via
 [interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml).
+For the full manual Tiny11 pass, including remote execution smoke checks, use
+[run-windows-release-gate.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-release-gate.sh)
+and [docs/testing/windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
 
 ## Security Notice
 

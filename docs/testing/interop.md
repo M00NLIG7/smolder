@@ -7,6 +7,8 @@ Use it as the repeatable verification gate for protocol changes, transport
 changes, auth changes, pipe/RPC work, and tools-layer workflow changes.
 
 Detailed Samba fixture notes still live in [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md).
+The Tiny11 / Windows release-style gate is documented in
+[windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
 
 For a single entrypoint instead of running each command manually, use
 [scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop.sh).
@@ -93,6 +95,13 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
 scripts/run-interop.sh --windows --core
+```
+
+Run the full Windows release-style gate, including remote execution smoke
+checks:
+
+```bash
+scripts/run-windows-release-gate.sh
 ```
 
 Run only the Samba matrix:
