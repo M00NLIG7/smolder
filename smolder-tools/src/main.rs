@@ -200,9 +200,10 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
             destination,
         } => {
             ensure_same_share(&source, &destination)?;
-            let mut share = connect_share(&auth, &source).await?;
+            let (mut share, source_path, destination_path) =
+                connect_share_move_paths(&auth, &source, &destination).await?;
             share
-                .rename(&source.path, &destination.path)
+                .rename(&source_path, &destination_path)
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -211,7 +212,10 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
     Ok(0)
 }
 
-async fn connect_share(options: &AuthOptions, remote: &RemoteLocation) -> Result<Share, String> {
+async fn connect_client(
+    options: &AuthOptions,
+    remote: &RemoteLocation,
+) -> Result<SmbClient, String> {
     let mut credentials = NtlmCredentials::new(&options.username, &options.password);
     if let Some(domain) = &options.domain {
         credentials = credentials.with_domain(domain.as_str());
@@ -220,15 +224,11 @@ async fn connect_share(options: &AuthOptions, remote: &RemoteLocation) -> Result
         credentials = credentials.with_workstation(workstation.as_str());
     }
 
-    let client = SmbClient::builder()
+    SmbClient::builder()
         .server(remote.host.as_str())
         .port(remote.port)
         .credentials(credentials)
         .connect()
-        .await
-        .map_err(|error| error.to_string())?;
-    client
-        .share(remote.share.as_str())
         .await
         .map_err(|error| error.to_string())
 }
@@ -237,25 +237,44 @@ async fn connect_share_path(
     options: &AuthOptions,
     remote: &RemoteLocation,
 ) -> Result<(Share, String), String> {
-    let mut credentials = NtlmCredentials::new(&options.username, &options.password);
-    if let Some(domain) = &options.domain {
-        credentials = credentials.with_domain(domain.as_str());
-    }
-    if let Some(workstation) = &options.workstation {
-        credentials = credentials.with_workstation(workstation.as_str());
-    }
-
-    let client = SmbClient::builder()
-        .server(remote.host.as_str())
-        .port(remote.port)
-        .credentials(credentials)
-        .connect()
-        .await
-        .map_err(|error| error.to_string())?;
+    let client = connect_client(options, remote).await?;
     client
         .share_path_auto(remote_unc(remote))
         .await
         .map_err(|error| error.to_string())
+}
+
+async fn connect_share_move_paths(
+    options: &AuthOptions,
+    source: &RemoteLocation,
+    destination: &RemoteLocation,
+) -> Result<(Share, String, String), String> {
+    let client = connect_client(options, source).await?;
+    let (source_share, source_path) = client
+        .share_path_auto(remote_unc(source))
+        .await
+        .map_err(|error| error.to_string())?;
+    let source_server = source_share.server().to_string();
+    let source_share_name = source_share.name().to_string();
+    let client = source_share
+        .disconnect()
+        .await
+        .map_err(|error| error.to_string())?;
+    let (share, destination_path) = client
+        .share_path_auto(remote_unc(destination))
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !share.server().eq_ignore_ascii_case(&source_server)
+        || !share.name().eq_ignore_ascii_case(&source_share_name)
+    {
+        return Err(
+            "mv requires both SMB URLs to resolve to the same backend server and share"
+                .to_string(),
+        );
+    }
+
+    Ok((share, source_path, destination_path))
 }
 
 async fn connect_remote_exec(
