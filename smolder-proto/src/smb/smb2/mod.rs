@@ -42,8 +42,9 @@ pub use ioctl::{
 };
 pub use lock::{LockElement, LockFlags, LockRequest, LockResponse};
 pub use negotiate::{
-    Dialect, GlobalCapabilities, NegotiateContext, NegotiateContextType, NegotiateRequest,
-    NegotiateResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId, SigningMode,
+    CipherId, Dialect, EncryptionCapabilities, GlobalCapabilities, NegotiateContext,
+    NegotiateContextType, NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities,
+    PreauthIntegrityHashId, SigningMode,
 };
 pub use notify::{ChangeNotifyFlags, ChangeNotifyRequest, ChangeNotifyResponse, CompletionFilter};
 pub use session::{

@@ -148,6 +148,78 @@ impl TryFrom<u16> for PreauthIntegrityHashId {
     }
 }
 
+/// SMB 3.x encryption ciphers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum CipherId {
+    /// `SMB2_ENCRYPTION_AES128_CCM`
+    Aes128Ccm = 0x0001,
+    /// `SMB2_ENCRYPTION_AES128_GCM`
+    Aes128Gcm = 0x0002,
+    /// `SMB2_ENCRYPTION_AES256_CCM`
+    Aes256Ccm = 0x0003,
+    /// `SMB2_ENCRYPTION_AES256_GCM`
+    Aes256Gcm = 0x0004,
+}
+
+impl TryFrom<u16> for CipherId {
+    type Error = ProtocolError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0x0001 => Ok(Self::Aes128Ccm),
+            0x0002 => Ok(Self::Aes128Gcm),
+            0x0003 => Ok(Self::Aes256Ccm),
+            0x0004 => Ok(Self::Aes256Gcm),
+            _ => Err(ProtocolError::InvalidField {
+                field: "cipher_id",
+                reason: "unknown encryption cipher",
+            }),
+        }
+    }
+}
+
+/// `SMB2_ENCRYPTION_CAPABILITIES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionCapabilities {
+    /// Supported encryption ciphers.
+    pub ciphers: Vec<CipherId>,
+}
+
+impl EncryptionCapabilities {
+    /// Serializes the context payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(4 + self.ciphers.len() * 2);
+        out.put_u16_le(self.ciphers.len() as u16);
+        out.put_u16_le(0);
+        for cipher in &self.ciphers {
+            out.put_u16_le(*cipher as u16);
+        }
+        out.to_vec()
+    }
+
+    /// Parses the context payload.
+    pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = data;
+        let cipher_count = usize::from(get_u16(&mut input, "cipher_count")?);
+        let _reserved = get_u16(&mut input, "reserved")?;
+        if cipher_count == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "cipher_count",
+                reason: "at least one encryption cipher is required",
+            });
+        }
+
+        let mut ciphers = Vec::with_capacity(cipher_count);
+        for _ in 0..cipher_count {
+            ciphers.push(CipherId::try_from(get_u16(&mut input, "cipher_id")?)?);
+        }
+
+        Ok(Self { ciphers })
+    }
+}
+
 /// `SMB2_PREAUTH_INTEGRITY_CAPABILITIES`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreauthIntegrityCapabilities {
@@ -226,6 +298,25 @@ impl NegotiateContext {
             return Ok(None);
         }
         PreauthIntegrityCapabilities::decode(&self.data).map(Some)
+    }
+
+    /// Builds an encryption-capabilities negotiate context.
+    #[must_use]
+    pub fn encryption_capabilities(capabilities: EncryptionCapabilities) -> Self {
+        Self {
+            context_type: NegotiateContextType::EncryptionCapabilities as u16,
+            data: capabilities.encode(),
+        }
+    }
+
+    /// Decodes an encryption-capabilities negotiate context.
+    pub fn as_encryption_capabilities(
+        &self,
+    ) -> Result<Option<EncryptionCapabilities>, ProtocolError> {
+        if self.context_type() != Some(NegotiateContextType::EncryptionCapabilities) {
+            return Ok(None);
+        }
+        EncryptionCapabilities::decode(&self.data).map(Some)
     }
 
     fn encode_into(&self, out: &mut Vec<u8>) {
@@ -523,8 +614,9 @@ fn decode_contexts(
 #[cfg(test)]
 mod tests {
     use super::{
-        Dialect, GlobalCapabilities, NegotiateContext, NegotiateRequest, NegotiateResponse,
-        PreauthIntegrityCapabilities, PreauthIntegrityHashId, SigningMode,
+        CipherId, Dialect, EncryptionCapabilities, GlobalCapabilities, NegotiateContext,
+        NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities,
+        PreauthIntegrityHashId, SigningMode,
     };
 
     #[test]
@@ -539,6 +631,20 @@ mod tests {
             .as_preauth_integrity()
             .expect("context should decode")
             .expect("context should be preauth");
+        assert_eq!(decoded, capabilities);
+    }
+
+    #[test]
+    fn encryption_capabilities_context_roundtrips() {
+        let capabilities = EncryptionCapabilities {
+            ciphers: vec![CipherId::Aes128Ccm, CipherId::Aes128Gcm],
+        };
+        let context = NegotiateContext::encryption_capabilities(capabilities.clone());
+
+        let decoded = context
+            .as_encryption_capabilities()
+            .expect("context should decode")
+            .expect("context should be encryption");
         assert_eq!(decoded, capabilities);
     }
 
