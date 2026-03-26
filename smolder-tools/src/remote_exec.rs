@@ -12,15 +12,15 @@ use smolder_proto::rpc::{
 };
 use smolder_proto::smb::smb2::{
     CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, DispositionInformation,
-    FileAttributes, FileId, FileInfoClass, FlushRequest, GlobalCapabilities, NegotiateContext,
-    NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest,
-    SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
+    FileAttributes, FileId, FileInfoClass, FlushRequest, GlobalCapabilities, ReadRequest,
+    SetInfoRequest, ShareAccess, SigningMode, WriteRequest,
 };
 use smolder_proto::smb::status::NtStatus;
 
-use smolder_core::auth::{NtlmAuthenticator, NtlmCredentials};
+use smolder_core::auth::NtlmCredentials;
 use smolder_core::client::{Connection, TreeConnected};
 use smolder_core::error::CoreError;
+use smolder_core::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
 use smolder_core::transport::TokioTcpTransport;
 
 const DEFAULT_PORT: u16 = 445;
@@ -152,7 +152,7 @@ impl InteractiveSession {
 
 /// Writable stdin handle for an interactive remote process.
 pub struct InteractiveStdin {
-    pipe: Option<NamedPipeClient>,
+    pipe: Option<NamedPipe>,
 }
 
 impl InteractiveStdin {
@@ -173,19 +173,19 @@ impl InteractiveStdin {
 
 /// Readable stdout/stderr handle for an interactive remote process.
 pub struct InteractiveReader {
-    pipe: NamedPipeClient,
+    pipe: NamedPipe,
 }
 
 impl InteractiveReader {
     /// Reads the next chunk from the remote stream. `None` indicates EOF.
     pub async fn read_chunk(&mut self) -> Result<Option<Vec<u8>>, CoreError> {
-        self.pipe.read_stream_chunk().await
+        self.pipe.read_chunk().await
     }
 }
 
 /// Completion handle for an interactive remote process.
 pub struct InteractiveWaiter {
-    control: NamedPipeClient,
+    control: NamedPipe,
     cleanup: Option<InteractiveCleanup>,
     timeout: Duration,
     start: Instant,
@@ -198,7 +198,7 @@ impl InteractiveWaiter {
         let exit_code = loop {
             let line = timeout(
                 self.remaining_time(),
-                self.control.read_control_line(&mut self.buffer),
+                self.control.read_line(&mut self.buffer),
             )
             .await
             .map_err(|_| {
@@ -365,15 +365,12 @@ impl RemoteExecBuilder {
         let staging_directory = normalize_share_path(&self.staging_directory)?;
 
         Ok(RemoteExecClient {
-            config: SessionConfig {
-                server,
-                port: self.port,
-                credentials,
-                signing_mode: self.signing_mode,
-                capabilities: self.capabilities,
-                dialects: self.dialects,
-                client_guid: self.client_guid,
-            },
+            config: SmbSessionConfig::new(server, credentials)
+                .with_port(self.port)
+                .with_signing_mode(self.signing_mode)
+                .with_capabilities(self.capabilities)
+                .with_dialects(self.dialects)
+                .with_client_guid(self.client_guid),
             admin_share,
             ipc_share,
             staging_directory,
@@ -389,7 +386,7 @@ impl RemoteExecBuilder {
 /// Reusable remote-exec client that creates fresh SMB sessions per command.
 #[derive(Debug, Clone)]
 pub struct RemoteExecClient {
-    config: SessionConfig,
+    config: SmbSessionConfig,
     admin_share: String,
     ipc_share: String,
     staging_directory: String,
@@ -472,28 +469,28 @@ impl RemoteExecClient {
         let stderr_pipe_name = command_paths.stderr_pipe_name();
         let control_pipe_name = command_paths.control_pipe_name();
         let pipes = tokio::try_join!(
-            NamedPipeClient::connect_with_retry(
+            connect_pipe_with_retry(
                 &self.config,
                 &self.ipc_share,
                 &stdin_pipe_name,
                 PipeAccess::WriteOnly,
                 timeout_budget,
             ),
-            NamedPipeClient::connect_with_retry(
+            connect_pipe_with_retry(
                 &self.config,
                 &self.ipc_share,
                 &stdout_pipe_name,
                 PipeAccess::ReadOnly,
                 timeout_budget,
             ),
-            NamedPipeClient::connect_with_retry(
+            connect_pipe_with_retry(
                 &self.config,
                 &self.ipc_share,
                 &stderr_pipe_name,
                 PipeAccess::ReadOnly,
                 timeout_budget,
             ),
-            NamedPipeClient::connect_with_retry(
+            connect_pipe_with_retry(
                 &self.config,
                 &self.ipc_share,
                 &control_pipe_name,
@@ -518,12 +515,9 @@ impl RemoteExecClient {
         };
 
         let mut control_buffer = Vec::new();
-        let ready_line = timeout(
-            timeout_budget,
-            control_pipe.read_control_line(&mut control_buffer),
-        )
-        .await
-        .map_err(|_| CoreError::Timeout("waiting for interactive psexec service readiness"))??;
+        let ready_line = timeout(timeout_budget, control_pipe.read_line(&mut control_buffer))
+            .await
+            .map_err(|_| CoreError::Timeout("waiting for interactive psexec service readiness"))??;
         match ready_line.as_deref() {
             Some("READY") => {}
             Some(_) => {
@@ -706,17 +700,6 @@ impl RemoteExecClient {
     }
 }
 
-#[derive(Debug, Clone)]
-struct SessionConfig {
-    server: String,
-    port: u16,
-    credentials: NtlmCredentials,
-    signing_mode: SigningMode,
-    capabilities: GlobalCapabilities,
-    dialects: Vec<Dialect>,
-    client_guid: [u8; 16],
-}
-
 struct InteractiveCleanup {
     admin: AdminShare,
     scm: ScmClient,
@@ -813,20 +796,13 @@ impl CommandPaths {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScHandle([u8; 20]);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PipeAccess {
-    ReadOnly,
-    WriteOnly,
-    ReadWrite,
-}
-
 struct ScmClient {
     rpc: RpcPipeClient,
 }
 
 impl ScmClient {
-    async fn connect(config: &SessionConfig, ipc_share: &str) -> Result<Self, CoreError> {
-        let pipe = NamedPipeClient::connect(config, ipc_share, "svcctl").await?;
+    async fn connect(config: &SmbSessionConfig, ipc_share: &str) -> Result<Self, CoreError> {
+        let pipe = NamedPipe::connect(config, ipc_share, "svcctl", PipeAccess::ReadWrite).await?;
         let mut rpc = RpcPipeClient::new(pipe);
         rpc.bind(SVCCTL_SYNTAX).await?;
         Ok(Self { rpc })
@@ -939,20 +915,20 @@ impl ScmClient {
 }
 
 struct RpcPipeClient {
-    pipe: NamedPipeClient,
+    pipe: NamedPipe,
     call_id: u32,
 }
 
 impl RpcPipeClient {
-    fn new(pipe: NamedPipeClient) -> Self {
+    fn new(pipe: NamedPipe) -> Self {
         Self { pipe, call_id: 1 }
     }
 
     async fn bind(&mut self, abstract_syntax: SyntaxId) -> Result<(), CoreError> {
         let bind = Packet::Bind(BindPdu {
             call_id: self.next_call_id(),
-            max_xmit_frag: self.pipe.fragment_size as u16,
-            max_recv_frag: self.pipe.fragment_size as u16,
+            max_xmit_frag: self.pipe.fragment_size() as u16,
+            max_recv_frag: self.pipe.fragment_size() as u16,
             assoc_group_id: 0,
             context_id: SVCCTL_CONTEXT_ID,
             abstract_syntax,
@@ -1007,181 +983,21 @@ impl RpcPipeClient {
     }
 }
 
-struct NamedPipeClient {
-    connection: Connection<TokioTcpTransport, TreeConnected>,
-    file_id: FileId,
-    fragment_size: u32,
-}
-
-impl NamedPipeClient {
-    async fn connect(
-        config: &SessionConfig,
-        ipc_share: &str,
-        pipe_name: &str,
-    ) -> Result<Self, CoreError> {
-        Self::connect_with_access(config, ipc_share, pipe_name, PipeAccess::ReadWrite).await
-    }
-
-    async fn connect_with_retry(
-        config: &SessionConfig,
-        ipc_share: &str,
-        pipe_name: &str,
-        access: PipeAccess,
-        timeout_budget: Duration,
-    ) -> Result<Self, CoreError> {
-        let deadline = Instant::now() + timeout_budget;
-        loop {
-            match Self::connect_with_access(config, ipc_share, pipe_name, access).await {
-                Ok(pipe) => return Ok(pipe),
-                Err(error) if is_pipe_not_ready(&error) && Instant::now() < deadline => {
-                    sleep(PIPE_CONNECT_RETRY_INTERVAL).await;
-                }
-                Err(error) => return Err(error),
+async fn connect_pipe_with_retry(
+    config: &SmbSessionConfig,
+    ipc_share: &str,
+    pipe_name: &str,
+    access: PipeAccess,
+    timeout_budget: Duration,
+) -> Result<NamedPipe, CoreError> {
+    let deadline = Instant::now() + timeout_budget;
+    loop {
+        match NamedPipe::connect(config, ipc_share, pipe_name, access).await {
+            Ok(pipe) => return Ok(pipe),
+            Err(error) if is_pipe_not_ready(&error) && Instant::now() < deadline => {
+                sleep(PIPE_CONNECT_RETRY_INTERVAL).await;
             }
-        }
-    }
-
-    async fn connect_with_access(
-        config: &SessionConfig,
-        ipc_share: &str,
-        pipe_name: &str,
-        access: PipeAccess,
-    ) -> Result<Self, CoreError> {
-        let mut connection = connect_tree(config, ipc_share).await?;
-        let mut request = CreateRequest::from_path(pipe_name);
-        request.desired_access = match access {
-            PipeAccess::ReadOnly => {
-                FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
-            }
-            PipeAccess::WriteOnly => {
-                FILE_WRITE_DATA
-                    | FILE_READ_ATTRIBUTES
-                    | FILE_WRITE_ATTRIBUTES
-                    | READ_CONTROL
-                    | SYNCHRONIZE
-            }
-            PipeAccess::ReadWrite => {
-                FILE_READ_DATA
-                    | FILE_WRITE_DATA
-                    | FILE_READ_ATTRIBUTES
-                    | FILE_WRITE_ATTRIBUTES
-                    | READ_CONTROL
-                    | SYNCHRONIZE
-            }
-        };
-        request.create_disposition = CreateDisposition::Open;
-        request.share_access = ShareAccess::READ | ShareAccess::WRITE;
-        request.file_attributes = FileAttributes::NORMAL;
-        request.create_options = CreateOptions::NON_DIRECTORY_FILE;
-        let response = connection.create(&request).await?;
-        let fragment_size = connection
-            .state()
-            .negotiated
-            .max_transact_size
-            .min(connection.state().negotiated.max_read_size)
-            .min(connection.state().negotiated.max_write_size)
-            .min(u32::from(u16::MAX))
-            .max(1024);
-
-        Ok(Self {
-            connection,
-            file_id: response.file_id,
-            fragment_size,
-        })
-    }
-
-    async fn call(&mut self, request: Vec<u8>) -> Result<Vec<u8>, CoreError> {
-        self.write_all(&request).await?;
-        self.read_one_pdu().await
-    }
-
-    async fn write_all(&mut self, bytes: &[u8]) -> Result<(), CoreError> {
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let chunk_end = (offset + self.fragment_size as usize).min(bytes.len());
-            let request =
-                WriteRequest::for_file(self.file_id, 0, bytes[offset..chunk_end].to_vec());
-            let response = self.connection.write(&request).await?;
-            if response.count == 0 {
-                return Err(CoreError::InvalidResponse(
-                    "named pipe write returned zero bytes",
-                ));
-            }
-            offset = chunk_end;
-        }
-        let _ = self
-            .connection
-            .flush(&FlushRequest::for_file(self.file_id))
-            .await;
-        Ok(())
-    }
-
-    async fn read_stream_chunk(&mut self) -> Result<Option<Vec<u8>>, CoreError> {
-        let response = self
-            .connection
-            .read(&ReadRequest::for_file(self.file_id, 0, self.fragment_size))
-            .await?;
-        if response.data.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(response.data))
-    }
-
-    async fn read_one_pdu(&mut self) -> Result<Vec<u8>, CoreError> {
-        let mut buffer = Vec::new();
-        let expected_len = loop {
-            let response = self
-                .connection
-                .read(&ReadRequest::for_file(self.file_id, 0, self.fragment_size))
-                .await?;
-            if response.data.is_empty() {
-                return Err(CoreError::InvalidResponse(
-                    "named pipe read returned no data",
-                ));
-            }
-            buffer.extend_from_slice(&response.data);
-            if buffer.len() >= 10 {
-                let frag_len = u16::from_le_bytes([buffer[8], buffer[9]]) as usize;
-                break frag_len;
-            }
-        };
-
-        while buffer.len() < expected_len {
-            let response = self
-                .connection
-                .read(&ReadRequest::for_file(self.file_id, 0, self.fragment_size))
-                .await?;
-            if response.data.is_empty() {
-                return Err(CoreError::InvalidResponse(
-                    "named pipe response ended before rpc fragment was complete",
-                ));
-            }
-            buffer.extend_from_slice(&response.data);
-        }
-        buffer.truncate(expected_len);
-        Ok(buffer)
-    }
-
-    async fn read_control_line(
-        &mut self,
-        buffer: &mut Vec<u8>,
-    ) -> Result<Option<String>, CoreError> {
-        loop {
-            if let Some(newline_index) = buffer.iter().position(|byte| *byte == b'\n') {
-                let line = buffer.drain(..=newline_index).collect::<Vec<_>>();
-                let text = String::from_utf8_lossy(&line).trim().to_string();
-                return Ok(Some(text));
-            }
-
-            match self.read_stream_chunk().await? {
-                Some(bytes) => buffer.extend_from_slice(&bytes),
-                None if buffer.is_empty() => return Ok(None),
-                None => {
-                    return Err(CoreError::InvalidResponse(
-                        "interactive control pipe closed with a truncated line",
-                    ))
-                }
-            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -1193,7 +1009,7 @@ struct AdminShare {
 }
 
 impl AdminShare {
-    async fn connect(config: &SessionConfig, share: &str) -> Result<Self, CoreError> {
+    async fn connect(config: &SmbSessionConfig, share: &str) -> Result<Self, CoreError> {
         let connection = connect_tree(config, share).await?;
         let max_read_size = connection
             .state()
@@ -1374,27 +1190,6 @@ impl AdminShare {
     }
 }
 
-async fn connect_tree(
-    config: &SessionConfig,
-    share: &str,
-) -> Result<Connection<TokioTcpTransport, TreeConnected>, CoreError> {
-    let mut auth = NtlmAuthenticator::new(config.credentials.clone());
-    let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
-    let request = NegotiateRequest {
-        security_mode: config.signing_mode,
-        capabilities: config.capabilities,
-        client_guid: config.client_guid,
-        negotiate_contexts: default_negotiate_contexts(&config.dialects),
-        dialects: config.dialects.clone(),
-    };
-    let connection = Connection::new(transport).negotiate(&request).await?;
-    let connection = connection.authenticate(&mut auth).await?;
-    let unc = format!(r"\\{}\{}", config.server, normalize_share_name(share)?);
-    connection
-        .tree_connect(&TreeConnectRequest::from_unc(&unc))
-        .await
-}
-
 async fn cleanup_interactive_startup(
     admin: &mut AdminShare,
     scm: &mut ScmClient,
@@ -1472,19 +1267,6 @@ async fn collect_command_output(
 
         sleep(OUTPUT_SETTLE_RETRY_INTERVAL).await;
     }
-}
-
-fn default_negotiate_contexts(dialects: &[Dialect]) -> Vec<NegotiateContext> {
-    if !dialects.contains(&Dialect::Smb311) {
-        return Vec::new();
-    }
-
-    vec![NegotiateContext::preauth_integrity(
-        PreauthIntegrityCapabilities {
-            hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
-            salt: random::<[u8; 32]>().to_vec(),
-        },
-    )]
 }
 
 fn build_smbexec_service_command(command_paths: &CommandPaths) -> String {

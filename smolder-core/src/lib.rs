@@ -13,12 +13,14 @@
 pub mod auth;
 pub mod client;
 pub mod error;
+pub mod pipe;
 pub mod prelude {
     //! Common types and traits
 
     pub use crate::auth::{AuthProvider, NtlmAuthenticator, NtlmCredentials};
     pub use crate::client::{Authenticated, Connected, Connection, Negotiated, TreeConnected};
     pub use crate::error::CoreError;
+    pub use crate::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::transport::{TokioTcpTransport, Transport};
 }
 
