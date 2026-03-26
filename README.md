@@ -141,6 +141,8 @@ environment. The Samba-backed subset is also wired into GitHub Actions via
 For the full manual Tiny11 pass, including remote execution smoke checks, use
 [run-windows-release-gate.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-release-gate.sh)
 and [docs/testing/windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
+For merge/release policy, required gate selection, and failure triage, use
+[docs/testing/release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
 
 ## Security Notice
 

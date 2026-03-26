@@ -16,6 +16,8 @@ For a single entrypoint instead of running each command manually, use
 The repository also includes a GitHub Actions workflow at
 [interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml)
 that runs the Samba-backed subset on hosted Linux runners.
+Release policy and required gate selection live in
+[release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
 
 ## Targets
 

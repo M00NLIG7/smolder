@@ -1,0 +1,108 @@
+# Release Verification Checklist
+
+Use this checklist before merging high-risk SMB changes or cutting a release.
+
+This document is intentionally operational. The detailed fixture descriptions
+live in:
+
+- [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md)
+- [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md)
+- [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md)
+
+## Baseline Rule
+
+If a change touches any of these areas, run the appropriate gates before merge:
+
+- SMB negotiate / session setup / signing / encryption
+- named pipes / `IPC$`
+- DCE/RPC
+- DFS path resolution
+- durable handles / reconnect
+- `smbexec` / `psexec`
+- high-level file facade or CLI file commands
+
+## Required Gates
+
+### For normal PRs touching core or tools behavior
+
+Required:
+
+- GitHub Actions Samba interop workflow passes:
+  - [interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml)
+
+Recommended local replay:
+
+- `scripts/run-interop.sh --samba --core --tools`
+
+### For changes that affect Windows compatibility
+
+Required before release:
+
+- `scripts/run-windows-release-gate.sh`
+
+This includes:
+
+- Windows `smolder-core` interop tests
+- Windows `smolder-tools` interop tests
+- `smbexec whoami`
+- `psexec whoami`
+
+### For DFS changes
+
+Required when DFS path resolution or CLI path handling changed:
+
+- Samba interop workflow
+- `scripts/run-windows-release-gate.sh --no-remote-exec`
+- Windows DFS gate with `SMOLDER_WINDOWS_DFS_ROOT` configured:
+  - `scripts/run-interop.sh --windows --tools`
+
+### For remote execution changes
+
+Required:
+
+- `scripts/run-windows-release-gate.sh`
+
+If the service payload changed too:
+
+- rebuild the payload with `cross`
+- rerun the full Windows gate
+
+## Change-Type Matrix
+
+| Change area | Minimum gate |
+| --- | --- |
+| `smolder-proto` packet/codecs only | Samba interop workflow |
+| `smolder-core` auth/session/transport | Samba interop workflow + Windows release gate |
+| `smolder-core` pipes/RPC | Samba interop workflow + Windows release gate |
+| `smolder-tools` file facade / CLI | Samba interop workflow + Windows release gate when Windows behavior could differ |
+| `smolder-tools` DFS | Samba interop workflow + Windows tools gate with DFS root configured |
+| `smolder-tools` remote exec | Windows release gate |
+| `smolder-psexecsvc` payload | Windows release gate after rebuilding payload |
+
+## Expected Output
+
+Healthy release validation should end with:
+
+- Samba interop workflow green
+- Windows release gate printing:
+  - `nt authority\system` for `smbexec`
+  - `nt authority\system` for `psexec`
+
+Known fixture caveats that do not block release on their own:
+
+- local Samba may not grant a lease even when a lease-aware open succeeds
+- local Samba may reject the resiliency IOCTL
+- local Samba may not preserve durable reopen state after transport drop
+- Windows DFS is skipped unless `SMOLDER_WINDOWS_DFS_ROOT` is set
+
+## Failure Triage
+
+When a gate fails:
+
+1. Reproduce with the narrowest command from [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md).
+2. Decide whether the failure is:
+   - a real protocol regression
+   - a fixture limitation already documented
+   - a harness/doc mismatch
+3. Fix the regression or update the documented fixture boundary.
+4. Re-run the full gate, not just the narrow repro, before merging.
