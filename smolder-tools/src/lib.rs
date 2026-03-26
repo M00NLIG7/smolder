@@ -9,9 +9,6 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-#[doc(hidden)]
-pub use smolder_core::{auth, client, error, transport};
-
 pub mod fs;
 pub mod reconnect;
 pub mod remote_exec;

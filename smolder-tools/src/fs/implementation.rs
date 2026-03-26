@@ -12,7 +12,14 @@ use rand::random;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
+use smolder_core::auth::{NtlmAuthenticator, NtlmCredentials};
+use smolder_core::client::{
+    Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle,
+    TreeConnected,
+};
 use smolder_core::dfs::{referrals_from_response, resolve_unc_path, DfsReferral, UncPath};
+use smolder_core::error::CoreError;
+use smolder_core::transport::{TokioTcpTransport, Transport};
 use smolder_proto::smb::smb2::{
     CipherId, CloseRequest, CloseResponse, Command, CreateContext, CreateDisposition,
     CreateOptions, CreateRequest, DfsReferralRequest, Dialect, DispositionInformation,
@@ -24,14 +31,6 @@ use smolder_proto::smb::smb2::{
     WriteRequest,
 };
 use smolder_proto::smb::status::NtStatus;
-
-use crate::auth::{NtlmAuthenticator, NtlmCredentials};
-use crate::client::{
-    Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle,
-    TreeConnected,
-};
-use crate::error::CoreError;
-use crate::transport::{TokioTcpTransport, Transport};
 
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TRANSFER_CHUNK_SIZE: u32 = 64 * 1024;
@@ -1958,10 +1957,10 @@ mod tests {
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-    use crate::client::{Connection, DurableOpenOptions, ResilientHandle};
-    use crate::error::CoreError;
     use crate::fs::{LeaseRequest, OpenOptions, Share, SmbClient};
-    use crate::transport::Transport;
+    use smolder_core::client::{Connection, DurableOpenOptions, ResilientHandle};
+    use smolder_core::error::CoreError;
+    use smolder_core::transport::Transport;
 
     #[derive(Debug)]
     struct ScriptedTransport {
