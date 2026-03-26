@@ -3,10 +3,10 @@
 use rand::random;
 
 use smolder_proto::smb::smb2::{
-    CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, FileAttributes,
-    FileId, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,
-    PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, ShareAccess, SigningMode,
-    TreeConnectRequest, WriteRequest,
+    CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect,
+    EncryptionCapabilities, FileAttributes, FileId, FlushRequest, GlobalCapabilities,
+    NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
+    ReadRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
@@ -43,7 +43,9 @@ impl SmbSessionConfig {
             port: DEFAULT_PORT,
             credentials,
             signing_mode: SigningMode::ENABLED,
-            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::LEASING,
+            capabilities: GlobalCapabilities::LARGE_MTU
+                | GlobalCapabilities::LEASING
+                | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
         }
@@ -314,7 +316,7 @@ pub async fn connect_tree(
         security_mode: config.signing_mode,
         capabilities: config.capabilities,
         client_guid: config.client_guid,
-        negotiate_contexts: default_negotiate_contexts(&config.dialects),
+        negotiate_contexts: default_negotiate_contexts(&config.dialects, config.capabilities),
         dialects: config.dialects.clone(),
     };
     let connection = Connection::new(transport).negotiate(&request).await?;
@@ -325,17 +327,28 @@ pub async fn connect_tree(
         .await
 }
 
-fn default_negotiate_contexts(dialects: &[Dialect]) -> Vec<NegotiateContext> {
+fn default_negotiate_contexts(
+    dialects: &[Dialect],
+    capabilities: GlobalCapabilities,
+) -> Vec<NegotiateContext> {
     if !dialects.contains(&Dialect::Smb311) {
         return Vec::new();
     }
 
-    vec![NegotiateContext::preauth_integrity(
+    let mut contexts = vec![NegotiateContext::preauth_integrity(
         PreauthIntegrityCapabilities {
             hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
             salt: random::<[u8; 32]>().to_vec(),
         },
-    )]
+    )];
+    if capabilities.contains(GlobalCapabilities::ENCRYPTION) {
+        contexts.push(NegotiateContext::encryption_capabilities(
+            EncryptionCapabilities {
+                ciphers: vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm],
+            },
+        ));
+    }
+    contexts
 }
 
 fn normalize_share_name(share: &str) -> Result<String, CoreError> {
@@ -358,18 +371,20 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
-        CloseResponse, Command, CreateResponse, Dialect, FileAttributes, FileId, FlushResponse,
-        GlobalCapabilities, Header, MessageId, NegotiateRequest, NegotiateResponse, OplockLevel,
-        ReadResponse, ReadResponseFlags, SessionFlags, SessionSetupRequest, SessionSetupResponse,
-        SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode, TreeCapabilities,
-        TreeConnectRequest, TreeConnectResponse, TreeId, WriteResponse,
+        CipherId, CloseResponse, Command, CreateResponse, Dialect, FileAttributes, FileId,
+        FlushResponse, GlobalCapabilities, Header, MessageId, NegotiateRequest,
+        NegotiateResponse, OplockLevel, ReadResponse, ReadResponseFlags, SessionFlags,
+        SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
+        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
+        TreeId, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
+    use crate::auth::NtlmCredentials;
     use crate::client::{Connection, TreeConnected};
     use crate::transport::Transport;
 
-    use super::{NamedPipe, PipeAccess};
+    use super::{NamedPipe, PipeAccess, SmbSessionConfig};
 
     #[derive(Debug)]
     struct ScriptedTransport {
@@ -384,6 +399,28 @@ mod tests {
                 writes: Vec::new(),
             }
         }
+    }
+
+    #[test]
+    fn smb_session_config_defaults_enable_encryption() {
+        let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"));
+        assert!(config.capabilities.contains(GlobalCapabilities::ENCRYPTION));
+
+        let contexts = super::default_negotiate_contexts(&config.dialects, config.capabilities);
+        assert_eq!(contexts.len(), 2);
+        assert!(contexts[0]
+            .as_preauth_integrity()
+            .expect("preauth context should decode")
+            .is_some());
+
+        let encryption = contexts[1]
+            .as_encryption_capabilities()
+            .expect("encryption context should decode")
+            .expect("encryption context should be present");
+        assert_eq!(
+            encryption.ciphers,
+            vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm]
+        );
     }
 
     #[async_trait]

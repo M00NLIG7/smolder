@@ -13,12 +13,13 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use smolder_proto::smb::smb2::{
-    CloseRequest, CloseResponse, CreateContext, CreateDisposition, CreateOptions, CreateRequest,
-    Dialect, DispositionInformation, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
-    FileStandardInformation, FlushRequest, GlobalCapabilities, LeaseFlags, LeaseState, LeaseV2,
-    NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
-    QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation,
-    SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
+    CipherId, CloseRequest, CloseResponse, CreateContext, CreateDisposition, CreateOptions,
+    CreateRequest, Dialect, DispositionInformation, EncryptionCapabilities, FileAttributes,
+    FileBasicInformation, FileId, FileInfoClass, FileStandardInformation, FlushRequest,
+    GlobalCapabilities, LeaseFlags, LeaseState, LeaseV2, NegotiateContext, NegotiateRequest,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryFlags,
+    QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation, SetInfoRequest,
+    ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
@@ -174,7 +175,9 @@ impl Default for SmbClientBuilder {
             port: DEFAULT_PORT,
             credentials: None,
             signing_mode: SigningMode::ENABLED,
-            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::LEASING,
+            capabilities: GlobalCapabilities::LARGE_MTU
+                | GlobalCapabilities::LEASING
+                | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
             transfer_chunk_size: DEFAULT_TRANSFER_CHUNK_SIZE,
@@ -224,6 +227,13 @@ impl SmbClientBuilder {
         self
     }
 
+    /// Overrides the SMB global capabilities sent during negotiate.
+    #[must_use]
+    pub fn capabilities(mut self, capabilities: GlobalCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
     /// Overrides the client GUID sent during negotiate.
     #[must_use]
     pub fn client_guid(mut self, client_guid: [u8; 16]) -> Self {
@@ -252,7 +262,7 @@ impl SmbClientBuilder {
             security_mode: self.signing_mode,
             capabilities: self.capabilities,
             client_guid: self.client_guid,
-            negotiate_contexts: default_negotiate_contexts(&self.dialects),
+            negotiate_contexts: default_negotiate_contexts(&self.dialects, self.capabilities),
             dialects: self.dialects,
         };
         let connection = Connection::new(transport).negotiate(&request).await?;
@@ -1485,17 +1495,28 @@ fn create_disposition(options: OpenOptions) -> CreateDisposition {
     }
 }
 
-fn default_negotiate_contexts(dialects: &[Dialect]) -> Vec<NegotiateContext> {
+fn default_negotiate_contexts(
+    dialects: &[Dialect],
+    capabilities: GlobalCapabilities,
+) -> Vec<NegotiateContext> {
     if !dialects.contains(&Dialect::Smb311) {
         return Vec::new();
     }
 
-    vec![NegotiateContext::preauth_integrity(
+    let mut contexts = vec![NegotiateContext::preauth_integrity(
         PreauthIntegrityCapabilities {
             hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
             salt: random::<[u8; 32]>().to_vec(),
         },
-    )]
+    )];
+    if capabilities.contains(GlobalCapabilities::ENCRYPTION) {
+        contexts.push(NegotiateContext::encryption_capabilities(
+            EncryptionCapabilities {
+                ciphers: vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm],
+            },
+        ));
+    }
+    contexts
 }
 
 fn normalize_share_name(share: &str) -> Result<String, CoreError> {
@@ -1608,16 +1629,17 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
-        CloseResponse, Command, CreateContext, CreateDisposition, CreateOptions, CreateRequest,
-        CreateResponse, Dialect, DirectoryInformationEntry, FileAttributes, FileBasicInformation,
-        FileId, FileInfoClass, FileStandardInformation, FlushRequest, FlushResponse,
-        GlobalCapabilities, Header, LeaseState, LeaseV2, MessageId, NegotiateRequest,
-        NegotiateResponse, OplockLevel, QueryDirectoryFlags, QueryDirectoryRequest,
-        QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse,
-        ReadResponseFlags, RequestedOplockLevel, SessionFlags, SessionSetupRequest,
-        SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse,
-        ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectRequest,
-        TreeConnectResponse, TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
+        CipherId, CloseResponse, Command, CreateContext, CreateDisposition, CreateOptions,
+        CreateRequest, CreateResponse, Dialect, DirectoryInformationEntry, FileAttributes,
+        FileBasicInformation, FileId, FileInfoClass, FileStandardInformation, FlushRequest,
+        FlushResponse, GlobalCapabilities, Header, LeaseState, LeaseV2, MessageId,
+        NegotiateRequest, NegotiateResponse, OplockLevel, QueryDirectoryFlags,
+        QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
+        ReadRequest, ReadResponse, ReadResponseFlags, RequestedOplockLevel, SessionFlags,
+        SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest,
+        SetInfoResponse, ShareFlags, ShareType, SigningMode, TreeCapabilities,
+        TreeConnectRequest, TreeConnectResponse, TreeDisconnectResponse, TreeId, WriteRequest,
+        WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -1640,6 +1662,45 @@ mod tests {
                 writes: Vec::new(),
             }
         }
+    }
+
+    #[test]
+    fn smb_client_builder_defaults_enable_encryption() {
+        let builder = super::SmbClientBuilder::new();
+        assert!(builder.capabilities.contains(GlobalCapabilities::ENCRYPTION));
+
+        let contexts = super::default_negotiate_contexts(&builder.dialects, builder.capabilities);
+        assert_eq!(contexts.len(), 2);
+        assert!(contexts[0]
+            .as_preauth_integrity()
+            .expect("preauth context should decode")
+            .is_some());
+
+        let encryption = contexts[1]
+            .as_encryption_capabilities()
+            .expect("encryption context should decode")
+            .expect("encryption context should be present");
+        assert_eq!(
+            encryption.ciphers,
+            vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm]
+        );
+    }
+
+    #[test]
+    fn smb_client_builder_skips_encryption_context_when_disabled() {
+        let builder = super::SmbClientBuilder::new()
+            .capabilities(GlobalCapabilities::LARGE_MTU | GlobalCapabilities::LEASING);
+        let contexts = super::default_negotiate_contexts(&builder.dialects, builder.capabilities);
+
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0]
+            .as_preauth_integrity()
+            .expect("preauth context should decode")
+            .is_some());
+        assert!(contexts[0]
+            .as_encryption_capabilities()
+            .expect("encryption context decode should succeed")
+            .is_none());
     }
 
     #[async_trait]

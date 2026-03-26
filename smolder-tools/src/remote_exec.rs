@@ -253,7 +253,9 @@ impl Default for RemoteExecBuilder {
             port: DEFAULT_PORT,
             credentials: None,
             signing_mode: SigningMode::ENABLED,
-            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::LEASING,
+            capabilities: GlobalCapabilities::LARGE_MTU
+                | GlobalCapabilities::LEASING
+                | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
             admin_share: "ADMIN$".to_string(),
@@ -1668,11 +1670,17 @@ mod tests {
         build_smbexec_script, build_smbexec_service_command, escape_cmd_for_echo,
         is_pipe_not_ready, normalize_remote_file_name, parse_create_service_response,
         parse_exit_code, parse_exit_control_line, parse_open_handle_response, quote_windows_arg,
-        CommandPaths, ExecMode, ExecRequest,
+        CommandPaths, ExecMode, ExecRequest, RemoteExecBuilder,
     };
     use smolder_core::error::CoreError;
-    use smolder_proto::smb::smb2::Command as SmbCommand;
+    use smolder_proto::smb::smb2::{Command as SmbCommand, GlobalCapabilities};
     use smolder_proto::smb::status::NtStatus;
+
+    #[test]
+    fn remote_exec_builder_defaults_enable_encryption() {
+        let builder = RemoteExecBuilder::new();
+        assert!(builder.capabilities.contains(GlobalCapabilities::ENCRYPTION));
+    }
 
     #[test]
     fn smbexec_command_redirects_output_and_exit_code() {
