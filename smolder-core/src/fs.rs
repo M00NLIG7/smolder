@@ -1072,12 +1072,18 @@ where
 
     fn max_read_size(&self) -> u32 {
         let negotiated = self.connection().state().negotiated.max_read_size;
-        negotiated.min(self.transfer_chunk_size).max(1)
+        negotiated
+            .min(self.transfer_chunk_size)
+            .min(u32::from(u16::MAX))
+            .max(1)
     }
 
     fn max_write_size(&self) -> u32 {
         let negotiated = self.connection().state().negotiated.max_write_size;
-        negotiated.min(self.transfer_chunk_size).max(1)
+        negotiated
+            .min(self.transfer_chunk_size)
+            .min(u32::from(u16::MAX))
+            .max(1)
     }
 
     fn max_query_size(&self) -> u32 {
