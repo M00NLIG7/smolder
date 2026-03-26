@@ -594,3 +594,183 @@ async fn resilient_handle_request_uses_resiliency_fsctl() {
     assert_eq!(ioctl.file_id, file_id);
     assert_eq!(ioctl.input, 30_000u32.to_le_bytes().into_iter().chain([0; 4]).collect::<Vec<_>>());
 }
+
+#[tokio::test]
+async fn durable_reconnect_with_resiliency_reapplies_saved_timeout() {
+    let create_guid = *b"durable-guid-021";
+    let initial_file_id = FileId {
+        persistent: 0x91,
+        volatile: 0x92,
+    };
+    let reopened_file_id = FileId {
+        persistent: 0xa1,
+        volatile: 0xa2,
+    };
+    let initial_response = CreateResponse {
+        oplock_level: OplockLevel::None,
+        file_attributes: FileAttributes::ARCHIVE,
+        allocation_size: 2048,
+        end_of_file: 256,
+        file_id: initial_file_id,
+        create_contexts: vec![CreateContext::new(
+            b"DH2Q".to_vec(),
+            DurableHandleResponseV2 {
+                timeout: 45_000,
+                flags: DurableHandleFlags::empty(),
+            }
+            .encode(),
+        )],
+    };
+    let reopened_response = CreateResponse {
+        oplock_level: OplockLevel::None,
+        file_attributes: FileAttributes::ARCHIVE,
+        allocation_size: 2048,
+        end_of_file: 256,
+        file_id: reopened_file_id,
+        create_contexts: Vec::new(),
+    };
+
+    let transport_one = ScriptedTransport::new(vec![
+        response_frame(
+            Command::Negotiate,
+            NtStatus::SUCCESS.to_u32(),
+            0,
+            0,
+            0,
+            negotiate_response_smb311().encode(),
+        ),
+        response_frame(
+            Command::SessionSetup,
+            NtStatus::SUCCESS.to_u32(),
+            1,
+            55,
+            0,
+            session_response().encode(),
+        ),
+        response_frame(
+            Command::TreeConnect,
+            NtStatus::SUCCESS.to_u32(),
+            2,
+            55,
+            9,
+            tree_response().encode(),
+        ),
+        response_frame(
+            Command::Create,
+            NtStatus::SUCCESS.to_u32(),
+            3,
+            55,
+            9,
+            initial_response.encode(),
+        ),
+    ]);
+    let mut connection_one = Connection::new(transport_one)
+        .negotiate(&negotiate_request_smb311())
+        .await
+        .expect("negotiate should succeed")
+        .session_setup(&session_request())
+        .await
+        .expect("session setup should succeed")
+        .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+        .await
+        .expect("tree connect should succeed");
+
+    let durable = connection_one
+        .create_durable(
+            &CreateRequest::from_path("notes.txt"),
+            DurableOpenOptions::new()
+                .with_create_guid(create_guid)
+                .with_timeout(45_000),
+        )
+        .await
+        .expect("durable open should succeed")
+        .with_resilient_timeout(30_000);
+
+    let transport_two = ScriptedTransport::new(vec![
+        response_frame(
+            Command::Negotiate,
+            NtStatus::SUCCESS.to_u32(),
+            0,
+            0,
+            0,
+            negotiate_response_smb311().encode(),
+        ),
+        response_frame(
+            Command::SessionSetup,
+            NtStatus::SUCCESS.to_u32(),
+            1,
+            55,
+            0,
+            session_response().encode(),
+        ),
+        response_frame(
+            Command::TreeConnect,
+            NtStatus::SUCCESS.to_u32(),
+            2,
+            55,
+            9,
+            tree_response().encode(),
+        ),
+        response_frame(
+            Command::Create,
+            NtStatus::SUCCESS.to_u32(),
+            3,
+            55,
+            9,
+            reopened_response.encode(),
+        ),
+        response_frame(
+            Command::Ioctl,
+            NtStatus::SUCCESS.to_u32(),
+            4,
+            55,
+            9,
+            smolder_proto::smb::smb2::IoctlResponse {
+                ctl_code: smolder_proto::smb::smb2::CtlCode::FSCTL_LMR_REQUEST_RESILIENCY,
+                file_id: reopened_file_id,
+                input: Vec::new(),
+                output: Vec::new(),
+                flags: 0,
+            }
+            .encode(),
+        ),
+    ]);
+    let mut connection_two = Connection::new(transport_two)
+        .negotiate(&negotiate_request_smb311())
+        .await
+        .expect("negotiate should succeed")
+        .session_setup(&session_request())
+        .await
+        .expect("session setup should succeed")
+        .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+        .await
+        .expect("tree connect should succeed");
+
+    let (reopened, resilient) = connection_two
+        .reconnect_durable_with_resiliency(&durable)
+        .await
+        .expect("durable reconnect with resiliency should succeed");
+    assert_eq!(reopened.file_id(), reopened_file_id);
+    assert_eq!(reopened.resilient_timeout(), Some(30_000));
+    assert_eq!(
+        resilient,
+        Some(ResilientHandle {
+            file_id: reopened_file_id,
+            timeout: 30_000,
+        })
+    );
+
+    let transport_two = connection_two.into_transport();
+    let reconnect_request = outbound_create(&transport_two.writes[3]);
+    let reconnect_context = find_durable_reconnect_v2(&reconnect_request);
+    assert_eq!(reconnect_context.file_id, initial_file_id);
+    assert_eq!(reconnect_context.create_guid, create_guid);
+
+    let ioctl = outbound_ioctl(&transport_two.writes[4]);
+    assert_eq!(
+        ioctl.ctl_code,
+        smolder_proto::smb::smb2::CtlCode::FSCTL_LMR_REQUEST_RESILIENCY
+    );
+    assert_eq!(ioctl.file_id, reopened_file_id);
+    assert_eq!(ioctl.input, 30_000u32.to_le_bytes().into_iter().chain([0; 4]).collect::<Vec<_>>());
+}

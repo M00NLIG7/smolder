@@ -383,6 +383,7 @@ pub struct DurableHandle {
     timeout: u32,
     flags: DurableHandleFlags,
     create_guid: Option<[u8; 16]>,
+    resilient_timeout: Option<u32>,
 }
 
 impl DurableHandle {
@@ -416,6 +417,19 @@ impl DurableHandle {
         self.flags
     }
 
+    /// Returns the resiliency timeout that should be reapplied after reconnect, if any.
+    #[must_use]
+    pub fn resilient_timeout(&self) -> Option<u32> {
+        self.resilient_timeout
+    }
+
+    /// Associates a resiliency timeout with the durable handle for future reconnects.
+    #[must_use]
+    pub fn with_resilient_timeout(mut self, timeout: u32) -> Self {
+        self.resilient_timeout = Some(timeout);
+        self
+    }
+
     fn with_response(&self, response: CreateResponse) -> Self {
         Self {
             create_request: self.create_request.clone(),
@@ -423,6 +437,7 @@ impl DurableHandle {
             timeout: self.timeout,
             flags: self.flags,
             create_guid: self.create_guid,
+            resilient_timeout: self.resilient_timeout,
         }
     }
 }
@@ -1018,6 +1033,19 @@ where
             durable_reconnect_request(self.state.negotiated.dialect_revision, handle)?;
         let response = self.create(&reconnect_request).await?;
         Ok(handle.with_response(response))
+    }
+
+    /// Replays a durable open and reapplies resiliency when the handle recorded a timeout.
+    pub async fn reconnect_durable_with_resiliency(
+        &mut self,
+        handle: &DurableHandle,
+    ) -> Result<(DurableHandle, Option<ResilientHandle>), CoreError> {
+        let reopened = self.reconnect_durable(handle).await?;
+        if let Some(timeout) = handle.resilient_timeout() {
+            let resilient = self.request_resiliency(reopened.file_id(), timeout).await?;
+            return Ok((reopened.with_resilient_timeout(timeout), Some(resilient)));
+        }
+        Ok((reopened, None))
     }
 
     /// Requests handle resiliency for an existing open file identifier.
@@ -1828,6 +1856,7 @@ fn build_durable_handle(
         timeout,
         flags,
         create_guid,
+        resilient_timeout: None,
     })
 }
 

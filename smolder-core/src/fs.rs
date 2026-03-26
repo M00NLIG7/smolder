@@ -505,6 +505,10 @@ where
         } else {
             None
         };
+        let durable = match (durable, resilient) {
+            (Some(handle), Some(resilient)) => Some(handle.with_resilient_timeout(resilient.timeout)),
+            (handle, _) => handle,
+        };
         let lease = response
             .lease_v2()
             .map_err(CoreError::from)?
@@ -538,7 +542,10 @@ where
         &'a mut self,
         handle: &DurableHandle,
     ) -> Result<RemoteFile<'a, T>, CoreError> {
-        let reopened = self.connection_mut().reconnect_durable(handle).await?;
+        let (reopened, resilient) = self
+            .connection_mut()
+            .reconnect_durable_with_resiliency(handle)
+            .await?;
         let response = reopened.create_response().clone();
         let lease = response
             .lease_v2()
@@ -554,7 +561,7 @@ where
             file_id: response.file_id,
             lease,
             durable: Some(reopened),
-            resilient: None,
+            resilient,
             position: 0,
             end_of_file: response.end_of_file,
             max_read_size,
@@ -1196,6 +1203,9 @@ where
             .connection_mut()
             .request_resiliency(file_id, timeout)
             .await?;
+        if let Some(durable) = self.durable.take() {
+            self.durable = Some(durable.with_resilient_timeout(timeout));
+        }
         self.resilient = Some(resilient);
         Ok(resilient)
     }
@@ -2353,6 +2363,164 @@ mod tests {
         assert_eq!(requested.file_id, original_file_id);
         assert_eq!(requested.flags, DurableHandleFlags::empty());
         assert_ne!(requested.create_guid, [0; 16]);
+    }
+
+    #[tokio::test]
+    async fn reopen_durable_reapplies_saved_resiliency() {
+        let original_file_id = FileId {
+            persistent: 0xd1,
+            volatile: 0xd2,
+        };
+        let reopened_file_id = FileId {
+            persistent: 0xe1,
+            volatile: 0xe2,
+        };
+        let durable_context = CreateContext::new(
+            b"DH2Q".to_vec(),
+            DurableHandleResponseV2 {
+                timeout: 30_000,
+                flags: DurableHandleFlags::empty(),
+            }
+            .encode(),
+        );
+        let original_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_id: original_file_id,
+            create_contexts: vec![durable_context.clone()],
+        };
+        let reopened_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_id: reopened_file_id,
+            create_contexts: vec![durable_context],
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+
+        let mut original_share = build_share(vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                original_response.encode(),
+            ),
+            response_frame(
+                Command::Ioctl,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                IoctlResponse {
+                    ctl_code: CtlCode::FSCTL_LMR_REQUEST_RESILIENCY,
+                    file_id: original_file_id,
+                    input: Vec::new(),
+                    output: Vec::new(),
+                    flags: 0,
+                }
+                .encode(),
+            ),
+        ])
+        .await;
+        let durable = original_share
+            .open(
+                "notes.txt",
+                OpenOptions::new()
+                    .read(true)
+                    .durable(DurableOpenOptions::new().with_timeout(30_000))
+                    .resilient(60_000),
+            )
+            .await
+            .expect("durable resilient open should succeed")
+            .durable_handle()
+            .expect("durable state should be present")
+            .clone();
+
+        let reconnect_reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                reopened_response.encode(),
+            ),
+            response_frame(
+                Command::Ioctl,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                IoctlResponse {
+                    ctl_code: CtlCode::FSCTL_LMR_REQUEST_RESILIENCY,
+                    file_id: reopened_file_id,
+                    input: Vec::new(),
+                    output: Vec::new(),
+                    flags: 0,
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+        let mut reconnected_share = build_share(reconnect_reads).await;
+        let file = reconnected_share
+            .reopen_durable(&durable)
+            .await
+            .expect("durable reconnect should succeed");
+
+        assert_eq!(
+            file.resilient_handle(),
+            Some(ResilientHandle {
+                file_id: reopened_file_id,
+                timeout: 60_000,
+            })
+        );
+        assert_eq!(
+            file.durable_handle()
+                .expect("durable state should remain present")
+                .resilient_timeout(),
+            Some(60_000)
+        );
+        file.close().await.expect("close should succeed");
+
+        let writes = transport_writes(reconnected_share);
+        let reconnect = outbound_create(&writes[3]);
+        let requested = reconnect
+            .create_contexts
+            .iter()
+            .find_map(|context| {
+                context
+                    .durable_handle_reconnect_v2_data()
+                    .expect("durable reconnect should decode")
+            })
+            .expect("durable reconnect context should be present");
+        assert_eq!(requested.file_id, original_file_id);
+
+        let ioctl = outbound_ioctl(&writes[4]);
+        assert_eq!(ioctl.ctl_code, CtlCode::FSCTL_LMR_REQUEST_RESILIENCY);
+        assert_eq!(ioctl.file_id, reopened_file_id);
+        assert_eq!(
+            NetworkResiliencyRequest::decode(&ioctl.input)
+                .expect("resiliency request should decode"),
+            NetworkResiliencyRequest { timeout: 60_000 }
+        );
     }
 
     #[tokio::test]
