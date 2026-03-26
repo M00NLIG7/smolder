@@ -23,6 +23,15 @@ bitflags! {
 }
 
 bitflags! {
+    /// Durable handle flags used by SMB 3.x durable-handle-v2 contexts.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct DurableHandleFlags: u32 {
+        /// Request or reconnect a persistent handle on a continuously available share.
+        const PERSISTENT = 0x0000_0002;
+    }
+}
+
+bitflags! {
     /// SMB lease-state flags.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct LeaseState: u32 {
@@ -154,6 +163,10 @@ impl FileId {
 }
 
 const LEASE_CONTEXT_NAME: &[u8; 4] = b"RqLs";
+const DURABLE_HANDLE_REQUEST_CONTEXT_NAME: &[u8; 4] = b"DHnQ";
+const DURABLE_HANDLE_RECONNECT_CONTEXT_NAME: &[u8; 4] = b"DHnC";
+const DURABLE_HANDLE_REQUEST_V2_CONTEXT_NAME: &[u8; 4] = b"DH2Q";
+const DURABLE_HANDLE_RECONNECT_V2_CONTEXT_NAME: &[u8; 4] = b"DH2C";
 
 /// Generic SMB2 create-context container.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +193,42 @@ impl CreateContext {
         Self::new(LEASE_CONTEXT_NAME.to_vec(), lease.encode())
     }
 
+    /// Builds a durable-handle request context for SMB 2.0.2 / 2.1.
+    #[must_use]
+    pub fn durable_handle_request(request: DurableHandleRequest) -> Self {
+        Self::new(
+            DURABLE_HANDLE_REQUEST_CONTEXT_NAME.to_vec(),
+            request.encode(),
+        )
+    }
+
+    /// Builds a durable-handle reconnect context for SMB 2.0.2 / 2.1.
+    #[must_use]
+    pub fn durable_handle_reconnect(reconnect: DurableHandleReconnect) -> Self {
+        Self::new(
+            DURABLE_HANDLE_RECONNECT_CONTEXT_NAME.to_vec(),
+            reconnect.encode(),
+        )
+    }
+
+    /// Builds a durable-handle-v2 request context for SMB 3.x.
+    #[must_use]
+    pub fn durable_handle_request_v2(request: DurableHandleRequestV2) -> Self {
+        Self::new(
+            DURABLE_HANDLE_REQUEST_V2_CONTEXT_NAME.to_vec(),
+            request.encode(),
+        )
+    }
+
+    /// Builds a durable-handle-v2 reconnect context for SMB 3.x.
+    #[must_use]
+    pub fn durable_handle_reconnect_v2(reconnect: DurableHandleReconnectV2) -> Self {
+        Self::new(
+            DURABLE_HANDLE_RECONNECT_V2_CONTEXT_NAME.to_vec(),
+            reconnect.encode(),
+        )
+    }
+
     /// Decodes the create context as an SMB 3.x lease-v2 payload when applicable.
     pub fn lease_v2_data(&self) -> Result<Option<LeaseV2>, ProtocolError> {
         if self.name != LEASE_CONTEXT_NAME {
@@ -190,6 +239,326 @@ impl CreateContext {
             LeaseV2::V1_LEN => LeaseV2::decode_v1(&self.data).map(Some),
             _ => Ok(None),
         }
+    }
+
+    /// Decodes the create context as a durable-handle request payload when applicable.
+    pub fn durable_handle_request_data(
+        &self,
+    ) -> Result<Option<DurableHandleRequest>, ProtocolError> {
+        if self.name != DURABLE_HANDLE_REQUEST_CONTEXT_NAME
+            || self.data.len() != DurableHandleRequest::LEN
+        {
+            return Ok(None);
+        }
+        DurableHandleRequest::decode(&self.data).map(Some)
+    }
+
+    /// Decodes the create context as a durable-handle reconnect payload when applicable.
+    pub fn durable_handle_reconnect_data(
+        &self,
+    ) -> Result<Option<DurableHandleReconnect>, ProtocolError> {
+        if self.name != DURABLE_HANDLE_RECONNECT_CONTEXT_NAME
+            || self.data.len() != DurableHandleReconnect::LEN
+        {
+            return Ok(None);
+        }
+        DurableHandleReconnect::decode(&self.data).map(Some)
+    }
+
+    /// Decodes the create context as a durable-handle-v2 request payload when applicable.
+    pub fn durable_handle_request_v2_data(
+        &self,
+    ) -> Result<Option<DurableHandleRequestV2>, ProtocolError> {
+        if self.name != DURABLE_HANDLE_REQUEST_V2_CONTEXT_NAME
+            || self.data.len() != DurableHandleRequestV2::LEN
+        {
+            return Ok(None);
+        }
+        DurableHandleRequestV2::decode(&self.data).map(Some)
+    }
+
+    /// Decodes the create context as a durable-handle-v2 reconnect payload when applicable.
+    pub fn durable_handle_reconnect_v2_data(
+        &self,
+    ) -> Result<Option<DurableHandleReconnectV2>, ProtocolError> {
+        if self.name != DURABLE_HANDLE_RECONNECT_V2_CONTEXT_NAME
+            || self.data.len() != DurableHandleReconnectV2::LEN
+        {
+            return Ok(None);
+        }
+        DurableHandleReconnectV2::decode(&self.data).map(Some)
+    }
+
+    /// Decodes the create context as a durable-handle response payload when applicable.
+    pub fn durable_handle_response_data(
+        &self,
+    ) -> Result<Option<DurableHandleResponse>, ProtocolError> {
+        if self.name != DURABLE_HANDLE_REQUEST_CONTEXT_NAME
+            || self.data.len() != DurableHandleResponse::LEN
+        {
+            return Ok(None);
+        }
+        DurableHandleResponse::decode(&self.data).map(Some)
+    }
+
+    /// Decodes the create context as a durable-handle-v2 response payload when applicable.
+    pub fn durable_handle_response_v2_data(
+        &self,
+    ) -> Result<Option<DurableHandleResponseV2>, ProtocolError> {
+        if self.name != DURABLE_HANDLE_REQUEST_V2_CONTEXT_NAME
+            || self.data.len() != DurableHandleResponseV2::LEN
+        {
+            return Ok(None);
+        }
+        DurableHandleResponseV2::decode(&self.data).map(Some)
+    }
+}
+
+/// Durable-handle request payload for SMB 2.0.2 / 2.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct DurableHandleRequest;
+
+impl DurableHandleRequest {
+    /// Encoded length of the request payload.
+    pub const LEN: usize = 16;
+
+    /// Serializes the request payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        vec![0; Self::LEN]
+    }
+
+    /// Parses the request payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != Self::LEN {
+            return Err(ProtocolError::InvalidField {
+                field: "durable_handle_request",
+                reason: "unexpected durable handle request length",
+            });
+        }
+        Ok(Self)
+    }
+}
+
+/// Durable-handle reconnect payload for SMB 2.0.2 / 2.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DurableHandleReconnect {
+    /// File identifier returned by the original durable open.
+    pub file_id: FileId,
+}
+
+impl DurableHandleReconnect {
+    /// Encoded length of the reconnect payload.
+    pub const LEN: usize = 16;
+
+    /// Serializes the reconnect payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LEN);
+        out.put_u64_le(self.file_id.persistent);
+        out.put_u64_le(self.file_id.volatile);
+        out
+    }
+
+    /// Parses the reconnect payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != Self::LEN {
+            return Err(ProtocolError::InvalidField {
+                field: "durable_handle_reconnect",
+                reason: "unexpected durable handle reconnect length",
+            });
+        }
+        let mut input = bytes;
+        Ok(Self {
+            file_id: FileId {
+                persistent: get_u64(&mut input, "file_id_persistent")?,
+                volatile: get_u64(&mut input, "file_id_volatile")?,
+            },
+        })
+    }
+}
+
+/// Durable-handle-v2 request payload for SMB 3.x.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DurableHandleRequestV2 {
+    /// Requested durable-open timeout in milliseconds.
+    pub timeout: u32,
+    /// Request flags, including persistent-handle requests.
+    pub flags: DurableHandleFlags,
+    /// Client-supplied durable-open identifier.
+    pub create_guid: [u8; 16],
+}
+
+impl DurableHandleRequestV2 {
+    /// Encoded length of the v2 request payload.
+    pub const LEN: usize = 32;
+
+    /// Creates a v2 durable-handle request with the provided GUID.
+    #[must_use]
+    pub fn new(create_guid: [u8; 16]) -> Self {
+        Self {
+            timeout: 0,
+            flags: DurableHandleFlags::empty(),
+            create_guid,
+        }
+    }
+
+    /// Serializes the request payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LEN);
+        out.put_u32_le(self.timeout);
+        out.put_u32_le(self.flags.bits());
+        out.put_u64_le(0);
+        out.extend_from_slice(&self.create_guid);
+        out
+    }
+
+    /// Parses the request payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != Self::LEN {
+            return Err(ProtocolError::InvalidField {
+                field: "durable_handle_request_v2",
+                reason: "unexpected durable handle v2 request length",
+            });
+        }
+        let mut input = bytes;
+        let timeout = get_u32(&mut input, "timeout")?;
+        let flags = DurableHandleFlags::from_bits(get_u32(&mut input, "flags")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "flags",
+                reason: "unknown durable handle flags set",
+            },
+        )?;
+        let _reserved = get_u64(&mut input, "reserved")?;
+        let create_guid = get_array::<16>(&mut input, "create_guid")?;
+        Ok(Self {
+            timeout,
+            flags,
+            create_guid,
+        })
+    }
+}
+
+/// Durable-handle-v2 reconnect payload for SMB 3.x.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DurableHandleReconnectV2 {
+    /// File identifier returned by the original durable open.
+    pub file_id: FileId,
+    /// Client-supplied durable-open identifier.
+    pub create_guid: [u8; 16],
+    /// Reconnect flags, including persistent-handle reconnects.
+    pub flags: DurableHandleFlags,
+}
+
+impl DurableHandleReconnectV2 {
+    /// Encoded length of the v2 reconnect payload.
+    pub const LEN: usize = 36;
+
+    /// Serializes the reconnect payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LEN);
+        out.put_u64_le(self.file_id.persistent);
+        out.put_u64_le(self.file_id.volatile);
+        out.extend_from_slice(&self.create_guid);
+        out.put_u32_le(self.flags.bits());
+        out
+    }
+
+    /// Parses the reconnect payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != Self::LEN {
+            return Err(ProtocolError::InvalidField {
+                field: "durable_handle_reconnect_v2",
+                reason: "unexpected durable handle v2 reconnect length",
+            });
+        }
+        let mut input = bytes;
+        let file_id = FileId {
+            persistent: get_u64(&mut input, "file_id_persistent")?,
+            volatile: get_u64(&mut input, "file_id_volatile")?,
+        };
+        let create_guid = get_array::<16>(&mut input, "create_guid")?;
+        let flags = DurableHandleFlags::from_bits(get_u32(&mut input, "flags")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "flags",
+                reason: "unknown durable handle flags set",
+            },
+        )?;
+        Ok(Self {
+            file_id,
+            create_guid,
+            flags,
+        })
+    }
+}
+
+/// Durable-handle response payload for SMB 2.0.2 / 2.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct DurableHandleResponse;
+
+impl DurableHandleResponse {
+    /// Encoded length of the response payload.
+    pub const LEN: usize = 8;
+
+    /// Serializes the response payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        vec![0; Self::LEN]
+    }
+
+    /// Parses the response payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != Self::LEN {
+            return Err(ProtocolError::InvalidField {
+                field: "durable_handle_response",
+                reason: "unexpected durable handle response length",
+            });
+        }
+        Ok(Self)
+    }
+}
+
+/// Durable-handle-v2 response payload for SMB 3.x.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DurableHandleResponseV2 {
+    /// Granted durable-open timeout in milliseconds.
+    pub timeout: u32,
+    /// Response flags, including persistent-handle grants.
+    pub flags: DurableHandleFlags,
+}
+
+impl DurableHandleResponseV2 {
+    /// Encoded length of the v2 response payload.
+    pub const LEN: usize = 8;
+
+    /// Serializes the response payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LEN);
+        out.put_u32_le(self.timeout);
+        out.put_u32_le(self.flags.bits());
+        out
+    }
+
+    /// Parses the response payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != Self::LEN {
+            return Err(ProtocolError::InvalidField {
+                field: "durable_handle_response_v2",
+                reason: "unexpected durable handle v2 response length",
+            });
+        }
+        let mut input = bytes;
+        let timeout = get_u32(&mut input, "timeout")?;
+        let flags = DurableHandleFlags::from_bits(get_u32(&mut input, "flags")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "flags",
+                reason: "unknown durable handle flags set",
+            },
+        )?;
+        Ok(Self { timeout, flags })
     }
 }
 
@@ -806,7 +1175,9 @@ impl CloseResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseRequest, CloseResponse, CreateContext, CreateRequest, CreateResponse, FileAttributes,
+        CloseRequest, CloseResponse, CreateContext, CreateRequest, CreateResponse,
+        DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2, DurableHandleRequest,
+        DurableHandleRequestV2, DurableHandleResponse, DurableHandleResponseV2, FileAttributes,
         FileId, LeaseFlags, LeaseState, LeaseV2, OplockLevel, ShareAccess,
     };
     use super::{CreateDisposition, CreateOptions, RequestedOplockLevel};
@@ -978,5 +1349,160 @@ mod tests {
         assert_eq!(lease.epoch, 0);
         assert!(lease.parent_lease_key.is_none());
         assert!(lease.flags.contains(LeaseFlags::BREAK_IN_PROGRESS));
+    }
+
+    #[test]
+    fn durable_handle_context_helpers_roundtrip_v1_and_v2() {
+        let file_id = FileId {
+            persistent: 0x1122_3344_5566_7788,
+            volatile: 0x8877_6655_4433_2211,
+        };
+        let create_guid = *b"durable-guid-000";
+
+        let request_v1 = CreateContext::durable_handle_request(DurableHandleRequest);
+        assert_eq!(
+            request_v1
+                .durable_handle_request_data()
+                .expect("v1 request should decode"),
+            Some(DurableHandleRequest)
+        );
+        assert_eq!(
+            request_v1
+                .durable_handle_response_data()
+                .expect("v1 response parser should skip request length"),
+            None
+        );
+
+        let reconnect_v1 =
+            CreateContext::durable_handle_reconnect(DurableHandleReconnect { file_id });
+        assert_eq!(
+            reconnect_v1
+                .durable_handle_reconnect_data()
+                .expect("v1 reconnect should decode"),
+            Some(DurableHandleReconnect { file_id })
+        );
+
+        let request_v2 = CreateContext::durable_handle_request_v2(DurableHandleRequestV2 {
+            timeout: 30_000,
+            flags: DurableHandleFlags::PERSISTENT,
+            create_guid,
+        });
+        assert_eq!(
+            request_v2
+                .durable_handle_request_v2_data()
+                .expect("v2 request should decode"),
+            Some(DurableHandleRequestV2 {
+                timeout: 30_000,
+                flags: DurableHandleFlags::PERSISTENT,
+                create_guid,
+            })
+        );
+        assert_eq!(
+            request_v2
+                .durable_handle_response_v2_data()
+                .expect("v2 response parser should skip request length"),
+            None
+        );
+
+        let reconnect_v2 = CreateContext::durable_handle_reconnect_v2(DurableHandleReconnectV2 {
+            file_id,
+            create_guid,
+            flags: DurableHandleFlags::PERSISTENT,
+        });
+        assert_eq!(
+            reconnect_v2
+                .durable_handle_reconnect_v2_data()
+                .expect("v2 reconnect should decode"),
+            Some(DurableHandleReconnectV2 {
+                file_id,
+                create_guid,
+                flags: DurableHandleFlags::PERSISTENT,
+            })
+        );
+    }
+
+    #[test]
+    fn create_request_and_response_roundtrip_durable_handle_contexts() {
+        let create_guid = *b"durable-guid-001";
+        let request = CreateRequest {
+            requested_oplock_level: RequestedOplockLevel::Lease,
+            impersonation_level: 2,
+            desired_access: 0x0012_019f,
+            file_attributes: FileAttributes::NORMAL,
+            share_access: ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE,
+            create_disposition: CreateDisposition::OpenIf,
+            create_options: CreateOptions::NON_DIRECTORY_FILE,
+            name: super::utf16le("notes.txt"),
+            create_contexts: vec![
+                CreateContext::durable_handle_request(DurableHandleRequest),
+                CreateContext::durable_handle_request_v2(DurableHandleRequestV2 {
+                    timeout: 60_000,
+                    flags: DurableHandleFlags::PERSISTENT,
+                    create_guid,
+                }),
+            ],
+        };
+
+        let encoded_request = request.encode();
+        let decoded_request =
+            CreateRequest::decode(&encoded_request).expect("request should decode");
+        assert_eq!(decoded_request, request);
+        assert_eq!(
+            decoded_request.create_contexts[0]
+                .durable_handle_request_data()
+                .expect("v1 request should decode"),
+            Some(DurableHandleRequest)
+        );
+        assert_eq!(
+            decoded_request.create_contexts[1]
+                .durable_handle_request_v2_data()
+                .expect("v2 request should decode"),
+            Some(DurableHandleRequestV2 {
+                timeout: 60_000,
+                flags: DurableHandleFlags::PERSISTENT,
+                create_guid,
+            })
+        );
+
+        let response = CreateResponse {
+            oplock_level: OplockLevel::Lease,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4096,
+            end_of_file: 128,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: vec![
+                CreateContext::new(b"DHnQ".to_vec(), DurableHandleResponse.encode()),
+                CreateContext::new(
+                    b"DH2Q".to_vec(),
+                    DurableHandleResponseV2 {
+                        timeout: 60_000,
+                        flags: DurableHandleFlags::PERSISTENT,
+                    }
+                    .encode(),
+                ),
+            ],
+        };
+        let encoded_response = response.encode();
+        let decoded_response =
+            CreateResponse::decode(&encoded_response).expect("response should decode");
+        assert_eq!(decoded_response, response);
+        assert_eq!(
+            decoded_response.create_contexts[0]
+                .durable_handle_response_data()
+                .expect("v1 response should decode"),
+            Some(DurableHandleResponse)
+        );
+        assert_eq!(
+            decoded_response.create_contexts[1]
+                .durable_handle_response_v2_data()
+                .expect("v2 response should decode"),
+            Some(DurableHandleResponseV2 {
+                timeout: 60_000,
+                flags: DurableHandleFlags::PERSISTENT,
+            })
+        );
     }
 }

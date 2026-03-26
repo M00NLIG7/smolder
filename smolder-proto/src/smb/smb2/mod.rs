@@ -18,8 +18,10 @@ use bytes::Buf;
 pub use cancel::CancelRequest;
 pub use create::{
     CloseRequest, CloseResponse, CreateContext, CreateDisposition, CreateOptions, CreateRequest,
-    CreateResponse, FileAttributes, FileId, LeaseFlags, LeaseState, LeaseV2, OplockLevel,
-    RequestedOplockLevel, ShareAccess,
+    CreateResponse, DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2,
+    DurableHandleRequest, DurableHandleRequestV2, DurableHandleResponse, DurableHandleResponseV2,
+    FileAttributes, FileId, LeaseFlags, LeaseState, LeaseV2, OplockLevel, RequestedOplockLevel,
+    ShareAccess,
 };
 pub use echo::{EchoRequest, EchoResponse};
 pub use header::{Command, Header, HeaderFlags};
