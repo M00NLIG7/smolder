@@ -1,6 +1,7 @@
 //! DFS-aware UNC parsing and referral resolution helpers.
 
 use crate::error::CoreError;
+use smolder_proto::smb::smb2::DfsReferralResponse;
 
 /// A normalized UNC path split into its server, share, and path components.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,6 +140,33 @@ pub fn resolve_unc_path(path: &UncPath, referrals: &[DfsReferral]) -> UncPath {
     referral.target_path.with_appended_suffix(suffix)
 }
 
+/// Converts decoded DFS referral entries into namespace-to-target mappings.
+///
+/// Name-list referrals do not map directly to storage targets and are skipped.
+pub fn referrals_from_response(
+    response: &DfsReferralResponse,
+) -> Result<Vec<DfsReferral>, CoreError> {
+    let mut referrals = Vec::new();
+    for entry in &response.referrals {
+        let (Some(namespace_path), Some(target_path)) =
+            (entry.dfs_path.as_deref(), entry.network_address.as_deref())
+        else {
+            continue;
+        };
+        referrals.push(DfsReferral::new(
+            UncPath::parse(namespace_path)?,
+            UncPath::parse(target_path)?,
+        ));
+    }
+    Ok(referrals)
+}
+
+/// Decodes a DFS referral response payload and converts it to referral mappings.
+pub fn referrals_from_response_bytes(bytes: &[u8]) -> Result<Vec<DfsReferral>, CoreError> {
+    let response = DfsReferralResponse::decode(bytes)?;
+    referrals_from_response(&response)
+}
+
 fn normalize_component(value: &str, empty_message: &'static str) -> Result<String, CoreError> {
     if value.is_empty() {
         return Err(CoreError::PathInvalid(empty_message));
@@ -161,12 +189,18 @@ fn component_eq(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_unc_path, DfsReferral, UncPath};
+    use super::{
+        referrals_from_response, referrals_from_response_bytes, resolve_unc_path, DfsReferral,
+        UncPath,
+    };
+    use smolder_proto::smb::smb2::{
+        DfsReferralEntry, DfsReferralEntryFlags, DfsReferralHeaderFlags, DfsReferralResponse,
+    };
 
     #[test]
     fn parses_normalized_unc_paths() {
-        let path = UncPath::parse(r"\\server/share\docs\report.txt")
-            .expect("UNC path should parse");
+        let path =
+            UncPath::parse(r"\\server/share\docs\report.txt").expect("UNC path should parse");
 
         assert_eq!(path.server(), "server");
         assert_eq!(path.share(), "share");
@@ -201,7 +235,10 @@ mod tests {
 
         let resolved = resolve_unc_path(&original, &[namespace_root, namespace_branch]);
 
-        assert_eq!(resolved.as_unc(), r"\\server-b\teamshare\docs\docs\report.txt");
+        assert_eq!(
+            resolved.as_unc(),
+            r"\\server-b\teamshare\docs\docs\report.txt"
+        );
     }
 
     #[test]
@@ -216,5 +253,80 @@ mod tests {
         let resolved = resolve_unc_path(&original, &[referral]);
 
         assert_eq!(resolved, original);
+    }
+
+    #[test]
+    fn converts_storage_referral_entries_into_path_mappings() {
+        let response = DfsReferralResponse {
+            path_consumed: 0,
+            header_flags: DfsReferralHeaderFlags::STORAGE_SERVERS,
+            referrals: vec![
+                DfsReferralEntry {
+                    version: 4,
+                    server_type: 0,
+                    flags: DfsReferralEntryFlags::TARGET_SET_BOUNDARY,
+                    time_to_live: 300,
+                    dfs_path: Some(r"\\domain\dfs\team".to_string()),
+                    dfs_alternate_path: Some(r"\\domain\dfs".to_string()),
+                    network_address: Some(r"\\server-b\teamshare".to_string()),
+                    special_name: None,
+                    expanded_names: Vec::new(),
+                },
+                DfsReferralEntry {
+                    version: 3,
+                    server_type: 1,
+                    flags: DfsReferralEntryFlags::NAME_LIST_REFERRAL,
+                    time_to_live: 60,
+                    dfs_path: None,
+                    dfs_alternate_path: None,
+                    network_address: None,
+                    special_name: Some("example.com".to_string()),
+                    expanded_names: vec![r"\\dc1.example.com".to_string()],
+                },
+            ],
+        };
+
+        let referrals = referrals_from_response(&response).expect("response should convert");
+
+        assert_eq!(referrals.len(), 1);
+        assert_eq!(referrals[0].namespace_path.as_unc(), r"\\domain\dfs\team");
+        assert_eq!(referrals[0].target_path.as_unc(), r"\\server-b\teamshare");
+    }
+
+    #[test]
+    fn decodes_referral_bytes_and_converts_mappings() {
+        let dfs_path = smolder_proto::smb::smb2::utf16le(r"\\domain\dfs\team");
+        let network_address = smolder_proto::smb::smb2::utf16le(r"\\server-b\teamshare");
+        let dfs_path_offset = 24u16;
+        let network_address_offset = dfs_path_offset + dfs_path.len() as u16 + 2;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&DfsReferralHeaderFlags::STORAGE_SERVERS.bits().to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(
+            &DfsReferralEntryFlags::TARGET_SET_BOUNDARY
+                .bits()
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&300u32.to_le_bytes());
+        bytes.extend_from_slice(&dfs_path_offset.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&network_address_offset.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 6]);
+        bytes.extend_from_slice(&dfs_path);
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&network_address);
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+
+        let referrals =
+            referrals_from_response_bytes(&bytes).expect("response bytes should convert");
+
+        assert_eq!(referrals.len(), 1);
+        assert_eq!(referrals[0].namespace_path.as_unc(), r"\\domain\dfs\team");
+        assert_eq!(referrals[0].target_path.as_unc(), r"\\server-b\teamshare");
     }
 }

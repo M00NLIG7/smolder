@@ -36,7 +36,8 @@ pub use io::{
     WriteFlags, WriteRequest, WriteResponse,
 };
 pub use ioctl::{
-    CtlCode, IoctlFlags, IoctlRequest, IoctlResponse, NetworkAddress,
+    CtlCode, DfsReferralEntry, DfsReferralEntryFlags, DfsReferralHeaderFlags, DfsReferralRequest,
+    DfsReferralResponse, IoctlFlags, IoctlRequest, IoctlResponse, NetworkAddress,
     NetworkInterfaceCapabilities, NetworkInterfaceInfo, NetworkInterfaceInfoResponse,
     NetworkResiliencyRequest, ResumeKeyResponse,
 };
