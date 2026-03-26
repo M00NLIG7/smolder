@@ -1836,16 +1836,17 @@ fn build_durable_handle(
                 .create_contexts
                 .iter()
                 .find_map(|context| context.durable_handle_response_v2_data().transpose())
-                .transpose()?
-                .ok_or(CoreError::InvalidResponse(
-                    "durable v2 open response did not include the granted durable context",
-                ))?;
+                .transpose()?;
+            let create_guid = options.create_guid.ok_or(CoreError::InvalidInput(
+                "durable SMB 3.x opens require a create GUID",
+            ))?;
+            let (timeout, flags) = granted
+                .map(|granted| (granted.timeout, granted.flags))
+                .unwrap_or((options.timeout, options.flags));
             (
-                granted.timeout,
-                granted.flags,
-                Some(options.create_guid.ok_or(CoreError::InvalidInput(
-                    "durable SMB 3.x opens require a create GUID",
-                ))?),
+                timeout,
+                flags,
+                Some(create_guid),
             )
         }
     };
