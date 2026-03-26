@@ -28,6 +28,7 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const OUTPUT_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
 const OUTPUT_SETTLE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const PIPE_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const SVCCTL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const ADMIN_SHARE_ROOT: &str = r"C:\Windows";
 const DEFAULT_STAGING_DIR: &str = r"Temp";
 const DEFAULT_PSEXEC_BINARY_NAME: &str = "smolder-psexecsvc.exe";
@@ -801,7 +802,14 @@ struct ScmClient {
 
 impl ScmClient {
     async fn connect(config: &SmbSessionConfig, ipc_share: &str) -> Result<Self, CoreError> {
-        let pipe = NamedPipe::connect(config, ipc_share, "svcctl", PipeAccess::ReadWrite).await?;
+        let pipe = connect_pipe_with_retry(
+            config,
+            ipc_share,
+            "svcctl",
+            PipeAccess::ReadWrite,
+            SVCCTL_CONNECT_TIMEOUT,
+        )
+        .await?;
         let mut rpc = PipeRpcClient::new(pipe);
         // `svcctl` over `ncacn_np` already rides an authenticated SMB session.
         // Forcing WinNT secure bind here reproduces Windows `rpc_s_cannot_support (0x6e4)`,
@@ -1557,7 +1565,11 @@ fn is_end_of_file(error: &CoreError) -> bool {
 }
 
 fn is_pipe_not_ready(error: &CoreError) -> bool {
-    is_not_found(error)
+    matches!(
+        error,
+        CoreError::UnexpectedStatus { status, .. }
+            if *status == NtStatus::PIPE_NOT_AVAILABLE.to_u32()
+    ) || is_not_found(error)
 }
 
 struct NdrWriter {
@@ -1654,10 +1666,13 @@ mod tests {
         build_psexec_interactive_service_command, build_psexec_runner_script, build_psexec_script,
         build_psexec_service_command, build_psexec_wrapper_script, build_smbexec_runner_script,
         build_smbexec_script, build_smbexec_service_command, escape_cmd_for_echo,
-        normalize_remote_file_name, parse_create_service_response, parse_exit_code,
-        parse_exit_control_line, parse_open_handle_response, quote_windows_arg, CommandPaths,
-        ExecMode, ExecRequest,
+        is_pipe_not_ready, normalize_remote_file_name, parse_create_service_response,
+        parse_exit_code, parse_exit_control_line, parse_open_handle_response, quote_windows_arg,
+        CommandPaths, ExecMode, ExecRequest,
     };
+    use smolder_core::error::CoreError;
+    use smolder_proto::smb::smb2::Command as SmbCommand;
+    use smolder_proto::smb::status::NtStatus;
 
     #[test]
     fn smbexec_command_redirects_output_and_exit_code() {
@@ -1845,5 +1860,14 @@ mod tests {
             quote_windows_arg(r#"C:\Temp\say "hi".cmd"#),
             r#""C:\Temp\say ""hi"".cmd""#
         );
+    }
+
+    #[test]
+    fn pipe_not_available_is_treated_as_retryable() {
+        let error = CoreError::UnexpectedStatus {
+            command: SmbCommand::Create,
+            status: NtStatus::PIPE_NOT_AVAILABLE.to_u32(),
+        };
+        assert!(is_pipe_not_ready(&error));
     }
 }

@@ -27,6 +27,8 @@ impl NtStatus {
     pub const LOGON_FAILURE: Self = Self(0xc000_006d);
     /// `STATUS_INVALID_NETWORK_RESPONSE`
     pub const INVALID_NETWORK_RESPONSE: Self = Self(0xc000_00c3);
+    /// `STATUS_PIPE_NOT_AVAILABLE`
+    pub const PIPE_NOT_AVAILABLE: Self = Self(0xc000_00ac);
 
     /// Returns the raw `u32` status code.
     #[must_use]
