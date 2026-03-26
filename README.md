@@ -118,6 +118,18 @@ SMOLDER_SAMBA_ENCRYPTED_SHARE=SMOLDERENC \
 cargo test -p smolder-core --test samba_encryption -- --nocapture
 ```
 
+For encrypted `IPC$` / named-pipe RPC coverage, the local Samba compose stack
+also exposes a second instance on port `1446` with `server smb encrypt =
+required`. Run the core RPC bind test with:
+
+```bash
+SMOLDER_SAMBA_HOST=127.0.0.1 \
+SMOLDER_SAMBA_PORT=1446 \
+SMOLDER_SAMBA_USERNAME=smolder \
+SMOLDER_SAMBA_PASSWORD=smolderpass \
+cargo test -p smolder-core --test samba_rpc_encryption -- --nocapture
+```
+
 ## Security Notice
 
 This tool is designed for security research and penetration testing. Always ensure you have proper authorization before testing any systems or networks.
