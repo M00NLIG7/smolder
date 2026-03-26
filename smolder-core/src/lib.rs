@@ -12,6 +12,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod crypto;
 pub mod dfs;
 pub mod error;
 pub mod pipe;
@@ -27,6 +28,7 @@ pub mod prelude {
         Authenticated, CompoundRequest, CompoundResponse, Connected, Connection, DurableHandle,
         DurableOpenOptions, Negotiated, ResilientHandle, TreeConnected,
     };
+    pub use crate::crypto::{derive_encryption_keys, EncryptionKeys};
     pub use crate::dfs::{resolve_unc_path, DfsReferral, UncPath};
     pub use crate::error::CoreError;
     pub use crate::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
