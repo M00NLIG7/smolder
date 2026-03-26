@@ -22,6 +22,8 @@ const AF_INET6: u16 = 0x0017;
 pub struct CtlCode(pub u32);
 
 impl CtlCode {
+    /// `FSCTL_LMR_REQUEST_RESILIENCY`
+    pub const FSCTL_LMR_REQUEST_RESILIENCY: Self = Self(0x0014_01d4);
     /// `FSCTL_SRV_REQUEST_RESUME_KEY`
     pub const FSCTL_SRV_REQUEST_RESUME_KEY: Self = Self(0x0014_0078);
     /// `FSCTL_QUERY_NETWORK_INTERFACE_INFO`
@@ -36,6 +38,41 @@ bitflags! {
     pub struct IoctlFlags: u32 {
         /// The control code is an FSCTL, not a device-specific IOCTL.
         const IS_FSCTL = 0x0000_0001;
+    }
+}
+
+/// Input buffer for `FSCTL_LMR_REQUEST_RESILIENCY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NetworkResiliencyRequest {
+    /// Requested resiliency timeout in milliseconds.
+    pub timeout: u32,
+}
+
+impl NetworkResiliencyRequest {
+    /// Encoded payload length.
+    pub const LEN: usize = 8;
+
+    /// Serializes the request payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LEN);
+        out.put_u32_le(self.timeout);
+        out.put_u32_le(0);
+        out
+    }
+
+    /// Parses the request payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != Self::LEN {
+            return Err(ProtocolError::InvalidField {
+                field: "network_resiliency_request",
+                reason: "unexpected resiliency request length",
+            });
+        }
+        let mut input = bytes;
+        let timeout = get_u32(&mut input, "timeout")?;
+        let _reserved = get_u32(&mut input, "reserved")?;
+        Ok(Self { timeout })
     }
 }
 
@@ -105,6 +142,17 @@ impl IoctlRequest {
             file_id,
             32,
             Vec::new(),
+        )
+    }
+
+    /// Builds `FSCTL_LMR_REQUEST_RESILIENCY`.
+    #[must_use]
+    pub fn request_resiliency(file_id: FileId, timeout: u32) -> Self {
+        Self::fsctl(
+            CtlCode::FSCTL_LMR_REQUEST_RESILIENCY,
+            file_id,
+            0,
+            NetworkResiliencyRequest { timeout }.encode(),
         )
     }
 

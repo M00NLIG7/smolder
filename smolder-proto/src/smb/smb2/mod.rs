@@ -36,8 +36,9 @@ pub use io::{
     WriteFlags, WriteRequest, WriteResponse,
 };
 pub use ioctl::{
-    CtlCode, IoctlFlags, IoctlRequest, IoctlResponse, NetworkAddress, NetworkInterfaceCapabilities,
-    NetworkInterfaceInfo, NetworkInterfaceInfoResponse, ResumeKeyResponse,
+    CtlCode, IoctlFlags, IoctlRequest, IoctlResponse, NetworkAddress,
+    NetworkInterfaceCapabilities, NetworkInterfaceInfo, NetworkInterfaceInfoResponse,
+    NetworkResiliencyRequest, ResumeKeyResponse,
 };
 pub use lock::{LockElement, LockFlags, LockRequest, LockResponse};
 pub use negotiate::{

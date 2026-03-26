@@ -4,12 +4,13 @@ use aes::Aes128;
 use cmac::Cmac;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
-use std::sync::Arc;
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    AsyncId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect, FileId,
-    FlushRequest, FlushResponse, Header, HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest,
-    LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
+    AsyncId, CloseRequest, CloseResponse, Command, CreateContext, CreateRequest, CreateResponse,
+    Dialect, DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2,
+    DurableHandleRequest, DurableHandleRequestV2, FileId, FlushRequest, FlushResponse, Header,
+    HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest, LogoffResponse, MessageId,
+    NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
     PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryRequest,
     QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse,
     ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
@@ -18,6 +19,7 @@ use smolder_proto::smb::smb2::{
     WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
+use std::sync::Arc;
 use tracing::{trace, trace_span, Instrument};
 
 use crate::auth::AuthProvider;
@@ -299,6 +301,128 @@ pub struct CompoundResponse {
     pub header: Header,
     /// The raw SMB2 response body for this element, including any compound alignment padding.
     pub body: Vec<u8>,
+}
+
+/// Options used when requesting a durable open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableOpenOptions {
+    /// Requested durable-open timeout in milliseconds for SMB 3.x durable-v2 opens.
+    pub timeout: u32,
+    /// Requested durable-handle flags, including persistent-handle requests.
+    pub flags: DurableHandleFlags,
+    /// Client-supplied durable-open identifier for SMB 3.x durable-v2 opens.
+    pub create_guid: Option<[u8; 16]>,
+}
+
+impl DurableOpenOptions {
+    /// Builds default durable-open options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the SMB 3.x durable-open identifier.
+    #[must_use]
+    pub fn with_create_guid(mut self, create_guid: [u8; 16]) -> Self {
+        self.create_guid = Some(create_guid);
+        self
+    }
+
+    /// Sets the requested durable-open timeout in milliseconds.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: u32) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Replaces the requested durable-handle flags.
+    #[must_use]
+    pub fn with_flags(mut self, flags: DurableHandleFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Enables or disables persistent-handle requests.
+    #[must_use]
+    pub fn with_persistent(mut self, persistent: bool) -> Self {
+        if persistent {
+            self.flags |= DurableHandleFlags::PERSISTENT;
+        } else {
+            self.flags.remove(DurableHandleFlags::PERSISTENT);
+        }
+        self
+    }
+}
+
+impl Default for DurableOpenOptions {
+    fn default() -> Self {
+        Self {
+            timeout: 0,
+            flags: DurableHandleFlags::empty(),
+            create_guid: None,
+        }
+    }
+}
+
+/// Reconnectable durable open state captured from a successful `CREATE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableHandle {
+    create_request: CreateRequest,
+    response: CreateResponse,
+    timeout: u32,
+    flags: DurableHandleFlags,
+    create_guid: Option<[u8; 16]>,
+}
+
+impl DurableHandle {
+    /// Returns the current server-assigned file identifier.
+    #[must_use]
+    pub fn file_id(&self) -> FileId {
+        self.response.file_id
+    }
+
+    /// Returns the original `CREATE` request used to establish the durable open.
+    #[must_use]
+    pub fn create_request(&self) -> &CreateRequest {
+        &self.create_request
+    }
+
+    /// Returns the most recent `CREATE` response for the durable open.
+    #[must_use]
+    pub fn create_response(&self) -> &CreateResponse {
+        &self.response
+    }
+
+    /// Returns the granted resilient/durable timeout in milliseconds.
+    #[must_use]
+    pub fn timeout(&self) -> u32 {
+        self.timeout
+    }
+
+    /// Returns the granted durable-handle flags.
+    #[must_use]
+    pub fn flags(&self) -> DurableHandleFlags {
+        self.flags
+    }
+
+    fn with_response(&self, response: CreateResponse) -> Self {
+        Self {
+            create_request: self.create_request.clone(),
+            response,
+            timeout: self.timeout,
+            flags: self.flags,
+            create_guid: self.create_guid,
+        }
+    }
+}
+
+/// File-handle resiliency state requested through `FSCTL_LMR_REQUEST_RESILIENCY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResilientHandle {
+    /// The file identifier covered by the resiliency request.
+    pub file_id: FileId,
+    /// The requested resiliency timeout in milliseconds.
+    pub timeout: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -797,6 +921,45 @@ where
             )
             .await?;
         Ok(response)
+    }
+
+    /// Performs a durable `CREATE` request and captures the reconnect state.
+    pub async fn create_durable(
+        &mut self,
+        request: &CreateRequest,
+        options: DurableOpenOptions,
+    ) -> Result<DurableHandle, CoreError> {
+        let durable_request = durable_create_request(self.state.negotiated.dialect_revision, request, &options)?;
+        let response = self.create(&durable_request).await?;
+        build_durable_handle(
+            self.state.negotiated.dialect_revision,
+            request,
+            response,
+            &options,
+        )
+    }
+
+    /// Replays a previously captured durable open against the current session/tree.
+    pub async fn reconnect_durable(
+        &mut self,
+        handle: &DurableHandle,
+    ) -> Result<DurableHandle, CoreError> {
+        let reconnect_request =
+            durable_reconnect_request(self.state.negotiated.dialect_revision, handle)?;
+        let response = self.create(&reconnect_request).await?;
+        Ok(handle.with_response(response))
+    }
+
+    /// Requests handle resiliency for an existing open file identifier.
+    pub async fn request_resiliency(
+        &mut self,
+        file_id: FileId,
+        timeout: u32,
+    ) -> Result<ResilientHandle, CoreError> {
+        let _ = self
+            .ioctl(&IoctlRequest::request_resiliency(file_id, timeout))
+            .await?;
+        Ok(ResilientHandle { file_id, timeout })
     }
 
     /// Performs a `READ` request on the active tree.
@@ -1430,6 +1593,119 @@ fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreError> {
     }
 
     Ok(packets)
+}
+
+fn durable_create_request(
+    dialect: Dialect,
+    request: &CreateRequest,
+    options: &DurableOpenOptions,
+) -> Result<CreateRequest, CoreError> {
+    let mut request = request.clone();
+    request.create_contexts = strip_durable_create_contexts(&request.create_contexts)?;
+    request.create_contexts.push(match dialect {
+        Dialect::Smb202 | Dialect::Smb210 => {
+            CreateContext::durable_handle_request(DurableHandleRequest)
+        }
+        Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311 => {
+            let create_guid = options.create_guid.ok_or(CoreError::InvalidInput(
+                "durable SMB 3.x opens require a create GUID",
+            ))?;
+            CreateContext::durable_handle_request_v2(DurableHandleRequestV2 {
+                timeout: options.timeout,
+                flags: options.flags,
+                create_guid,
+            })
+        }
+    });
+    Ok(request)
+}
+
+fn durable_reconnect_request(
+    dialect: Dialect,
+    handle: &DurableHandle,
+) -> Result<CreateRequest, CoreError> {
+    let mut request = handle.create_request.clone();
+    request.create_contexts = strip_durable_create_contexts(&request.create_contexts)?;
+    request.create_contexts.push(match dialect {
+        Dialect::Smb202 | Dialect::Smb210 => {
+            CreateContext::durable_handle_reconnect(DurableHandleReconnect {
+                file_id: handle.file_id(),
+            })
+        }
+        Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311 => {
+            let create_guid = handle.create_guid.ok_or(CoreError::InvalidInput(
+                "durable SMB 3.x reconnect is missing its create GUID",
+            ))?;
+            CreateContext::durable_handle_reconnect_v2(DurableHandleReconnectV2 {
+                file_id: handle.file_id(),
+                create_guid,
+                flags: handle.flags,
+            })
+        }
+    });
+    Ok(request)
+}
+
+fn build_durable_handle(
+    dialect: Dialect,
+    request: &CreateRequest,
+    response: CreateResponse,
+    options: &DurableOpenOptions,
+) -> Result<DurableHandle, CoreError> {
+    let (timeout, flags, create_guid) = match dialect {
+        Dialect::Smb202 | Dialect::Smb210 => {
+            let granted = response
+                .create_contexts
+                .iter()
+                .find_map(|context| context.durable_handle_response_data().transpose())
+                .transpose()?
+                .ok_or(CoreError::InvalidResponse(
+                    "durable open response did not include the granted durable context",
+                ))?;
+            let _ = granted;
+            (0, DurableHandleFlags::empty(), None)
+        }
+        Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311 => {
+            let granted = response
+                .create_contexts
+                .iter()
+                .find_map(|context| context.durable_handle_response_v2_data().transpose())
+                .transpose()?
+                .ok_or(CoreError::InvalidResponse(
+                    "durable v2 open response did not include the granted durable context",
+                ))?;
+            (
+                granted.timeout,
+                granted.flags,
+                Some(options.create_guid.ok_or(CoreError::InvalidInput(
+                    "durable SMB 3.x opens require a create GUID",
+                ))?),
+            )
+        }
+    };
+
+    Ok(DurableHandle {
+        create_request: request.clone(),
+        response,
+        timeout,
+        flags,
+        create_guid,
+    })
+}
+
+fn strip_durable_create_contexts(contexts: &[CreateContext]) -> Result<Vec<CreateContext>, CoreError> {
+    let mut filtered = Vec::with_capacity(contexts.len());
+    for context in contexts {
+        if context.durable_handle_request_data()?.is_some()
+            || context.durable_handle_reconnect_data()?.is_some()
+            || context.durable_handle_request_v2_data()?.is_some()
+            || context.durable_handle_reconnect_v2_data()?.is_some()
+        {
+            continue;
+        }
+        filtered.push(context.clone());
+    }
+    Ok(filtered)
 }
 
 fn validate_pending_response(header: &Header) -> Result<AsyncId, CoreError> {

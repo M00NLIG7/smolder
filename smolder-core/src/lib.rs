@@ -23,8 +23,8 @@ pub mod prelude {
         NtlmSessionSecurity,
     };
     pub use crate::client::{
-        Authenticated, CompoundRequest, CompoundResponse, Connected, Connection, Negotiated,
-        TreeConnected,
+        Authenticated, CompoundRequest, CompoundResponse, Connected, Connection, DurableHandle,
+        DurableOpenOptions, Negotiated, ResilientHandle, TreeConnected,
     };
     pub use crate::error::CoreError;
     pub use crate::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
