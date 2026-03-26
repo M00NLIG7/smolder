@@ -1,4 +1,8 @@
-//! Smolder tools crate
+//! High-level tools and integrations built on top of Smolder primitives.
+//!
+//! `smolder-tools` owns operator-facing workflows such as remote execution and
+//! CLI integrations. It depends on `smolder-core` for SMB/RPC primitives rather
+//! than extending the core crate with tool-specific behavior.
 //!
 //! Copyright (c) 2025 M00NLIG7
 

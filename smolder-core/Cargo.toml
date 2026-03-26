@@ -3,7 +3,7 @@ name = "smolder-core"
 version = "0.1.0"
 edition = "2021"
 authors = ["M00NLIG7"]
-description = "Smolder core - Part of the Smolder SMB toolkit"
+description = "SMB/RPC protocol, transport, and session primitives for Smolder"
 repository = "https://github.com/M00NLIG7/smolder"
 license = "MIT"
 

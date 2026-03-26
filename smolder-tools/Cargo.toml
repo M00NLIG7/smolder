@@ -3,7 +3,7 @@ name = "smolder-tools"
 version = "0.1.0"
 edition = "2021"
 authors = ["M00NLIG7"]
-description = "Smolder tools - Part of the Smolder SMB toolkit"
+description = "CLI tools and high-level operator workflows for Smolder"
 repository = "https://github.com/M00NLIG7/smolder"
 license = "MIT"
 

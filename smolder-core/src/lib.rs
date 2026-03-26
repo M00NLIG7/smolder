@@ -1,4 +1,8 @@
-//! Smolder core crate
+//! Protocol and transport primitives for Smolder.
+//!
+//! `smolder-core` is the reusable library layer. It owns SMB auth/session
+//! state, share/file primitives, and transport logic. High-level execution or
+//! operator workflows belong in `smolder-tools`, not this crate.
 //!
 //! Copyright (c) 2025 M00NLIG7
 
