@@ -8,6 +8,9 @@ changes, auth changes, pipe/RPC work, and tools-layer workflow changes.
 
 Detailed Samba fixture notes still live in [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md).
 
+For a single entrypoint instead of running each command manually, use
+[scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop.sh).
+
 ## Targets
 
 ### Tiny11 / Windows
@@ -62,7 +65,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Windows | encrypted file I/O | `windows_encryption.rs` |
 | `smolder-core` | Windows | named-pipe open/write/read over `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Windows | RPC bind plus `OpenSCManagerW` over `svcctl` | `rpc_interop.rs` |
-| `smolder-core` | Samba | negotiate, auth, file I/O, IOCTLs, lease-aware create, durable reconnect | `samba_negotiate.rs` |
+| `smolder-core` | Samba | negotiate, auth, file I/O, IOCTLs, lease-aware create, durable reconnect attempt | `samba_negotiate.rs` |
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Samba | encrypted RPC bind over `srvsvc` | `samba_rpc_encryption.rs` |
@@ -70,6 +73,34 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-tools` | Windows | encrypted-share requirement enforcement | `windows_encryption.rs` |
 | `smolder-tools` | Windows | DFS path resolution and CLI `mv` | `windows_dfs.rs` |
 | `smolder-tools` | Samba | high-level file facade and CLI smoke paths | `samba_high_level.rs`, `cli_smoke.rs` |
+
+## Harness
+
+Run every available target/layer from the currently configured environment:
+
+```bash
+scripts/run-interop.sh
+```
+
+Run only the Windows core matrix:
+
+```bash
+SMOLDER_WINDOWS_HOST=127.0.0.1 \
+SMOLDER_WINDOWS_USERNAME=windowsfixture \
+SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+scripts/run-interop.sh --windows --core
+```
+
+Run only the Samba matrix:
+
+```bash
+SMOLDER_SAMBA_HOST=127.0.0.1 \
+SMOLDER_SAMBA_USERNAME=smolder \
+SMOLDER_SAMBA_PASSWORD=smolderpass \
+scripts/run-interop.sh --samba
+```
+
+Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 
 ## Core Commands
 
@@ -240,3 +271,4 @@ cargo test -p smolder-tools --test cli_smoke -- --nocapture --test-threads=1
 - `smolder-tools` proves reconnection orchestration, DFS host-following, CLI behavior, and remote execution.
 - `svcctl` over `ncacn_np` is currently validated as plain DCE/RPC bind over an already-authenticated SMB session.
 - The local Samba encrypted `IPC$` fixture is the current pipe/RPC regression target for cross-server encryption behavior.
+- The local Samba fixture can reject the resiliency IOCTL and lose durable reopen state after transport drop; the live durable reconnect gate records that as a skip instead of a hard failure.

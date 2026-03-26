@@ -134,6 +134,9 @@ cargo test -p smolder-core --test samba_rpc_encryption -- --nocapture
 
 The current supported live matrix, target fixtures, and repeatable verification
 commands are documented in [docs/testing/interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md).
+Use [scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop.sh) for a single
+entrypoint that fans out to the enabled Windows and Samba gates from the current
+environment.
 
 ## Security Notice
 

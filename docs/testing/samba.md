@@ -152,6 +152,8 @@ When Samba selects `SMB 3.1.1`, Smolder now tracks the preauth transcript across
 
 The current local Samba fixture accepts lease-aware opens, but it does not consistently grant a lease back under its current policy. The live lease tests therefore verify that lease-aware `CREATE` requests interoperate and only assert the granted lease details when the server actually returns them.
 
+The same local fixture can also reject `FSCTL_LMR_REQUEST_RESILIENCY` and drop durable reopen state after a transport break. The live durable reconnect gate still attempts that flow, but it downgrades those fixture-specific failures to skips instead of treating them as protocol regressions.
+
 ## Next External Gates
 
 The current live coverage now reaches:
