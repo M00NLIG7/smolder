@@ -18,25 +18,42 @@ The target end state is a safe Rust SMB/RPC library in `smolder-core` plus a thi
 4. Prefer protocol-first changes in `smolder-proto`, then session/transport work in `smolder-core`, then tool adoption in `smolder-tools`.
 5. Keep commits atomic and stage only files owned by the current step.
 
-## Current Gaps
+## Status Snapshot
 
-- Boundary leak: [smolder-core/src/fs.rs](/Users/cmagana/Projects/smolder/smolder-core/src/fs.rs) still exports `SmbClientBuilder`, `SmbClient`, `Share`, and `RemoteFile`, which are higher-level facades rather than strict primitives.
-- Missing SMB2/3 command families: [smolder-proto/src/smb/smb2/mod.rs](/Users/cmagana/Projects/smolder/smolder-proto/src/smb/smb2/mod.rs) has negotiate/session/tree/create/io/info/ioctl, but no first-class `LOCK`, `CHANGE_NOTIFY`, `ECHO`, or `CANCEL`.
-- Compound engine gap: [smolder-proto/src/smb/smb2/header.rs](/Users/cmagana/Projects/smolder/smolder-proto/src/smb/smb2/header.rs) already exposes `next_command`, but [smolder-core/src/client.rs](/Users/cmagana/Projects/smolder/smolder-core/src/client.rs) does not yet expose a real compound request engine.
-- RPC auth gap: [smolder-proto/src/rpc/mod.rs](/Users/cmagana/Projects/smolder/smolder-proto/src/rpc/mod.rs) currently supports unauthenticated connection-oriented PDUs only.
-- Named-pipe gap: named-pipe behavior is embedded indirectly through remote-exec code in [smolder-tools/src/remote_exec.rs](/Users/cmagana/Projects/smolder/smolder-tools/src/remote_exec.rs) instead of being a clean reusable core API.
-- Transport feature gap: signing and SMB 3.1.1 preauth already exist in [smolder-core/src/client.rs](/Users/cmagana/Projects/smolder/smolder-core/src/client.rs), but encryption/sealing, durable reconnect, and DFS behavior are still missing.
+The original nine-step roadmap below has been completed on the current branch.
+
+Completed milestones:
+
+- `smolder-core` now owns transport, auth/session, compound dispatch, DFS helpers,
+  named pipes, DCE/RPC, durable/reconnect logic, and SMB3 sealing primitives.
+- `smolder-tools` owns the high-level SMB facade, DFS-aware workflows, reconnect
+  helpers, CLI behavior, and remote execution flows.
+- The old core-side high-level facade source has been removed; there is no live
+  `smolder-core` file/share wrapper anymore.
+- Samba interop is automated in CI, and the Tiny11 / Windows matrix is covered
+  by a documented manual release gate.
+
+## Remaining Gaps
+
+- Windows automation gap: the Tiny11 interoperability gate is still manual or
+  self-hosted rather than running in hosted CI.
+- Interop depth gap: Samba encrypted RPC coverage now performs a real `srvsvc`
+  call, but broader interface coverage remains optional future work.
+- Out-of-scope feature gap: Kerberos, SMB1, and full Samba `selftest` parity
+  are still intentionally outside this track.
 
 ## Dependency Graph
 
-- Step 1 is the boundary cleanup and should land first.
-- Step 2 enables Step 3.
-- Step 4 enables Steps 5 and 6.
-- Step 5 should land before Step 8.
-- Step 6 should land before Step 9.
-- Step 7 can start after Step 4, but it is lower priority than Steps 2 through 6.
-- Step 8 can start after Steps 4 and 5.
-- Step 9 is the final gate and should widen coverage across the earlier steps.
+This was the original execution order for the completed work:
+
+- Step 1 enabled the boundary cleanup.
+- Step 2 enabled Step 3.
+- Step 4 enabled Steps 5 and 6.
+- Step 5 landed before Step 8.
+- Step 6 landed before Step 9.
+- Step 7 followed the earlier pipe/RPC and reconnect work.
+- Step 8 landed after Steps 4 and 5.
+- Step 9 closed the loop with the interoperability matrix.
 
 ## Step 1
 
@@ -49,16 +66,16 @@ Why:
 Target files:
 
 - [smolder-core/src/lib.rs](/Users/cmagana/Projects/smolder/smolder-core/src/lib.rs)
-- [smolder-core/src/fs.rs](/Users/cmagana/Projects/smolder/smolder-core/src/fs.rs)
 - [smolder-tools/src/lib.rs](/Users/cmagana/Projects/smolder/smolder-tools/src/lib.rs)
 - [smolder-tools/src/main.rs](/Users/cmagana/Projects/smolder/smolder-tools/src/main.rs)
-- `smolder-tools/src/fs.rs` (new)
-- [smolder-core/tests/samba_high_level.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/samba_high_level.rs)
+- [smolder-tools/src/fs.rs](/Users/cmagana/Projects/smolder/smolder-tools/src/fs.rs)
+- `smolder-tools/src/fs/implementation.rs` (new)
 - [smolder-tools/tests/cli_smoke.rs](/Users/cmagana/Projects/smolder/smolder-tools/tests/cli_smoke.rs)
 
 Tasks:
 
 - Move `SmbClientBuilder`, `SmbClient`, `Share`, `RemoteFile`, and the higher-level transfer helpers out of `smolder-core`.
+- Delete the orphaned core-side facade source once the tools-layer copy is live.
 - Leave typestate connection/session primitives in `smolder-core`.
 - Keep the CLI on `smolder-tools` APIs only.
 - Move high-level Samba tests with the facade.
@@ -336,6 +353,8 @@ Exit criteria:
 
 ## Suggested Execution Order
 
+Completed on the current branch:
+
 1. Step 1
 2. Step 2
 3. Step 3
@@ -346,7 +365,7 @@ Exit criteria:
 8. Step 7
 9. Step 9
 
-Reasoning:
+Original reasoning:
 
 - Steps 1 through 3 make the crate boundary real and unlock the `psexec`/`winexe`-style model.
 - Steps 4 through 6 fill the most important missing SMB library semantics.
@@ -360,9 +379,3 @@ If a step turns out to be too large for one atomic commit:
 1. Split only that step into `part 1` and `part 2`.
 2. Preserve the same boundary and verification goals.
 3. Do not pull later-scope work forward just because the touched files overlap.
-
-If Step 1 reveals that some file APIs truly belong in `smolder-core`:
-
-- Keep only low-level open/read/write/query/close primitives in core.
-- Move builder/session/share/file convenience wrappers to tools.
-- Update this roadmap before starting Step 2.
