@@ -1,0 +1,42 @@
+name: Samba Interop
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  samba-interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SMOLDER_SAMBA_HOST: 127.0.0.1
+      SMOLDER_SAMBA_USERNAME: smolder
+      SMOLDER_SAMBA_PASSWORD: smolderpass
+      SMOLDER_SAMBA_SHARE: share
+      SMOLDER_SAMBA_DOMAIN: WORKGROUP
+      SMOLDER_SAMBA_ENCRYPTED_SHARE: SMOLDERENC
+      SMOLDER_SAMBA_RPC_PORT: 1446
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Start Samba fixtures
+        run: |
+          docker compose -f docker/samba/compose.yaml up -d
+          docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
+
+      - name: Show Samba fixture status
+        run: docker compose -f docker/samba/compose.yaml ps
+
+      - name: Run Samba core and tools matrix
+        run: scripts/run-interop.sh --samba --core --tools
+
+      - name: Stop Samba fixtures
+        if: always()
+        run: docker compose -f docker/samba/compose.yaml down -v

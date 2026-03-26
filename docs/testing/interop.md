@@ -11,6 +11,10 @@ Detailed Samba fixture notes still live in [samba.md](/Users/cmagana/Projects/sm
 For a single entrypoint instead of running each command manually, use
 [scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop.sh).
 
+The repository also includes a GitHub Actions workflow at
+[interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml)
+that runs the Samba-backed subset on hosted Linux runners.
+
 ## Targets
 
 ### Tiny11 / Windows
@@ -101,6 +105,11 @@ scripts/run-interop.sh --samba
 ```
 
 Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
+
+## CI Boundary
+
+- GitHub Actions runs the Samba-backed subset through `scripts/run-interop.sh --samba --core --tools`.
+- Tiny11 / Windows gates stay manual or self-hosted because they depend on the local VM fixture, local credentials, and the current port-forward setup.
 
 ## Core Commands
 
