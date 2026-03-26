@@ -271,8 +271,8 @@ mod tests {
         assert_eq!(decoded_request, request);
 
         let encoded_response = response.encode();
-        let decoded_response = TreeDisconnectResponse::decode(&encoded_response)
-            .expect("response should decode");
+        let decoded_response =
+            TreeDisconnectResponse::decode(&encoded_response).expect("response should decode");
         assert_eq!(decoded_response, response);
     }
 }

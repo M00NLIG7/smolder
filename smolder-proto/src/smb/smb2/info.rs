@@ -55,8 +55,7 @@ impl QueryDirectoryRequest {
     #[must_use]
     pub fn for_pattern(file_id: FileId, pattern: &str, output_buffer_length: u32) -> Self {
         Self {
-            file_information_class:
-                QueryDirectoryFileInformationClass::FileDirectoryInformation,
+            file_information_class: QueryDirectoryFileInformationClass::FileDirectoryInformation,
             flags: QueryDirectoryFlags::RESTART_SCANS,
             file_index: 0,
             file_id,
@@ -91,23 +90,21 @@ impl QueryDirectoryRequest {
     pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
         let mut input = body;
         check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 33, "structure_size")?;
-        let file_information_class =
-            match super::get_u8(&mut input, "file_information_class")? {
-                0x01 => QueryDirectoryFileInformationClass::FileDirectoryInformation,
-                _ => {
-                    return Err(ProtocolError::InvalidField {
-                        field: "file_information_class",
-                        reason: "unknown query-directory information class",
-                    })
-                }
-            };
-        let flags =
-            QueryDirectoryFlags::from_bits(super::get_u8(&mut input, "flags")?).ok_or(
-                ProtocolError::InvalidField {
-                    field: "flags",
-                    reason: "unknown query-directory flags set",
-                },
-            )?;
+        let file_information_class = match super::get_u8(&mut input, "file_information_class")? {
+            0x01 => QueryDirectoryFileInformationClass::FileDirectoryInformation,
+            _ => {
+                return Err(ProtocolError::InvalidField {
+                    field: "file_information_class",
+                    reason: "unknown query-directory information class",
+                })
+            }
+        };
+        let flags = QueryDirectoryFlags::from_bits(super::get_u8(&mut input, "flags")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "flags",
+                reason: "unknown query-directory flags set",
+            },
+        )?;
         let file_index = get_u32(&mut input, "file_index")?;
         let file_id = FileId {
             persistent: get_u64(&mut input, "file_id_persistent")?,
@@ -252,9 +249,7 @@ impl QueryDirectoryResponse {
                 )?;
             let file_name_length = get_u32(&mut input, "file_name_length")? as usize;
             if file_name_length > input.len() {
-                return Err(ProtocolError::UnexpectedEof {
-                    field: "file_name",
-                });
+                return Err(ProtocolError::UnexpectedEof { field: "file_name" });
             }
             let file_name = utf16le_string(&input[..file_name_length])?;
 
@@ -407,8 +402,13 @@ impl QueryInfoRequest {
         let input_buffer = if input_buffer_offset == 0 || input_buffer_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(body, input_buffer_offset, input_buffer_length, "input_buffer")?
-                .to_vec()
+            slice_from_offset(
+                body,
+                input_buffer_offset,
+                input_buffer_length,
+                "input_buffer",
+            )?
+            .to_vec()
         };
 
         Ok(Self {
@@ -492,13 +492,11 @@ impl FileBasicInformation {
         let last_access_time = get_u64(&mut input, "last_access_time")?;
         let last_write_time = get_u64(&mut input, "last_write_time")?;
         let change_time = get_u64(&mut input, "change_time")?;
-        let file_attributes =
-            FileAttributes::from_bits(get_u32(&mut input, "file_attributes")?).ok_or(
-                ProtocolError::InvalidField {
-                    field: "file_attributes",
-                    reason: "unknown file attribute bits set",
-                },
-            )?;
+        let file_attributes = FileAttributes::from_bits(get_u32(&mut input, "file_attributes")?)
+            .ok_or(ProtocolError::InvalidField {
+                field: "file_attributes",
+                reason: "unknown file attribute bits set",
+            })?;
         let _reserved = get_u32(&mut input, "reserved")?;
         Ok(Self {
             creation_time,

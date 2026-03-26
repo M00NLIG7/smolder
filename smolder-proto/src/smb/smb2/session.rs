@@ -207,7 +207,8 @@ mod tests {
         let response = LogoffResponse;
 
         let encoded_request = request.encode();
-        let decoded_request = LogoffRequest::decode(&encoded_request).expect("request should decode");
+        let decoded_request =
+            LogoffRequest::decode(&encoded_request).expect("request should decode");
         assert_eq!(decoded_request, request);
 
         let encoded_response = response.encode();
