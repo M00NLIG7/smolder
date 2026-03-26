@@ -26,6 +26,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Prepare Samba fixture directories
+        run: scripts/prepare-samba-fixture.sh
+
       - name: Start Samba fixtures
         run: |
           docker compose -f docker/samba/compose.yaml up -d

@@ -84,8 +84,13 @@ The repo now includes a pinned Docker Compose target at [docker/samba/compose.ya
 Bring it up with:
 
 ```bash
+scripts/prepare-samba-fixture.sh
 docker compose -f docker/samba/compose.yaml up -d
 ```
+
+The prep step matters on Linux hosts and GitHub Actions runners: it makes the
+bind-mounted share directories writable by the Samba container user so live
+`CREATE` tests do not fail with `STATUS_ACCESS_DENIED (0xc0000022)`.
 
 Then point the tests at it:
 

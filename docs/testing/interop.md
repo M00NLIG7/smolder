@@ -65,6 +65,7 @@ export SMOLDER_SAMBA_PASSWORD=smolderpass
 Start the local fixtures with:
 
 ```bash
+scripts/prepare-samba-fixture.sh
 docker compose -f docker/samba/compose.yaml up -d
 docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 ```
