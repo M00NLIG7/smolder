@@ -1,21 +1,27 @@
 //! SMB2/3 wire types.
 
+mod cancel;
 mod create;
+mod echo;
 mod header;
 mod info;
 mod io;
 mod ioctl;
+mod lock;
 mod negotiate;
+mod notify;
 mod session;
 mod tree;
 
 use bytes::Buf;
 
+pub use cancel::CancelRequest;
 pub use create::{
     CloseRequest, CloseResponse, CreateContext, CreateDisposition, CreateOptions, CreateRequest,
     CreateResponse, FileAttributes, FileId, LeaseFlags, LeaseState, LeaseV2, OplockLevel,
     RequestedOplockLevel, ShareAccess,
 };
+pub use echo::{EchoRequest, EchoResponse};
 pub use header::{Command, Header, HeaderFlags};
 pub use info::{
     DirectoryInformationEntry, DispositionInformation, FileBasicInformation, FileInfoClass,
@@ -31,10 +37,12 @@ pub use ioctl::{
     CtlCode, IoctlFlags, IoctlRequest, IoctlResponse, NetworkAddress, NetworkInterfaceCapabilities,
     NetworkInterfaceInfo, NetworkInterfaceInfoResponse, ResumeKeyResponse,
 };
+pub use lock::{LockElement, LockFlags, LockRequest, LockResponse};
 pub use negotiate::{
     Dialect, GlobalCapabilities, NegotiateContext, NegotiateContextType, NegotiateRequest,
     NegotiateResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId, SigningMode,
 };
+pub use notify::{ChangeNotifyFlags, ChangeNotifyRequest, ChangeNotifyResponse, CompletionFilter};
 pub use session::{
     LogoffRequest, LogoffResponse, SessionFlags, SessionSetupRequest, SessionSetupResponse,
     SessionSetupSecurityMode,

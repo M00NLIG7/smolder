@@ -52,10 +52,18 @@ pub enum Command {
     Read = 0x0008,
     /// `WRITE`
     Write = 0x0009,
+    /// `LOCK`
+    Lock = 0x000a,
     /// `IOCTL`
     Ioctl = 0x000b,
+    /// `CANCEL`
+    Cancel = 0x000c,
+    /// `ECHO`
+    Echo = 0x000d,
     /// `QUERY_DIRECTORY`
     QueryDirectory = 0x000e,
+    /// `CHANGE_NOTIFY`
+    ChangeNotify = 0x000f,
     /// `QUERY_INFO`
     QueryInfo = 0x0010,
     /// `SET_INFO`
@@ -77,8 +85,12 @@ impl TryFrom<u16> for Command {
             0x0007 => Ok(Self::Flush),
             0x0008 => Ok(Self::Read),
             0x0009 => Ok(Self::Write),
+            0x000a => Ok(Self::Lock),
             0x000b => Ok(Self::Ioctl),
+            0x000c => Ok(Self::Cancel),
+            0x000d => Ok(Self::Echo),
             0x000e => Ok(Self::QueryDirectory),
+            0x000f => Ok(Self::ChangeNotify),
             0x0010 => Ok(Self::QueryInfo),
             0x0011 => Ok(Self::SetInfo),
             _ => Err(ProtocolError::InvalidField {
