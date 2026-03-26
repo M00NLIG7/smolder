@@ -21,6 +21,7 @@ use smolder_proto::smb::smb2::{
     QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation, SetInfoRequest,
     ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
+use smolder_core::dfs::{resolve_unc_path, DfsReferral, UncPath};
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
 use crate::client::{Authenticated, Connection, TreeConnected};
@@ -352,6 +353,22 @@ where
             ));
         }
         self.share(share).await
+    }
+
+    /// Resolves a UNC path through caller-supplied DFS referrals, connects to the
+    /// resolved share, and returns the remaining relative path within that share.
+    ///
+    /// This method does not fetch referrals from the network. The caller must
+    /// supply any DFS namespace mappings it wants applied.
+    pub async fn share_path_with_referrals(
+        self,
+        unc: impl AsRef<str>,
+        referrals: &[DfsReferral],
+    ) -> Result<(Share<T>, String), CoreError> {
+        let (share_name, relative_path) =
+            resolve_share_path_with_referrals(&self.server, unc.as_ref(), referrals)?;
+        let share = self.share(&share_name).await?;
+        Ok((share, relative_path))
     }
 }
 
@@ -1621,12 +1638,32 @@ fn parse_unc_share(unc: &str) -> Result<(String, String), CoreError> {
     Ok((server.to_string(), share.to_string()))
 }
 
+fn resolve_share_path_with_referrals(
+    connected_server: &str,
+    unc: &str,
+    referrals: &[DfsReferral],
+) -> Result<(String, String), CoreError> {
+    let original = UncPath::parse(unc)?;
+    let resolved = resolve_unc_path(&original, referrals);
+    if !resolved.server().eq_ignore_ascii_case(connected_server) {
+        return Err(CoreError::PathInvalid(
+            "resolved UNC host does not match the connected SMB session",
+        ));
+    }
+
+    Ok((
+        normalize_share_name(resolved.share())?,
+        resolved.path().join("\\"),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::io::SeekFrom;
 
     use async_trait::async_trait;
+    use smolder_core::dfs::{DfsReferral, UncPath};
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
         CipherId, CloseResponse, Command, CreateContext, CreateDisposition, CreateOptions,
@@ -2707,7 +2744,70 @@ mod tests {
         );
     }
 
-    async fn build_share(reads: Vec<Vec<u8>>) -> Share<ScriptedTransport> {
+    #[tokio::test]
+    async fn share_path_with_referrals_connects_to_resolved_backend_share() {
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let client = build_client(
+            "server-b",
+            vec![response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                11,
+                7,
+                tree_response.encode(),
+            )],
+        )
+        .await;
+        let referrals = vec![DfsReferral::new(
+            UncPath::parse(r"\\domain\dfs\team").expect("namespace should parse"),
+            UncPath::parse(r"\\server-b\teamshare\docsroot").expect("target should parse"),
+        )];
+
+        let (share, relative_path) = client
+            .share_path_with_referrals(r"\\domain\dfs\team\report.txt", &referrals)
+            .await
+            .expect("DFS share path should resolve");
+
+        assert_eq!(share.server(), "server-b");
+        assert_eq!(share.name(), "teamshare");
+        assert_eq!(relative_path, r"docsroot\report.txt");
+
+        let writes = transport_writes(share);
+        let tree_connect = SessionMessage::decode(&writes[2]).expect("frame should decode");
+        let request = TreeConnectRequest::decode(&tree_connect.payload[Header::LEN..])
+            .expect("request should decode");
+        assert_eq!(
+            request.path,
+            smolder_proto::smb::smb2::utf16le(r"\\server-b\teamshare")
+        );
+    }
+
+    #[tokio::test]
+    async fn share_path_with_referrals_rejects_different_backend_host() {
+        let client = build_client("server-a", Vec::new()).await;
+        let referrals = vec![DfsReferral::new(
+            UncPath::parse(r"\\domain\dfs\team").expect("namespace should parse"),
+            UncPath::parse(r"\\server-b\teamshare\docsroot").expect("target should parse"),
+        )];
+
+        let error = client
+            .share_path_with_referrals(r"\\domain\dfs\team\report.txt", &referrals)
+            .await
+            .expect_err("different backend host should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid path: resolved UNC host does not match the connected SMB session"
+        );
+    }
+
+    async fn build_client(server: &str, reads: Vec<Vec<u8>>) -> SmbClient<ScriptedTransport> {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb302,
@@ -2785,7 +2885,11 @@ mod tests {
             .session_setup(&session_request)
             .await
             .expect("session setup should succeed");
-        let client = SmbClient::from_connection("server", connection).with_transfer_chunk_size(4);
+        SmbClient::from_connection(server, connection).with_transfer_chunk_size(4)
+    }
+
+    async fn build_share(reads: Vec<Vec<u8>>) -> Share<ScriptedTransport> {
+        let client = build_client("server", reads).await;
         client
             .share("share")
             .await
