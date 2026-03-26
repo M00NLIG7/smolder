@@ -27,7 +27,7 @@ bitflags! {
         const FIRST_FRAGMENT = 0x01;
         /// Last fragment in the sequence.
         const LAST_FRAGMENT = 0x02;
-        /// Cancel pending.
+        /// Cancel pending, or `SUPPORT_HEADER_SIGN` on bind-family and auth3 PDUs.
         const PENDING_CANCEL = 0x04;
         /// Concurrent multiplexing supported.
         const CONCURRENT_MULTIPLEX = 0x10;
@@ -36,6 +36,11 @@ bitflags! {
         /// Packet contains an object UUID in the request body.
         const OBJECT_UUID = 0x80;
     }
+}
+
+impl PacketFlags {
+    /// Header-sign support on bind-family and `rpc_auth_3` PDUs.
+    pub const SUPPORT_HEADER_SIGN: Self = Self::from_bits_retain(0x04);
 }
 
 /// Connection-oriented DCE/RPC packet type.
@@ -52,6 +57,8 @@ pub enum PacketType {
     Bind = 11,
     /// Bind acknowledgement PDU.
     BindAck = 12,
+    /// Third leg of a three-leg secure RPC bind.
+    RpcAuth3 = 16,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -64,6 +71,7 @@ impl TryFrom<u8> for PacketType {
             3 => Ok(Self::Fault),
             11 => Ok(Self::Bind),
             12 => Ok(Self::BindAck),
+            16 => Ok(Self::RpcAuth3),
             _ => Err(ProtocolError::InvalidField {
                 field: "packet_type",
                 reason: "unknown packet type",
@@ -354,6 +362,8 @@ impl CommonHeader {
 pub struct BindPdu {
     /// Call identifier.
     pub call_id: u32,
+    /// Packet flags.
+    pub flags: PacketFlags,
     /// Maximum transmit fragment size.
     pub max_xmit_frag: u16,
     /// Maximum receive fragment size.
@@ -391,7 +401,7 @@ impl BindPdu {
         let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body.len());
         CommonHeader {
             packet_type: PacketType::Bind,
-            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            flags: self.flags,
             frag_length: (COMMON_HEADER_LEN + body.len()) as u16,
             auth_length,
             call_id: self.call_id,
@@ -436,6 +446,7 @@ impl BindPdu {
         let transfer_syntax = SyntaxId::decode(&mut body, "transfer_syntax")?;
         Ok(Self {
             call_id: header.call_id,
+            flags: header.flags,
             max_xmit_frag,
             max_recv_frag,
             assoc_group_id,
@@ -463,6 +474,8 @@ pub struct BindAckResult {
 pub struct BindAckPdu {
     /// Call identifier.
     pub call_id: u32,
+    /// Packet flags.
+    pub flags: PacketFlags,
     /// Maximum transmit fragment size.
     pub max_xmit_frag: u16,
     /// Maximum receive fragment size.
@@ -502,7 +515,7 @@ impl BindAckPdu {
         let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body.len());
         CommonHeader {
             packet_type: PacketType::BindAck,
-            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            flags: self.flags,
             frag_length: (COMMON_HEADER_LEN + body.len()) as u16,
             auth_length,
             call_id: self.call_id,
@@ -546,6 +559,7 @@ impl BindAckPdu {
         let transfer_syntax = SyntaxId::decode(&mut body, "transfer_syntax")?;
         Ok(Self {
             call_id: header.call_id,
+            flags: header.flags,
             max_xmit_frag,
             max_recv_frag,
             assoc_group_id,
@@ -556,6 +570,78 @@ impl BindAckPdu {
                 transfer_syntax,
             },
             auth_verifier,
+        })
+    }
+}
+
+/// `rpc_auth_3` PDU carrying the final leg of a three-leg secure RPC bind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcAuth3Pdu {
+    /// Call identifier.
+    pub call_id: u32,
+    /// Packet flags.
+    pub flags: PacketFlags,
+    /// Four-byte pad field ignored on receipt.
+    pub pad: [u8; 4],
+    /// Authentication verifier and token.
+    pub auth_verifier: AuthVerifier,
+}
+
+impl RpcAuth3Pdu {
+    /// Encodes the `rpc_auth_3` PDU.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body =
+            Vec::with_capacity(4 + SEC_TRAILER_LEN + self.auth_verifier.auth_value.len());
+        body.extend_from_slice(&self.pad);
+        let auth_length = append_auth_verifier(&mut body, Some(&self.auth_verifier));
+
+        let mut out = Vec::with_capacity(COMMON_HEADER_LEN + body.len());
+        CommonHeader {
+            packet_type: PacketType::RpcAuth3,
+            flags: self.flags,
+            frag_length: (COMMON_HEADER_LEN + body.len()) as u16,
+            auth_length,
+            call_id: self.call_id,
+        }
+        .encode_into(&mut out);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Decodes the `rpc_auth_3` PDU.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let (header, body) = CommonHeader::decode(bytes)?;
+        if header.packet_type != PacketType::RpcAuth3 {
+            return Err(ProtocolError::InvalidField {
+                field: "packet_type",
+                reason: "expected rpc_auth_3 pdu",
+            });
+        }
+        if header.auth_length == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "auth_length",
+                reason: "rpc_auth_3 requires an authentication verifier",
+            });
+        }
+
+        let (mut body, auth_verifier) = split_auth_verifier(body, header.auth_length)?;
+        let pad = get_array::<4>(&mut body, "pad")?;
+        if !body.is_empty() {
+            return Err(ProtocolError::InvalidField {
+                field: "rpc_auth_3",
+                reason: "unexpected trailing bytes in rpc_auth_3 pad field",
+            });
+        }
+
+        Ok(Self {
+            call_id: header.call_id,
+            flags: header.flags,
+            pad,
+            auth_verifier: auth_verifier.ok_or(ProtocolError::InvalidField {
+                field: "auth_verifier",
+                reason: "rpc_auth_3 requires an authentication verifier",
+            })?,
         })
     }
 }
@@ -794,6 +880,8 @@ pub enum Packet {
     Bind(BindPdu),
     /// Bind-ack response packet.
     BindAck(BindAckPdu),
+    /// `rpc_auth_3` packet.
+    RpcAuth3(RpcAuth3Pdu),
     /// Request packet.
     Request(RequestPdu),
     /// Response packet.
@@ -809,6 +897,7 @@ impl Packet {
         match self {
             Self::Bind(packet) => packet.encode(),
             Self::BindAck(packet) => packet.encode(),
+            Self::RpcAuth3(packet) => packet.encode(),
             Self::Request(packet) => packet.encode(),
             Self::Response(packet) => packet.encode(),
             Self::Fault(packet) => packet.encode(),
@@ -821,6 +910,7 @@ impl Packet {
         match header.packet_type {
             PacketType::Bind => BindPdu::decode(bytes).map(Self::Bind),
             PacketType::BindAck => BindAckPdu::decode(bytes).map(Self::BindAck),
+            PacketType::RpcAuth3 => RpcAuth3Pdu::decode(bytes).map(Self::RpcAuth3),
             PacketType::Request => RequestPdu::decode(bytes).map(Self::Request),
             PacketType::Response => ResponsePdu::decode(bytes).map(Self::Response),
             PacketType::Fault => FaultPdu::decode(bytes).map(Self::Fault),
@@ -969,7 +1059,7 @@ fn skip_padding(input: &mut &[u8], len: usize, field: &'static str) -> Result<()
 mod tests {
     use super::{
         AuthLevel, AuthType, AuthVerifier, BindAckPdu, BindAckResult, BindPdu, Packet, PacketFlags,
-        RequestPdu, ResponsePdu, SyntaxId, Uuid,
+        RequestPdu, ResponsePdu, RpcAuth3Pdu, SyntaxId, Uuid,
     };
 
     const SVCCTL_SYNTAX: SyntaxId = SyntaxId::new(
@@ -987,6 +1077,7 @@ mod tests {
     fn bind_roundtrips() {
         let packet = BindPdu {
             call_id: 3,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
             assoc_group_id: 9,
@@ -1004,6 +1095,9 @@ mod tests {
     fn bind_roundtrips_with_auth_verifier() {
         let packet = BindPdu {
             call_id: 3,
+            flags: PacketFlags::FIRST_FRAGMENT
+                | PacketFlags::LAST_FRAGMENT
+                | PacketFlags::SUPPORT_HEADER_SIGN,
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
             assoc_group_id: 9,
@@ -1026,6 +1120,9 @@ mod tests {
     fn bind_ack_roundtrips() {
         let packet = BindAckPdu {
             call_id: 3,
+            flags: PacketFlags::FIRST_FRAGMENT
+                | PacketFlags::LAST_FRAGMENT
+                | PacketFlags::SUPPORT_HEADER_SIGN,
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
             assoc_group_id: 12,
@@ -1039,6 +1136,26 @@ mod tests {
         };
         let encoded = packet.encode();
         let decoded = BindAckPdu::decode(&encoded).expect("bind ack should decode");
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn rpc_auth_3_roundtrips_auth_verifier() {
+        let packet = RpcAuth3Pdu {
+            call_id: 12,
+            flags: PacketFlags::FIRST_FRAGMENT
+                | PacketFlags::LAST_FRAGMENT
+                | PacketFlags::SUPPORT_HEADER_SIGN,
+            pad: [0xaa, 0xbb, 0xcc, 0xdd],
+            auth_verifier: AuthVerifier::new(
+                AuthType::WinNt,
+                AuthLevel::Connect,
+                1,
+                vec![0x44; 24],
+            ),
+        };
+        let encoded = packet.encode();
+        let decoded = RpcAuth3Pdu::decode(&encoded).expect("rpc_auth_3 should decode");
         assert_eq!(decoded, packet);
     }
 
@@ -1103,6 +1220,7 @@ mod tests {
     fn packet_dispatch_decodes_bind_ack() {
         let packet = Packet::BindAck(BindAckPdu {
             call_id: 4,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
             assoc_group_id: 19,

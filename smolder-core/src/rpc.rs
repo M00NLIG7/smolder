@@ -66,7 +66,13 @@ where
         context_id: u16,
         abstract_syntax: SyntaxId,
     ) -> Result<BindAckPdu, CoreError> {
-        self.bind_with_auth(context_id, abstract_syntax, None).await
+        self.bind_with_flags_and_auth(
+            context_id,
+            abstract_syntax,
+            PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            None,
+        )
+        .await
     }
 
     /// Sends a bind PDU with an optional authentication verifier.
@@ -76,8 +82,26 @@ where
         abstract_syntax: SyntaxId,
         auth_verifier: Option<AuthVerifier>,
     ) -> Result<BindAckPdu, CoreError> {
+        self.bind_with_flags_and_auth(
+            context_id,
+            abstract_syntax,
+            PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            auth_verifier,
+        )
+        .await
+    }
+
+    /// Sends a bind PDU with explicit packet flags and an optional authentication verifier.
+    pub async fn bind_with_flags_and_auth(
+        &mut self,
+        context_id: u16,
+        abstract_syntax: SyntaxId,
+        flags: PacketFlags,
+        auth_verifier: Option<AuthVerifier>,
+    ) -> Result<BindAckPdu, CoreError> {
         let bind = Packet::Bind(BindPdu {
             call_id: self.next_call_id(),
+            flags,
             max_xmit_frag: self.pipe.fragment_size() as u16,
             max_recv_frag: self.pipe.fragment_size() as u16,
             assoc_group_id: 0,
@@ -306,6 +330,7 @@ mod tests {
         );
         let pipe = open_pipe(vec![rpc_response_frame(Packet::BindAck(BindAckPdu {
             call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
             assoc_group_id: 0,
@@ -503,6 +528,7 @@ mod tests {
     fn bind_ack_response_frame() -> Vec<u8> {
         rpc_response_frame(Packet::BindAck(BindAckPdu {
             call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
             assoc_group_id: 0,
