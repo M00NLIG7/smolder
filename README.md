@@ -106,7 +106,17 @@ SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
 cargo test -p smolder-tools --test windows_encryption -- --nocapture
 ```
 
-Samba can use the same opt-in pattern via `SMOLDER_SAMBA_ENCRYPTED_SHARE`.
+The local Samba fixture now includes an encrypted share named `SMOLDERENC` on
+port `1445`. Run the core encryption interop test with:
+
+```bash
+SMOLDER_SAMBA_HOST=127.0.0.1 \
+SMOLDER_SAMBA_PORT=1445 \
+SMOLDER_SAMBA_USERNAME=smolder \
+SMOLDER_SAMBA_PASSWORD=smolderpass \
+SMOLDER_SAMBA_ENCRYPTED_SHARE=SMOLDERENC \
+cargo test -p smolder-core --test samba_encryption -- --nocapture
+```
 
 ## Security Notice
 
