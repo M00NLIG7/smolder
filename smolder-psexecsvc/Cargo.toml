@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["M00NLIG7"]
 description = "Windows service payload for Smolder psexec mode"
 repository = "https://github.com/M00NLIG7/smolder"
+documentation = "https://docs.rs/smolder-psexecsvc"
 license = "MIT"
 readme = "README.md"
 keywords = ["windows", "service", "psexec", "smb"]

@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["M00NLIG7"]
 description = "CLI tools and high-level operator workflows for Smolder"
 repository = "https://github.com/M00NLIG7/smolder"
+documentation = "https://docs.rs/smolder"
 license = "MIT"
 readme = "README.md"
 keywords = ["smb", "smb2", "rpc", "cli"]

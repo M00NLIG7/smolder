@@ -1,4 +1,16 @@
 //! Shared argument parsing and command execution for the Smolder PsExec service.
+//!
+//! `smolder-psexecsvc` is the target-side Windows service payload used by the
+//! `smolder` package's `psexec` mode. The host-side orchestration logic lives in
+//! the `smolder` package; this crate only covers payload-local concerns such as:
+//!
+//! - parsing SCM-delivered startup arguments
+//! - selecting file-capture or named-pipe execution mode
+//! - deriving the pipe names used by interactive sessions
+//! - launching the requested child process and persisting exit status
+//!
+//! The public API is intentionally small because the binary is meant to stay
+//! predictable and easy to audit.
 
 use std::ffi::OsString;
 use std::fs::File;

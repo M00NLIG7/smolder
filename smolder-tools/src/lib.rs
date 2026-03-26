@@ -7,6 +7,18 @@
 //! depends on the `smolder-smb-core` package for SMB/RPC primitives rather than
 //! extending the core crate with tool-specific behavior.
 //!
+//! This crate is the right entry point when you want:
+//!
+//! - a higher-level SMB client builder and share/file API
+//! - DFS-aware path handling and reconnect helpers
+//! - operator workflows such as `smbexec` and `psexec`
+//! - the `smolder` CLI binary
+//!
+//! Lower-level protocol and transport pieces remain in the `smolder-smb-core`
+//! and `smolder-proto` packages.
+//!
+//! The most common public types are re-exported in [`prelude`].
+//!
 //! Copyright (c) 2025 M00NLIG7
 
 #![forbid(unsafe_code)]

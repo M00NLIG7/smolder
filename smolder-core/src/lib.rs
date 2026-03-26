@@ -7,6 +7,24 @@
 //! High-level SMB file facades, execution flows, and other operator workflows
 //! belong in the `smolder` package, not this crate.
 //!
+//! This crate is the reusable library layer for:
+//!
+//! - SMB negotiate, session setup, signing, and encryption
+//! - NTLM/SPNEGO authentication primitives
+//! - Tree/file operations, compound dispatch, and credit-aware request flow
+//! - DFS referral helpers
+//! - Named-pipe and DCE/RPC transport on top of SMB
+//! - Durable/reconnect and resiliency primitives
+//!
+//! The most common imports are re-exported in [`prelude`].
+//!
+//! # Usage model
+//!
+//! Use `smolder_core` when you want typed SMB/RPC client primitives and are
+//! comfortable orchestrating the protocol yourself. If you want a higher-level
+//! share/file API or operator-facing workflows such as `smbexec` and `psexec`,
+//! use the `smolder` package instead.
+//!
 //! Copyright (c) 2025 M00NLIG7
 
 #![forbid(unsafe_code)]
