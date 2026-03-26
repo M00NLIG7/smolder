@@ -1,7 +1,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, NtlmCredentials, TokioTcpTransport, TreeConnected,
+    Connection, DurableOpenOptions, NtlmAuthenticator, NtlmCredentials, ResilientHandle,
+    TokioTcpTransport, TreeConnected,
 };
 use smolder_proto::smb::smb2::{
     CloseRequest, CreateContext, CreateDisposition, CreateOptions, CreateRequest, Dialect,
@@ -375,4 +376,102 @@ async fn grants_lease_on_create_when_configured() {
             .contains(LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING),
         "server should grant at least read and handle caching on the first open"
     );
+}
+
+#[tokio::test]
+async fn reopens_durable_handle_after_transport_reconnect_when_configured() {
+    let Some((_config, mut connection_one)) = authenticated_tree_connection().await else {
+        return;
+    };
+
+    if !matches!(
+        connection_one.state().negotiated.dialect_revision,
+        Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311
+    ) {
+        eprintln!("skipping durable reconnect test: negotiated dialect is not SMB 3.x");
+        return;
+    }
+
+    let path = unique_test_file_path();
+    let payload = b"smolder durable reconnect live".to_vec();
+    let timeout = 30_000;
+    let create_guid = *b"durable-live-000";
+
+    let mut create_request = CreateRequest::from_path(&path);
+    create_request.create_disposition = CreateDisposition::Create;
+    let durable = connection_one
+        .create_durable(
+            &create_request,
+            DurableOpenOptions::new()
+                .with_create_guid(create_guid)
+                .with_timeout(timeout),
+        )
+        .await
+        .expect("Samba should create a durable test file");
+    connection_one
+        .write(&WriteRequest::for_file(durable.file_id(), 0, payload.clone()))
+        .await
+        .expect("Samba should write the durable test payload");
+    connection_one
+        .flush(&FlushRequest::for_file(durable.file_id()))
+        .await
+        .expect("Samba should flush the durable test payload");
+    connection_one
+        .request_resiliency(durable.file_id(), timeout)
+        .await
+        .expect("Samba should accept the durable resiliency request");
+    let durable = durable.with_resilient_timeout(timeout);
+
+    drop(connection_one.into_transport());
+
+    let Some((_config, mut connection_two)) = authenticated_tree_connection().await else {
+        return;
+    };
+    let (reopened, resilient) = connection_two
+        .reconnect_durable_with_resiliency(&durable)
+        .await
+        .expect("Samba should reopen the durable handle after reconnect");
+    let read = connection_two
+        .read(&ReadRequest::for_file(
+            reopened.file_id(),
+            0,
+            payload.len() as u32,
+        ))
+        .await
+        .expect("Samba should read back the durable payload after reconnect");
+    let closed = connection_two
+        .close(&CloseRequest {
+            flags: 0,
+            file_id: reopened.file_id(),
+        })
+        .await
+        .expect("Samba should close the reopened durable handle");
+
+    assert_eq!(read.data, payload);
+    assert_eq!(closed.flags, 0);
+    assert_eq!(reopened.resilient_timeout(), Some(timeout));
+    assert_eq!(
+        resilient,
+        Some(ResilientHandle {
+            file_id: reopened.file_id(),
+            timeout,
+        })
+    );
+
+    let mut cleanup_request = CreateRequest::from_path(&path);
+    cleanup_request.create_disposition = CreateDisposition::Open;
+    cleanup_request.create_options |= CreateOptions::DELETE_ON_CLOSE;
+    cleanup_request.desired_access |= 0x0001_0000;
+    cleanup_request.share_access |= ShareAccess::DELETE;
+    let cleanup = connection_two
+        .create(&cleanup_request)
+        .await
+        .expect("Samba should reopen the durable test file for cleanup");
+    connection_two
+        .close(&CloseRequest {
+            flags: 0,
+            file_id: cleanup.file_id,
+        })
+        .await
+        .expect("Samba should delete the durable test file during cleanup");
 }
