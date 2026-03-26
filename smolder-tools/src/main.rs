@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use smolder_tools::prelude::{
-    ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, NtlmCredentials,
-    RemoteExecClient, Share, SmbClient, SmbMetadata,
+    ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, NtlmCredentials, RemoteExecClient,
+    Share, SmbClient, SmbMetadata,
 };
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -144,17 +144,17 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
             return Ok(result.exit_code);
         }
         Command::Cat { remote } => {
-            let mut share = connect_share(&auth, &remote).await?;
+            let (mut share, path) = connect_share_path(&auth, &remote).await?;
             let mut stdout = tokio::io::stdout();
             share
-                .cat_into(&remote.path, &mut stdout)
+                .cat_into(&path, &mut stdout)
                 .await
                 .map_err(|error| error.to_string())?;
         }
         Command::Ls { remote } => {
-            let mut share = connect_share(&auth, &remote).await?;
+            let (mut share, path) = connect_share_path(&auth, &remote).await?;
             let mut entries = share
-                .list(&remote.path)
+                .list(&path)
                 .await
                 .map_err(|error| error.to_string())?;
             entries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -167,31 +167,31 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
             }
         }
         Command::Stat { remote } => {
-            let mut share = connect_share(&auth, &remote).await?;
+            let (mut share, path) = connect_share_path(&auth, &remote).await?;
             let metadata = share
-                .stat(&remote.path)
+                .stat(&path)
                 .await
                 .map_err(|error| error.to_string())?;
-            print_metadata(&remote.path, &metadata);
+            print_metadata(&path, &metadata);
         }
         Command::Get { remote, local } => {
-            let mut share = connect_share(&auth, &remote).await?;
+            let (mut share, path) = connect_share_path(&auth, &remote).await?;
             share
-                .get(&remote.path, local)
+                .get(&path, local)
                 .await
                 .map_err(|error| error.to_string())?;
         }
         Command::Put { local, remote } => {
-            let mut share = connect_share(&auth, &remote).await?;
+            let (mut share, path) = connect_share_path(&auth, &remote).await?;
             share
-                .put(local, &remote.path)
+                .put(local, &path)
                 .await
                 .map_err(|error| error.to_string())?;
         }
         Command::Remove { remote } => {
-            let mut share = connect_share(&auth, &remote).await?;
+            let (mut share, path) = connect_share_path(&auth, &remote).await?;
             share
-                .remove(&remote.path)
+                .remove(&path)
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -229,6 +229,31 @@ async fn connect_share(options: &AuthOptions, remote: &RemoteLocation) -> Result
         .map_err(|error| error.to_string())?;
     client
         .share(remote.share.as_str())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn connect_share_path(
+    options: &AuthOptions,
+    remote: &RemoteLocation,
+) -> Result<(Share, String), String> {
+    let mut credentials = NtlmCredentials::new(&options.username, &options.password);
+    if let Some(domain) = &options.domain {
+        credentials = credentials.with_domain(domain.as_str());
+    }
+    if let Some(workstation) = &options.workstation {
+        credentials = credentials.with_workstation(workstation.as_str());
+    }
+
+    let client = SmbClient::builder()
+        .server(remote.host.as_str())
+        .port(remote.port)
+        .credentials(credentials)
+        .connect()
+        .await
+        .map_err(|error| error.to_string())?;
+    client
+        .share_path_auto(remote_unc(remote))
         .await
         .map_err(|error| error.to_string())
 }
@@ -659,6 +684,15 @@ fn parse_duration(input: &str) -> Result<Duration, String> {
     Err("timeout must end with `s` or `ms`".to_string())
 }
 
+fn remote_unc(remote: &RemoteLocation) -> String {
+    if remote.path.is_empty() {
+        format!(r"\\{}\{}", remote.host, remote.share)
+    } else {
+        let path = remote.path.replace('/', r"\");
+        format!(r"\\{}\{}\{}", remote.host, remote.share, path)
+    }
+}
+
 fn ensure_same_share(source: &RemoteLocation, destination: &RemoteLocation) -> Result<(), String> {
     if source.host != destination.host
         || source.port != destination.port
@@ -762,7 +796,7 @@ mod tests {
 
     use super::{
         parse_cli, parse_duration, parse_exec_target, parse_remote_location,
-        parse_remote_location_with_options, Command, ExecTarget, RemoteLocation,
+        parse_remote_location_with_options, remote_unc, Command, ExecTarget, RemoteLocation,
     };
 
     #[test]
@@ -1025,6 +1059,25 @@ mod tests {
     fn parse_exec_target_rejects_share_paths() {
         let error = parse_exec_target("smb://server/share").expect_err("share path should fail");
         assert!(error.contains("without a share path"));
+    }
+
+    #[test]
+    fn remote_unc_formats_nested_and_share_root_paths() {
+        let nested = RemoteLocation {
+            host: "server".to_string(),
+            port: 445,
+            share: "share".to_string(),
+            path: "docs/file.txt".to_string(),
+        };
+        assert_eq!(remote_unc(&nested), r"\\server\share\docs\file.txt");
+
+        let root = RemoteLocation {
+            host: "server".to_string(),
+            port: 445,
+            share: "share".to_string(),
+            path: String::new(),
+        };
+        assert_eq!(remote_unc(&root), r"\\server\share");
     }
 
     #[test]

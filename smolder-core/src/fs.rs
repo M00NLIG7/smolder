@@ -14,14 +14,16 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, R
 
 use smolder_core::dfs::{referrals_from_response, resolve_unc_path, DfsReferral, UncPath};
 use smolder_proto::smb::smb2::{
-    CipherId, CloseRequest, CloseResponse, CreateContext, CreateDisposition, CreateOptions,
-    CreateRequest, DfsReferralRequest, Dialect, DispositionInformation, EncryptionCapabilities,
-    FileAttributes, FileBasicInformation, FileId, FileInfoClass, FileStandardInformation,
-    FlushRequest, GlobalCapabilities, IoctlRequest, LeaseFlags, LeaseState, LeaseV2,
-    NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
-    QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation,
-    SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
+    CipherId, CloseRequest, CloseResponse, Command, CreateContext, CreateDisposition,
+    CreateOptions, CreateRequest, DfsReferralRequest, Dialect, DispositionInformation,
+    EncryptionCapabilities, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
+    FileStandardInformation, FlushRequest, GlobalCapabilities, IoctlRequest, LeaseFlags,
+    LeaseState, LeaseV2, NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities,
+    PreauthIntegrityHashId, QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest,
+    ReadRequest, RenameInformation, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest,
+    WriteRequest,
 };
+use smolder_proto::smb::status::NtStatus;
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
 use crate::client::{
@@ -357,6 +359,66 @@ where
             ));
         }
         self.share(share).await
+    }
+
+    /// Resolves a full UNC path, preferring DFS referral lookup over `IPC$`
+    /// and falling back to a direct share connection when the path is not part
+    /// of a DFS namespace.
+    pub async fn share_path_auto(
+        self,
+        unc: impl AsRef<str>,
+    ) -> Result<(Share<T>, String), CoreError> {
+        let unc = unc.as_ref();
+        let original = UncPath::parse(unc)?;
+        if !original.server().eq_ignore_ascii_case(&self.server) {
+            return Err(CoreError::PathInvalid(
+                "UNC host does not match the connected SMB session",
+            ));
+        }
+
+        let mut ipc = self.share("IPC$").await?;
+        let query_result = ipc
+            .connection_mut()
+            .ioctl(&IoctlRequest::get_dfs_referrals(
+                DfsReferralRequest {
+                    max_referral_level: 4,
+                    request_file_name: unc.to_string(),
+                },
+                DEFAULT_DFS_REFERRAL_MAX_RESPONSE,
+            ))
+            .await;
+
+        match query_result {
+            Ok(response) => {
+                let referral_result = response
+                    .dfs_referral_response()?
+                    .ok_or(CoreError::InvalidResponse(
+                        "DFS referral IOCTL did not return a DFS referral response",
+                    ))
+                    .and_then(|response| referrals_from_response(&response));
+                let client = ipc.disconnect().await?;
+                match referral_result {
+                    Ok(referrals) => {
+                        let (share_name, relative_path) =
+                            resolve_share_path_with_referrals(&client.server, unc, &referrals)?;
+                        let share = client.share(&share_name).await?;
+                        Ok((share, relative_path))
+                    }
+                    Err(error) if should_fallback_direct_share_after_dfs_query(&error) => {
+                        connect_original_share_path(client, &original).await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => {
+                let client = ipc.disconnect().await?;
+                if should_fallback_direct_share_after_dfs_query(&error) {
+                    connect_original_share_path(client, &original).await
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     /// Resolves a UNC path through caller-supplied DFS referrals, connects to the
@@ -1843,6 +1905,34 @@ fn resolve_share_path_with_referrals(
     ))
 }
 
+async fn connect_original_share_path<T>(
+    client: SmbClient<T>,
+    original: &UncPath,
+) -> Result<(Share<T>, String), CoreError>
+where
+    T: Transport + Send,
+{
+    let share = client.share(original.share()).await?;
+    Ok((share, original.path().join("\\")))
+}
+
+fn should_fallback_direct_share_after_dfs_query(error: &CoreError) -> bool {
+    match error {
+        CoreError::UnexpectedStatus { command, status }
+            if *command == Command::Ioctl
+                && (*status == NtStatus::PATH_NOT_COVERED.to_u32()
+                    || *status == NtStatus::OBJECT_PATH_NOT_FOUND.to_u32()
+                    || *status == NtStatus::OBJECT_NAME_NOT_FOUND.to_u32()) =>
+        {
+            true
+        }
+        CoreError::InvalidResponse(
+            "DFS referral IOCTL did not return a DFS referral response",
+        ) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1949,8 +2039,21 @@ mod tests {
         tree_id: u32,
         body: Vec<u8>,
     ) -> Vec<u8> {
+        response_frame_with_credits(command, status, message_id, session_id, tree_id, 1, body)
+    }
+
+    fn response_frame_with_credits(
+        command: Command,
+        status: u32,
+        message_id: u64,
+        session_id: u64,
+        tree_id: u32,
+        credits: u16,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
         let mut header = Header::new(command, MessageId(message_id));
         header.status = status;
+        header.credit_request_response = credits;
         header.session_id = smolder_proto::smb::smb2::SessionId(session_id);
         header.tree_id = TreeId(tree_id);
 
@@ -3559,6 +3662,155 @@ mod tests {
             error.to_string(),
             "invalid path: resolved UNC host does not match the connected SMB session"
         );
+    }
+
+    #[tokio::test]
+    async fn share_path_auto_falls_back_to_direct_share_when_dfs_query_is_not_covered() {
+        let ipc_response = TreeConnectResponse {
+            share_type: ShareType::Pipe,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let share_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let client = build_client_with_tree_response(
+            "server",
+            ipc_response,
+            vec![
+                response_frame_with_credits(
+                    Command::Ioctl,
+                    NtStatus::PATH_NOT_COVERED.to_u32(),
+                    3,
+                    11,
+                    7,
+                    1,
+                    Vec::new(),
+                ),
+                response_frame(
+                    Command::TreeDisconnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    4,
+                    11,
+                    7,
+                    TreeDisconnectResponse.encode(),
+                ),
+                response_frame(
+                    Command::TreeConnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    5,
+                    11,
+                    9,
+                    share_response.encode(),
+                ),
+            ],
+        )
+        .await;
+
+        let (share, relative_path) = client
+            .share_path_auto(r"\\server\share\docs\report.txt")
+            .await
+            .expect("non-DFS path should fall back to direct share");
+
+        assert_eq!(share.server(), "server");
+        assert_eq!(share.name(), "share");
+        assert_eq!(relative_path, r"docs\report.txt");
+
+        let writes = transport_writes(share);
+        let ipc_tree_connect = SessionMessage::decode(&writes[2]).expect("frame should decode");
+        let ipc_request = TreeConnectRequest::decode(&ipc_tree_connect.payload[Header::LEN..])
+            .expect("request should decode");
+        assert_eq!(
+            ipc_request.path,
+            smolder_proto::smb::smb2::utf16le(r"\\server\IPC$")
+        );
+
+        let ioctl = outbound_ioctl(&writes[3]);
+        assert_eq!(ioctl.ctl_code, CtlCode::FSCTL_DFS_GET_REFERRALS);
+        let disconnect = SessionMessage::decode(&writes[4]).expect("frame should decode");
+        let disconnect_header =
+            Header::decode(&disconnect.payload[..Header::LEN]).expect("header should decode");
+        assert_eq!(disconnect_header.command, Command::TreeDisconnect);
+
+        let share_tree_connect =
+            SessionMessage::decode(&writes[5]).expect("frame should decode");
+        let share_request = TreeConnectRequest::decode(&share_tree_connect.payload[Header::LEN..])
+            .expect("request should decode");
+        assert_eq!(
+            share_request.path,
+            smolder_proto::smb::smb2::utf16le(r"\\server\share")
+        );
+    }
+
+    #[tokio::test]
+    async fn share_path_auto_resolves_dfs_namespace_when_referrals_are_available() {
+        let ipc_response = TreeConnectResponse {
+            share_type: ShareType::Pipe,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let share_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let client = build_client_with_tree_response(
+            "server",
+            ipc_response,
+            vec![
+                response_frame(
+                    Command::Ioctl,
+                    NtStatus::SUCCESS.to_u32(),
+                    3,
+                    11,
+                    7,
+                    IoctlResponse {
+                        ctl_code: CtlCode::FSCTL_DFS_GET_REFERRALS,
+                        file_id: FileId::NONE,
+                        input: Vec::new(),
+                        output: encode_dfs_referral_response(
+                            r"\\server\dfs\team",
+                            Some(r"\\server\dfs"),
+                            r"\\server\teamshare\docsroot",
+                        ),
+                        flags: 0,
+                    }
+                    .encode(),
+                ),
+                response_frame(
+                    Command::TreeDisconnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    4,
+                    11,
+                    7,
+                    TreeDisconnectResponse.encode(),
+                ),
+                response_frame(
+                    Command::TreeConnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    5,
+                    11,
+                    9,
+                    share_response.encode(),
+                ),
+            ],
+        )
+        .await;
+
+        let (share, relative_path) = client
+            .share_path_auto(r"\\server\dfs\team\report.txt")
+            .await
+            .expect("DFS namespace should resolve over IPC$");
+
+        assert_eq!(share.server(), "server");
+        assert_eq!(share.name(), "teamshare");
+        assert_eq!(relative_path, r"docsroot\report.txt");
     }
 
     #[tokio::test]

@@ -1515,13 +1515,13 @@ where
             }
 
 
+            self.apply_credit_grant(u32::from(response_header.credit_request_response))?;
             if !accepted_statuses.contains(&response_header.status) {
                 return Err(CoreError::UnexpectedStatus {
                     command,
                     status: response_header.status,
                 });
             }
-            self.apply_credit_grant(u32::from(response_header.credit_request_response))?;
 
             return Ok(TransactionFrames {
                 header: response_header,
