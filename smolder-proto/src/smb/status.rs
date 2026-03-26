@@ -7,6 +7,8 @@ pub struct NtStatus(pub u32);
 impl NtStatus {
     /// `STATUS_SUCCESS`
     pub const SUCCESS: Self = Self(0x0000_0000);
+    /// `STATUS_NOT_IMPLEMENTED`
+    pub const NOT_IMPLEMENTED: Self = Self(0xc000_0002);
     /// `STATUS_PENDING`
     pub const PENDING: Self = Self(0x0000_0103);
     /// `STATUS_MORE_PROCESSING_REQUIRED`

@@ -10,11 +10,12 @@ use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use smolder_proto::smb::smb2::{
-    CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect,
+    CipherId, CloseRequest, Command, CreateDisposition, CreateOptions, CreateRequest, Dialect,
     EncryptionCapabilities, FileAttributes, FileId, FlushRequest, GlobalCapabilities,
     NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
     ReadRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
+use smolder_proto::smb::status::NtStatus;
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
 use crate::client::{Connection, TreeConnected};
@@ -302,10 +303,13 @@ where
             offset = chunk_end;
         }
         let file_id = self.file_id;
-        let _ = self
+        if let Err(error) = self
             .connection_mut()
             .flush(&FlushRequest::for_file(file_id))
-            .await;
+            .await
+        {
+            handle_named_pipe_flush_error(error)?;
+        }
         Ok(())
     }
 
@@ -495,6 +499,17 @@ fn core_error_to_io(error: CoreError) -> io::Error {
     }
 }
 
+fn handle_named_pipe_flush_error(error: CoreError) -> Result<(), CoreError> {
+    match error {
+        CoreError::UnexpectedStatus { command, status }
+            if command == Command::Flush && status == NtStatus::NOT_IMPLEMENTED.to_u32() =>
+        {
+            Ok(())
+        }
+        other => Err(other),
+    }
+}
+
 impl<T> AsyncRead for NamedPipe<T>
 where
     T: Transport + Send + 'static,
@@ -657,7 +672,10 @@ where
 
         match this.complete_pending_flush(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(core_error_to_io(error))),
+            Poll::Ready(Err(error)) => match handle_named_pipe_flush_error(error) {
+                Ok(()) => Poll::Ready(Ok(())),
+                Err(error) => Poll::Ready(Err(core_error_to_io(error))),
+            },
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
         }
     }
@@ -1120,6 +1138,79 @@ mod tests {
         AsyncWriteExt::flush(&mut pipe)
             .await
             .expect("flush should succeed");
+
+        let connection = pipe.close().await.expect("pipe close should succeed");
+        let writes = connection.into_transport().writes;
+        let write = outbound_write(&writes[4]);
+
+        assert_eq!(write.data, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn named_pipe_async_flush_ignores_not_implemented_status() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::NORMAL,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_attributes: FileAttributes::NORMAL,
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Write,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                WriteResponse { count: 11 }.encode(),
+            ),
+            response_frame(
+                Command::Flush,
+                NtStatus::NOT_IMPLEMENTED.to_u32(),
+                5,
+                11,
+                7,
+                FlushResponse.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                6,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let connection = build_tree_connection(reads).await;
+        let mut pipe = NamedPipe::open(connection, "svcctl", PipeAccess::WriteOnly)
+            .await
+            .expect("pipe open should succeed");
+        AsyncWriteExt::write_all(&mut pipe, b"hello world")
+            .await
+            .expect("async write should succeed");
+        AsyncWriteExt::flush(&mut pipe)
+            .await
+            .expect("flush should ignore not-implemented status on named pipes");
 
         let connection = pipe.close().await.expect("pipe close should succeed");
         let writes = connection.into_transport().writes;
