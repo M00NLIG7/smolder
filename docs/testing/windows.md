@@ -100,4 +100,5 @@ When the fixture is healthy:
 - The repository now includes an optional self-hosted workflow at [interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml).
 - That workflow expects a self-hosted runner labeled `smolder-windows-gate`, local access to the Tiny11 fixture, `VBoxManage`, and repository secrets `SMOLDER_WINDOWS_USERNAME` / `SMOLDER_WINDOWS_PASSWORD`.
 - The workflow uses [ensure-tiny11-smb-forward.sh](/Users/cmagana/Projects/smolder/scripts/ensure-tiny11-smb-forward.sh) to verify the `127.0.0.1:445` NAT forward before running the release gate.
+- Runner bootstrap and GitHub secret setup are documented in [windows-runner.md](/Users/cmagana/Projects/smolder/docs/testing/windows-runner.md).
 - If the self-hosted runner is unavailable, the local `scripts/run-windows-release-gate.sh` path remains the fallback.

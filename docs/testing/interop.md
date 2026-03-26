@@ -18,6 +18,8 @@ The repository also includes a GitHub Actions workflow at
 that runs the Samba-backed subset on hosted Linux runners, plus
 [interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml)
 for an optional self-hosted Tiny11 gate.
+Self-hosted runner bootstrap is documented in
+[windows-runner.md](/Users/cmagana/Projects/smolder/docs/testing/windows-runner.md).
 Release policy and required gate selection live in
 [release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
 

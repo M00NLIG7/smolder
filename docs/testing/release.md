@@ -41,6 +41,9 @@ Required before release:
 - `scripts/run-windows-release-gate.sh`
 - or a green [interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml) run on the Tiny11 self-hosted runner
 
+Runner bootstrap and secret setup live in
+[windows-runner.md](/Users/cmagana/Projects/smolder/docs/testing/windows-runner.md).
+
 This includes:
 
 - Windows `smolder-core` interop tests
