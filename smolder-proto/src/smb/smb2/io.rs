@@ -135,7 +135,7 @@ impl ReadRequest {
             length,
             offset,
             file_id,
-            minimum_count: length,
+            minimum_count: 0,
             channel: 0,
             remaining_bytes: 0,
             read_channel_info: Vec::new(),
@@ -439,7 +439,8 @@ mod tests {
         let response = FlushResponse;
 
         let encoded_request = request.encode();
-        let decoded_request = FlushRequest::decode(&encoded_request).expect("request should decode");
+        let decoded_request =
+            FlushRequest::decode(&encoded_request).expect("request should decode");
         assert_eq!(decoded_request, request);
 
         let encoded_response = response.encode();
@@ -469,6 +470,23 @@ mod tests {
         let decoded = ReadRequest::decode(&encoded).expect("request should decode");
 
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn read_request_for_file_uses_zero_minimum_count() {
+        let request = ReadRequest::for_file(
+            FileId {
+                persistent: 7,
+                volatile: 9,
+            },
+            128,
+            4096,
+        );
+
+        assert_eq!(request.padding, 0x50);
+        assert_eq!(request.minimum_count, 0);
+        assert_eq!(request.length, 4096);
+        assert_eq!(request.offset, 128);
     }
 
     #[test]
