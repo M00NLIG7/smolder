@@ -10,6 +10,8 @@ use crate::error::CoreError;
 use crate::pipe::NamedPipe;
 use crate::transport::TokioTcpTransport;
 
+const RPC_DEFAULT_FRAGMENT_SIZE: u16 = 4_280;
+
 /// Reusable DCE/RPC client over a named pipe transport.
 #[derive(Debug)]
 pub struct PipeRpcClient<T = TokioTcpTransport> {
@@ -103,8 +105,8 @@ where
         let bind = Packet::Bind(BindPdu {
             call_id: self.next_call_id(),
             flags,
-            max_xmit_frag: self.pipe.fragment_size() as u16,
-            max_recv_frag: self.pipe.fragment_size() as u16,
+            max_xmit_frag: RPC_DEFAULT_FRAGMENT_SIZE,
+            max_recv_frag: RPC_DEFAULT_FRAGMENT_SIZE,
             assoc_group_id: 0,
             context_id,
             abstract_syntax,
@@ -390,6 +392,41 @@ mod tests {
             .expect("bind with auth should succeed");
 
         assert_eq!(bind_ack.auth_verifier, Some(verifier));
+    }
+
+    #[tokio::test]
+    async fn bind_uses_standard_rpc_fragment_size() {
+        let verifier = AuthVerifier::new(AuthType::WinNt, AuthLevel::Connect, 79_231, vec![0x11; 8]);
+        let (pipe, writes) = open_pipe_with_writes(vec![rpc_response_frame(Packet::BindAck(
+            BindAckPdu {
+                call_id: 1,
+                flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+                max_xmit_frag: 4280,
+                max_recv_frag: 4280,
+                assoc_group_id: 0,
+                secondary_address: b"\\PIPE\\svcctl\0".to_vec(),
+                result: BindAckResult {
+                    result: 0,
+                    reason: 0,
+                    transfer_syntax: SyntaxId::NDR32,
+                },
+                auth_verifier: None,
+            },
+        ))])
+        .await;
+        let mut rpc = PipeRpcClient::new(pipe);
+
+        rpc.bind_with_auth(0, TEST_SYNTAX, Some(verifier))
+            .await
+            .expect("bind with auth should succeed");
+
+        let writes = writes.lock().expect("writes lock");
+        let bind_packet = decode_nth_rpc_write(&writes, 0).expect("bind write should decode");
+        let Packet::Bind(bind) = bind_packet else {
+            panic!("expected bind write");
+        };
+        assert_eq!(bind.max_xmit_frag, 4280);
+        assert_eq!(bind.max_recv_frag, 4280);
     }
 
     #[tokio::test]
@@ -820,17 +857,30 @@ mod tests {
     fn decode_last_rpc_write(
         writes: &[Vec<u8>],
     ) -> Result<Packet, smolder_proto::smb::ProtocolError> {
-        for frame in writes.iter().rev() {
-            let session = SessionMessage::decode(frame)?;
-            let header = Header::decode(&session.payload)?;
-            if header.command != Command::Write {
-                continue;
-            }
-            let write_request = WriteRequest::decode(&session.payload[Header::LEN..])?;
-            return Packet::decode(&write_request.data);
-        }
+        decode_nth_rpc_write(writes, 0)
+    }
 
-        panic!("at least one SMB write should be captured");
+    fn decode_nth_rpc_write(
+        writes: &[Vec<u8>],
+        reverse_index: usize,
+    ) -> Result<Packet, smolder_proto::smb::ProtocolError> {
+        let mut rpc_writes = writes
+            .iter()
+            .rev()
+            .filter_map(|frame| {
+                let session = SessionMessage::decode(frame).ok()?;
+                let header = Header::decode(&session.payload).ok()?;
+                if header.command != Command::Write {
+                    return None;
+                }
+                let write_request = WriteRequest::decode(&session.payload[Header::LEN..]).ok()?;
+                Packet::decode(&write_request.data).ok()
+            })
+            .collect::<Vec<_>>();
+        if reverse_index >= rpc_writes.len() {
+            panic!("requested rpc write index {reverse_index} but only {} writes were captured", rpc_writes.len());
+        }
+        Ok(rpc_writes.remove(reverse_index))
     }
 
     fn ntlm_type2_challenge() -> Vec<u8> {

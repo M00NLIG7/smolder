@@ -152,6 +152,7 @@ pub struct NtlmAuthenticator {
     timestamp: u64,
     state: NtlmState,
     session_key: Option<[u8; 16]>,
+    exported_session_key_override: Option<[u8; 16]>,
 }
 
 impl NtlmAuthenticator {
@@ -163,6 +164,7 @@ impl NtlmAuthenticator {
             timestamp: current_windows_timestamp(),
             state: NtlmState::Initial,
             session_key: None,
+            exported_session_key_override: None,
         }
     }
 
@@ -177,6 +179,14 @@ impl NtlmAuthenticator {
     #[must_use]
     pub fn with_timestamp(mut self, timestamp: u64) -> Self {
         self.timestamp = timestamp;
+        self
+    }
+
+    /// Overrides the exported session key used when NTLM key exchange is negotiated.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_exported_session_key(mut self, exported_session_key: [u8; 16]) -> Self {
+        self.exported_session_key_override = Some(exported_session_key);
         self
     }
 
@@ -272,6 +282,7 @@ impl AuthProvider for NtlmAuthenticator {
             &challenge_message,
             self.client_challenge,
             self.timestamp,
+            self.exported_session_key_override,
         )?;
         let authenticate_message = authenticate.encode();
         if ntlm_debug_enabled() {
@@ -532,6 +543,7 @@ fn build_authenticate_message(
     _challenge_message: &[u8],
     client_challenge: [u8; 8],
     fallback_timestamp: u64,
+    exported_session_key_override: Option<[u8; 16]>,
 ) -> Result<(AuthenticateMessage, [u8; 16]), AuthError> {
     let negotiated_flags = authenticate_flags(negotiate_flags, challenge.flags);
     let target_info = ntlmv2_target_info(&challenge.target_info, fallback_timestamp);
@@ -547,7 +559,11 @@ fn build_authenticate_message(
     );
     let key_exchange_key = hmac_md5(&response_key_nt, &nt_response[..16]);
     let (encrypted_random_session_key, session_key) =
-        encrypt_random_session_key(negotiated_flags, key_exchange_key);
+        encrypt_random_session_key(
+            negotiated_flags,
+            key_exchange_key,
+            exported_session_key_override,
+        );
     let lm_challenge_response = lmv2_response(
         &response_key_nt,
         challenge.server_challenge,
@@ -597,9 +613,10 @@ fn default_version_bytes() -> [u8; 8] {
 fn encrypt_random_session_key(
     flags: NegotiateFlags,
     key_exchange_key: [u8; 16],
+    exported_session_key_override: Option<[u8; 16]>,
 ) -> (Vec<u8>, [u8; 16]) {
     if flags.contains(NegotiateFlags::KEY_EXCH) {
-        let exported_session_key: [u8; 16] = random();
+        let exported_session_key = exported_session_key_override.unwrap_or_else(random);
         (
             rc4k(&key_exchange_key, &exported_session_key),
             exported_session_key,
@@ -1162,6 +1179,70 @@ mod tests {
     }
 
     #[test]
+    fn authenticator_matches_impacket_on_windows_key_exchange_challenge() {
+        let negotiate = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
+            server_guid: [0; 16],
+            capabilities: GlobalCapabilities::empty(),
+            max_transact_size: 0,
+            max_read_size: 0,
+            max_write_size: 0,
+            system_time: 0,
+            server_start_time: 0,
+            security_buffer: Vec::new(),
+        };
+        let mut auth = NtlmAuthenticator::new(NtlmCredentials::new("windowsfixture", "windowsfixture"))
+            .with_client_challenge(*b"A1B2C3D4")
+            .with_timestamp(0)
+            .with_exported_session_key(*b"E5F6G7H8J9K0L1M2");
+
+        let initial = auth
+            .initial_token(&negotiate)
+            .expect("initial token should build");
+        let type1 = extract_mech_token(&initial).expect("should extract NTLM token");
+        assert_eq!(
+            hex_bytes(&type1),
+            "4e544c4d5353500001000000358288e000000000000000000000000000000000"
+        );
+
+        let challenge = hex_decode(
+            "4e544c4d53535000020000001e001e003800000035828ae2764ed429d9c4d848\
+             000000000000000098009800560000000a00f4650000000f4400450053004b00\
+             54004f0050002d00500054004e004a0055005300350002001e00440045005300\
+             4b0054004f0050002d00500054004e004a0055005300350001001e0044004500\
+             53004b0054004f0050002d00500054004e004a0055005300350004001e004400\
+             450053004b0054004f0050002d00500054004e004a0055005300350003001e00\
+             4400450053004b0054004f0050002d00500054004e004a005500530035000700\
+             0800a2cd625d3abddc0100000000",
+        );
+
+        let response = auth
+            .next_token(&encode_neg_token_resp_ntlm(&challenge))
+            .expect("challenge response should build");
+        let type3 = extract_mech_token(&response).expect("should extract NTLM token");
+
+        assert_eq!(
+            hex_bytes(&type3),
+            "4e544c4d5353500003000000180018004a000000f000f0006200000000000000\
+             400000000a000a0040000000000000004a0000001000100052010000358288e0\
+             6d0069007400720065000cba39f9014b4686cd763fb74dba88af413142324333\
+             44348154dadf52f0448d4825ff24971b14fb0101000000000000a2cd625d3abd\
+             dc0141314232433344340000000002001e004400450053004b0054004f005000\
+             2d00500054004e004a0055005300350001001e004400450053004b0054004f00\
+             50002d00500054004e004a0055005300350004001e004400450053004b005400\
+             4f0050002d00500054004e004a0055005300350003001e004400450053004b00\
+             54004f0050002d00500054004e004a0055005300350007000800a2cd625d3abd\
+             dc010900280063006900660073002f004400450053004b0054004f0050002d00\
+             500054004e004a005500530035000000000019a15de973cde2aaef837f35c450\
+             2edb"
+                .replace(char::is_whitespace, "")
+        );
+        assert_eq!(auth.session_key(), Some(&b"E5F6G7H8J9K0L1M2"[..]));
+    }
+
+    #[test]
     fn authenticator_allows_final_empty_spnego_leg() {
         let credentials = NtlmCredentials::new("alice", "password");
         let mut auth = NtlmAuthenticator::new(credentials)
@@ -1230,5 +1311,29 @@ mod tests {
 
     fn negotiate_message_len(negotiate: &NegotiateMessage) -> usize {
         negotiate.encode().len()
+    }
+
+    fn hex_decode(input: &str) -> Vec<u8> {
+        let hex = input
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect::<String>();
+        assert_eq!(hex.len() % 2, 0, "hex input must have an even length");
+
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|chunk| {
+                (hex_nibble(chunk[0]) << 4) | hex_nibble(chunk[1])
+            })
+            .collect()
+    }
+
+    fn hex_nibble(value: u8) -> u8 {
+        match value {
+            b'0'..=b'9' => value - b'0',
+            b'a'..=b'f' => 10 + (value - b'a'),
+            b'A'..=b'F' => 10 + (value - b'A'),
+            _ => panic!("invalid hex nibble: {value:#x}"),
+        }
     }
 }

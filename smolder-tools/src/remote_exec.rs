@@ -803,6 +803,9 @@ impl ScmClient {
     async fn connect(config: &SmbSessionConfig, ipc_share: &str) -> Result<Self, CoreError> {
         let pipe = NamedPipe::connect(config, ipc_share, "svcctl", PipeAccess::ReadWrite).await?;
         let mut rpc = PipeRpcClient::new(pipe);
+        // `svcctl` over `ncacn_np` already rides an authenticated SMB session.
+        // Forcing WinNT secure bind here reproduces Windows `rpc_s_cannot_support (0x6e4)`,
+        // and Impacket's working service-control paths use a plain bind on this transport.
         rpc.bind_context(SVCCTL_CONTEXT_ID, SVCCTL_SYNTAX).await?;
         Ok(Self { rpc })
     }
