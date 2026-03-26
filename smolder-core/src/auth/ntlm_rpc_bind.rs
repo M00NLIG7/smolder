@@ -129,7 +129,7 @@ impl NtlmRpcBindHandshake {
             auth3: RpcAuth3Pdu {
                 call_id: bind_ack.call_id,
                 flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
-                pad: [0; 4],
+                pad: *b"    ",
                 auth_verifier: AuthVerifier::new(
                     AuthType::WinNt,
                     self.auth_level,
@@ -205,7 +205,8 @@ fn dummy_negotiate_response() -> NegotiateResponse {
 #[cfg(test)]
 mod tests {
     use smolder_proto::rpc::{
-        AuthLevel, AuthType, AuthVerifier, BindAckPdu, BindAckResult, PacketFlags, SyntaxId, Uuid,
+        AuthLevel, AuthType, AuthVerifier, BindAckPdu, BindAckResult, Packet, PacketFlags,
+        SyntaxId, Uuid,
     };
     use smolder_proto::smb::smb2::utf16le;
 
@@ -242,6 +243,58 @@ mod tests {
         assert_eq!(
             u32::from_le_bytes(verifier.auth_value[8..12].try_into().unwrap()),
             1
+        );
+    }
+
+    #[test]
+    fn connect_auth3_matches_impacket_bytes_without_key_exchange() {
+        let mut handshake = NtlmRpcBindHandshake::new(
+            NtlmCredentials::new("windowsfixture", "windowsfixture"),
+            AuthLevel::Connect,
+            0,
+        )
+        .expect("handshake");
+        handshake.ntlm = handshake
+            .ntlm
+            .with_client_challenge(*b"A1B2C3D4")
+            .with_timestamp(9_999);
+
+        let type1 = handshake
+            .initial_auth_verifier()
+            .expect("type1 verifier should build");
+        assert_eq!(
+            hex_bytes(&type1.auth_value),
+            "4e544c4d5353500001000000358288e000000000000000000000000000000000"
+        );
+
+        let bind_ack = BindAckPdu {
+            call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            max_xmit_frag: 4280,
+            max_recv_frag: 4280,
+            assoc_group_id: 0,
+            secondary_address: b"\\PIPE\\svcctl\0".to_vec(),
+            result: BindAckResult {
+                result: 0,
+                reason: 0,
+                transfer_syntax: SVCCTL_SYNTAX,
+            },
+            auth_verifier: Some(AuthVerifier::new(
+                AuthType::WinNt,
+                AuthLevel::Connect,
+                type1.auth_context_id,
+                encode_connect_challenge_message_without_key_exchange(),
+            )),
+        };
+
+        let completed = handshake.complete(&bind_ack).expect("auth3 should build");
+        assert_eq!(
+            hex_bytes(&completed.auth3.auth_verifier.auth_value),
+            "4e544c4d5353500003000000180018004a000000a600a6006200000000000000400000000a000a0040000000000000004a0000000000000008010000358288a06d006900740072006500ebffbfe7082dce4aef6582caab8f7cbb4131423243334434fdaeee6432f9795ff95bbe923331e8dc01010000000000000f2700000000000041314232433344340000000001000c0053004500520056004500520002000c0044004f004d00410049004e0003001c007300650072007600650072002e006500780061006d0070006c006500070008000f270000000000000900260063006900660073002f007300650072007600650072002e006500780061006d0070006c00650000000000"
+        );
+        assert_eq!(
+            hex_bytes(&Packet::RpcAuth3(completed.auth3).encode()),
+            "05001003100000002401080101000000202020200a0200007f3501004e544c4d5353500003000000180018004a000000a600a6006200000000000000400000000a000a0040000000000000004a0000000000000008010000358288a06d006900740072006500ebffbfe7082dce4aef6582caab8f7cbb4131423243334434fdaeee6432f9795ff95bbe923331e8dc01010000000000000f2700000000000041314232433344340000000001000c0053004500520056004500520002000c0044004f004d00410049004e0003001c007300650072007600650072002e006500780061006d0070006c006500070008000f270000000000000900260063006900660073002f007300650072007600650072002e006500780061006d0070006c00650000000000"
         );
     }
 
@@ -352,6 +405,50 @@ mod tests {
         out.extend_from_slice(&target_info_offset.to_le_bytes());
         out.extend_from_slice(&target_info);
         out
+    }
+
+    fn encode_connect_challenge_message_without_key_exchange() -> Vec<u8> {
+        let target_info = encode_target_info(&[
+            (0x0001, utf16le("SERVER")),
+            (0x0002, utf16le("DOMAIN")),
+            (0x0003, utf16le("server.example")),
+            (0x0007, 9_999u64.to_le_bytes().to_vec()),
+        ]);
+        let flags = 0xa28a_8235u32;
+        let target_info_len = target_info.len() as u16;
+        let target_info_offset = 48u32;
+
+        let mut out = Vec::with_capacity(48 + target_info.len());
+        out.extend_from_slice(b"NTLMSSP\0");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&48u32.to_le_bytes());
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&[8, 7, 6, 5, 4, 3, 2, 1]);
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&target_info_len.to_le_bytes());
+        out.extend_from_slice(&target_info_len.to_le_bytes());
+        out.extend_from_slice(&target_info_offset.to_le_bytes());
+        out.extend_from_slice(&target_info);
+        out
+    }
+
+    fn hex_bytes(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            out.push(nibble_to_hex(byte >> 4));
+            out.push(nibble_to_hex(byte & 0x0f));
+        }
+        out
+    }
+
+    fn nibble_to_hex(value: u8) -> char {
+        match value {
+            0..=9 => char::from(b'0' + value),
+            10..=15 => char::from(b'a' + (value - 10)),
+            _ => unreachable!("hex nibble must be in range"),
+        }
     }
 
     fn encode_target_info(pairs: &[(u16, Vec<u8>)]) -> Vec<u8> {
