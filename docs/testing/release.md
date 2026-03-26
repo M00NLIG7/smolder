@@ -44,6 +44,7 @@ This includes:
 
 - Windows `smolder-core` interop tests
 - Windows `smolder-tools` interop tests
+- Windows encrypted `IPC$` / named-pipe / RPC coverage
 - `smbexec whoami`
 - `psexec whoami`
 
@@ -87,6 +88,7 @@ Healthy release validation should end with:
 - Windows release gate printing:
   - `nt authority\system` for `smbexec`
   - `nt authority\system` for `psexec`
+- Windows `windows_rpc_encryption` passing
 
 Known fixture caveats that do not block release on their own:
 
@@ -94,6 +96,7 @@ Known fixture caveats that do not block release on their own:
 - local Samba may reject the resiliency IOCTL
 - local Samba may not preserve durable reopen state after transport drop
 - Windows DFS is skipped unless `SMOLDER_WINDOWS_DFS_ROOT` is set
+- the Windows `ADMIN$` negative encryption probe skips when the Tiny11 fixture is globally encrypted
 
 ## Failure Triage
 

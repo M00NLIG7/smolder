@@ -142,6 +142,16 @@ async fn require_encryption_rejects_admin_share_when_configured() {
         return;
     };
 
+    let admin_share = connect_share(&config, false)
+        .await
+        .expect("ADMIN$ should allow a baseline connection probe");
+    if admin_share.encryption_required() {
+        eprintln!(
+            "skipping Windows encryption enforcement test: ADMIN$ already requires encryption on this fixture"
+        );
+        return;
+    }
+
     let error = connect_share(&config, true)
         .await
         .expect_err("ADMIN$ should be rejected when encryption is required");

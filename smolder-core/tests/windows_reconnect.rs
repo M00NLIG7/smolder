@@ -5,10 +5,10 @@ use smolder_core::prelude::{
     TokioTcpTransport, TreeConnected,
 };
 use smolder_proto::smb::smb2::{
-    CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, FlushRequest,
-    GlobalCapabilities, NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities,
-    PreauthIntegrityHashId, ReadRequest, SessionId, ShareAccess, SigningMode, TreeConnectRequest,
-    TreeId, WriteRequest,
+    CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect,
+    EncryptionCapabilities, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, SessionId, ShareAccess,
+    SigningMode, TreeConnectRequest, TreeId, WriteRequest,
 };
 
 fn required_env(name: &str) -> Option<String> {
@@ -59,15 +59,20 @@ impl WindowsConfig {
 fn negotiate_request() -> NegotiateRequest {
     NegotiateRequest {
         security_mode: SigningMode::ENABLED,
-        capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::LEASING,
+        capabilities: GlobalCapabilities::LARGE_MTU
+            | GlobalCapabilities::LEASING
+            | GlobalCapabilities::ENCRYPTION,
         client_guid: *b"smolder-wincli01",
         dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
-        negotiate_contexts: vec![NegotiateContext::preauth_integrity(
-            PreauthIntegrityCapabilities {
+        negotiate_contexts: vec![
+            NegotiateContext::preauth_integrity(PreauthIntegrityCapabilities {
                 hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
                 salt: b"smolder-windows-salt".to_vec(),
-            },
-        )],
+            }),
+            NegotiateContext::encryption_capabilities(EncryptionCapabilities {
+                ciphers: vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm],
+            }),
+        ],
     }
 }
 

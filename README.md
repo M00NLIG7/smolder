@@ -113,6 +113,23 @@ SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
 cargo test -p smolder-tools --test windows_encryption -- --nocapture
 ```
 
+For encrypted `IPC$` / named-pipe / RPC coverage on Tiny11, enable SMB server
+encryption globally once:
+
+```powershell
+Set-SmbServerConfiguration -EncryptData $true -Force
+(Get-SmbServerConfiguration).EncryptData
+```
+
+Then run the core encrypted `IPC$` test:
+
+```bash
+SMOLDER_WINDOWS_HOST=127.0.0.1 \
+SMOLDER_WINDOWS_USERNAME=windowsfixture \
+SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+cargo test -p smolder-core --test windows_rpc_encryption -- --nocapture
+```
+
 The local Samba fixture now includes an encrypted share named `SMOLDERENC` on
 port `1445`. Run the core encryption interop test with:
 

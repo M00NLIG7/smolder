@@ -21,6 +21,7 @@ Current local fixture assumptions:
 - Username: `windowsfixture`
 - Password: `windowsfixture`
 - Encrypted share: `SMOLDERENC`
+- Global SMB encryption: `Set-SmbServerConfiguration -EncryptData $true`
 - Optional DFS namespace root: `SMOLDER_WINDOWS_DFS_ROOT`
 
 Ensure the NAT rule exists:
@@ -46,6 +47,13 @@ export SMOLDER_WINDOWS_HOST=127.0.0.1
 export SMOLDER_WINDOWS_USERNAME=windowsfixture
 export SMOLDER_WINDOWS_PASSWORD=windowsfixture
 export SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC
+```
+
+One-time fixture setup for encrypted `IPC$` / named-pipe coverage:
+
+```powershell
+Set-SmbServerConfiguration -EncryptData $true -Force
+(Get-SmbServerConfiguration).EncryptData
 ```
 
 Optional DFS gate:
@@ -79,8 +87,9 @@ scripts/run-windows-release-gate.sh --no-remote-exec
 
 When the fixture is healthy:
 
-- `windows_interop`, `windows_reconnect`, `windows_encryption`, `named_pipe_interop`, and `rpc_interop` pass
+- `windows_interop`, `windows_reconnect`, `windows_encryption`, `named_pipe_interop`, `rpc_interop`, and `windows_rpc_encryption` pass
 - `smolder-tools` Windows reconnect and encryption tests pass
+- the `ADMIN$` encryption-enforcement probe skips when the fixture is globally encrypted
 - Windows DFS runs only when `SMOLDER_WINDOWS_DFS_ROOT` is set
 - `smbexec ... whoami` prints `nt authority\system`
 - `psexec ... whoami` prints `nt authority\system`

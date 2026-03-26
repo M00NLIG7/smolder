@@ -29,6 +29,7 @@ Release policy and required gate selection live in
 - Password: `windowsfixture`
 - Plain share fixture: `ADMIN$`
 - Encrypted share fixture: `SMOLDERENC`
+- Global encrypted `IPC$` fixture: server `EncryptData=True`
 - DFS fixture: `SMOLDER_WINDOWS_DFS_ROOT`
 
 Base environment:
@@ -73,6 +74,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Windows | encrypted file I/O | `windows_encryption.rs` |
 | `smolder-core` | Windows | named-pipe open/write/read over `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Windows | RPC bind plus `OpenSCManagerW` over `svcctl` | `rpc_interop.rs` |
+| `smolder-core` | Windows | encrypted `IPC$`, named pipe, and `OpenSCManagerW` over `svcctl` | `windows_rpc_encryption.rs` |
 | `smolder-core` | Samba | negotiate, auth, file I/O, IOCTLs, lease-aware create, durable reconnect attempt | `samba_negotiate.rs` |
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
@@ -171,6 +173,15 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME=windowsfixture \
 SMOLDER_WINDOWS_PASSWORD=windowsfixture \
 cargo test -p smolder-core --test rpc_interop -- --nocapture
+```
+
+Encrypted `IPC$` / RPC interop:
+
+```bash
+SMOLDER_WINDOWS_HOST=127.0.0.1 \
+SMOLDER_WINDOWS_USERNAME=windowsfixture \
+SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+cargo test -p smolder-core --test windows_rpc_encryption -- --nocapture
 ```
 
 ### Samba

@@ -108,6 +108,12 @@ run_windows_core() {
     "SMOLDER_WINDOWS_USERNAME=${SMOLDER_WINDOWS_USERNAME}" \
     "SMOLDER_WINDOWS_PASSWORD=${SMOLDER_WINDOWS_PASSWORD}" \
     cargo test -p smolder-core --test rpc_interop -- --nocapture
+
+  run_env_cmd \
+    "SMOLDER_WINDOWS_HOST=${SMOLDER_WINDOWS_HOST}" \
+    "SMOLDER_WINDOWS_USERNAME=${SMOLDER_WINDOWS_USERNAME}" \
+    "SMOLDER_WINDOWS_PASSWORD=${SMOLDER_WINDOWS_PASSWORD}" \
+    cargo test -p smolder-core --test windows_rpc_encryption -- --nocapture
 }
 
 run_windows_tools() {

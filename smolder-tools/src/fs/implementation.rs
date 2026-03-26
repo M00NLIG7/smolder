@@ -552,6 +552,15 @@ impl<T> Share<T> {
         &self.name
     }
 
+    /// Returns whether the connected share requires SMB encryption.
+    #[must_use]
+    pub fn encryption_required(&self) -> bool
+    where
+        T: Transport + Send,
+    {
+        self.connection().state().encryption_required
+    }
+
     /// Sets the maximum file-transfer chunk size used by this share.
     #[must_use]
     pub fn with_transfer_chunk_size(mut self, transfer_chunk_size: u32) -> Self {
