@@ -86,10 +86,6 @@ fn temp_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(unique_name(prefix))
 }
 
-fn samba_share_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docker/samba/share")
-}
-
 fn smb_url(config: &SambaConfig, remote_path: &str) -> String {
     if remote_path.is_empty() {
         format!("smb://{}:{}/{}", config.host, config.port, config.share)
@@ -306,13 +302,15 @@ async fn mv_command_renames_files_when_configured() {
 #[tokio::test]
 async fn rm_command_deletes_files_when_configured() {
     let _guard = samba_lock().lock().await;
-    let Some(config) = SambaConfig::from_env() else {
+    let Some((config, mut share)) = connected_share().await else {
         return;
     };
 
     let remote_path = unique_name("smolder-cli-rm");
-    let local_path = samba_share_root().join(&remote_path);
-    fs::write(&local_path, b"smolder cli rm payload").expect("should seed remote file");
+    share
+        .write(&remote_path, b"smolder cli rm payload")
+        .await
+        .expect("should seed remote file");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
     command.arg("rm").arg(smb_url(&config, &remote_path));
@@ -325,8 +323,6 @@ async fn rm_command_deletes_files_when_configured() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(
-        !local_path.exists(),
-        "CLI remove should delete the backing file"
-    );
+    let listing = share.list("").await.expect("listing should succeed");
+    assert!(!listing.iter().any(|entry| entry.name == remote_path));
 }
