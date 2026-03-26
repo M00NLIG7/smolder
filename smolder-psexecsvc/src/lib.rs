@@ -13,6 +13,8 @@ pub struct LaunchConfig {
     pub service_name: String,
     /// Whether to run the service logic directly in the foreground.
     pub console_mode: bool,
+    /// Optional local file used for payload startup diagnostics.
+    pub debug_log_path: Option<PathBuf>,
     /// Remaining service arguments.
     pub service_args: Vec<OsString>,
 }
@@ -54,6 +56,7 @@ pub struct PipeServiceArgs {
 pub fn parse_launch_config(args: &[OsString]) -> Result<LaunchConfig, String> {
     let mut service_name = None;
     let mut console_mode = false;
+    let mut debug_log_path = None;
     let mut service_args = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -68,6 +71,13 @@ pub fn parse_launch_config(args: &[OsString]) -> Result<LaunchConfig, String> {
             "--console" => {
                 console_mode = true;
             }
+            "--debug-log" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing value for --debug-log".to_string())?;
+                debug_log_path = Some(PathBuf::from(value));
+            }
             _ => {
                 service_args.push(args[index].clone());
             }
@@ -78,6 +88,7 @@ pub fn parse_launch_config(args: &[OsString]) -> Result<LaunchConfig, String> {
     Ok(LaunchConfig {
         service_name: service_name.unwrap_or_else(|| "smolder-psexecsvc".to_string()),
         console_mode,
+        debug_log_path,
         service_args,
     })
 }
@@ -257,6 +268,29 @@ mod tests {
             LaunchConfig {
                 service_name: "SMOLDERTEST".to_string(),
                 console_mode: true,
+                debug_log_path: None,
+                service_args: vec!["--script".into(), "run.cmd".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_launch_config_extracts_optional_debug_log_path() {
+        let config = parse_launch_config(&[
+            "--service-name".into(),
+            "SMOLDERTEST".into(),
+            "--debug-log".into(),
+            "C:\\Temp\\svc.log".into(),
+            "--script".into(),
+            "run.cmd".into(),
+        ])
+        .expect("launch config should parse");
+        assert_eq!(
+            config,
+            LaunchConfig {
+                service_name: "SMOLDERTEST".to_string(),
+                console_mode: false,
+                debug_log_path: Some(PathBuf::from("C:\\Temp\\svc.log")),
                 service_args: vec!["--script".into(), "run.cmd".into()],
             }
         );

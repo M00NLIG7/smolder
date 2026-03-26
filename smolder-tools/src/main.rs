@@ -920,8 +920,7 @@ mod tests {
                 );
                 assert_eq!(
                     request,
-                    ExecRequest::command("whoami")
-                        .with_timeout(Duration::from_secs(30))
+                    ExecRequest::command("whoami").with_timeout(Duration::from_secs(30))
                 );
             }
             other => panic!("unexpected command variant: {other:?}"),
@@ -959,8 +958,7 @@ mod tests {
                 );
                 assert_eq!(
                     request,
-                    ExecRequest::command("dir")
-                        .with_working_directory("C:\\Temp")
+                    ExecRequest::command("dir").with_working_directory("C:\\Temp")
                 );
                 assert_eq!(service_binary, None);
                 assert!(!interactive);
@@ -977,7 +975,7 @@ mod tests {
             "smb://server".to_string(),
             "--command=dir".to_string(),
             "--service-binary".to_string(),
-            "target/x86_64-pc-windows-msvc/release/smolder-psexecsvc.exe".to_string(),
+            "target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe".to_string(),
             "--username=user".to_string(),
             "--password=pass".to_string(),
         ])
@@ -993,7 +991,7 @@ mod tests {
                 assert_eq!(
                     service_binary,
                     Some(PathBuf::from(
-                        "target/x86_64-pc-windows-msvc/release/smolder-psexecsvc.exe"
+                        "target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe"
                     ))
                 )
             }
@@ -1020,10 +1018,7 @@ mod tests {
                 ..
             } => {
                 assert!(interactive);
-                assert_eq!(
-                    request,
-                    ExecRequest::command(String::new())
-                );
+                assert_eq!(request, ExecRequest::command(String::new()));
             }
             other => panic!("unexpected command variant: {other:?}"),
         }

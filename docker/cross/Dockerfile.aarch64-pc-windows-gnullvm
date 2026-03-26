@@ -1,0 +1,33 @@
+ARG CROSS_BASE_IMAGE=ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main
+FROM ${CROSS_BASE_IMAGE}
+
+ARG LLVM_MINGW_VERSION=20260324
+ARG LLVM_MINGW_CRT=ucrt
+ARG LLVM_MINGW_DISTRO=ubuntu-22.04
+ARG LLVM_MINGW_ARCH=aarch64
+
+RUN apt-get update \
+    && apt-get install --assume-yes --no-install-recommends \
+        ca-certificates \
+        curl \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add aarch64-pc-windows-gnullvm
+
+RUN curl -fsSL -o /tmp/llvm-mingw.tar.xz \
+    "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-${LLVM_MINGW_CRT}-${LLVM_MINGW_DISTRO}-${LLVM_MINGW_ARCH}.tar.xz" \
+    && mkdir -p /opt/llvm-mingw \
+    && tar -xJf /tmp/llvm-mingw.tar.xz -C /opt/llvm-mingw --strip-components=1 \
+    && rm -f /tmp/llvm-mingw.tar.xz
+
+ENV PATH="/opt/llvm-mingw/bin:${PATH}" \
+    LLVM_MINGW_ROOT=/opt/llvm-mingw \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt \
+    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
+    CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER=/opt/llvm-mingw/bin/aarch64-w64-mingw32-clang \
+    CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_AR=/opt/llvm-mingw/bin/llvm-ar \
+    CC_aarch64_pc_windows_gnullvm=/opt/llvm-mingw/bin/aarch64-w64-mingw32-clang \
+    CXX_aarch64_pc_windows_gnullvm=/opt/llvm-mingw/bin/aarch64-w64-mingw32-clang++

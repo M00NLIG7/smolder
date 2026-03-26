@@ -52,6 +52,25 @@ packet.extend_from_slice(&body.encode()?);
 let frame = SessionMessage::new(packet).encode()?;
 ```
 
+## Building The PsExec Service Payload
+
+Build the Windows service payload with `cross`:
+
+```bash
+cross build -p smolder-psexecsvc --target aarch64-pc-windows-gnullvm --release
+```
+
+The workspace now carries a target-specific `Cross.toml` and
+`docker/cross/Dockerfile.aarch64-pc-windows-gnullvm` that:
+
+- pass through the host's proxy environment variables into `cross`
+- emit the service payload at
+  `target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe`
+
+If your network requires additional CA certificates or proxy customization, use
+an untracked local override under `docker/cross/private/` or
+`docker/cross/*.local`.
+
 ## Security Notice
 
 This tool is designed for security research and penetration testing. Always ensure you have proper authorization before testing any systems or networks.

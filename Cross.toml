@@ -1,0 +1,21 @@
+[build.env]
+passthrough = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+]
+
+[target.x86_64-pc-windows-gnu.dockerfile]
+file = "docker/cross/Dockerfile.x86_64-pc-windows-gnu"
+context = "."
+
+[target.aarch64-pc-windows-gnullvm.dockerfile]
+file = "docker/cross/Dockerfile.aarch64-pc-windows-gnullvm"
+context = "."
+
+[target.aarch64-pc-windows-gnullvm.image]
+name = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+toolchain = ["linux/arm64=aarch64-unknown-linux-gnu"]

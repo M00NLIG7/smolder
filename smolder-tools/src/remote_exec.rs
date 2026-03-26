@@ -419,11 +419,16 @@ impl RemoteExecClient {
                 "interactive sessions require psexec mode",
             ));
         }
+        if self.psexec_service_binary.is_some() {
+            return Err(CoreError::Unsupported(
+                "interactive psexec with the staged service payload is not supported yet",
+            ));
+        }
         let service_binary =
             self.psexec_service_binary
                 .as_deref()
-                .ok_or(CoreError::InvalidInput(
-                    "interactive psexec requires a staged service binary",
+                .ok_or(CoreError::Unsupported(
+                    "interactive psexec is not supported yet",
                 ))?;
         let timeout_budget = request.timeout.unwrap_or(self.timeout);
         let command_paths =
@@ -592,13 +597,30 @@ impl RemoteExecClient {
 
         let service_name = command_paths.service_name.clone();
         let execution = async {
-            let script = match mode {
-                ExecMode::SmbExec => build_smbexec_script(&request, &command_paths),
-                ExecMode::PsExec => build_psexec_script(&request),
-            };
-            admin
-                .write_all(&command_paths.script_relative, script.as_bytes())
-                .await?;
+            match mode {
+                ExecMode::SmbExec => {
+                    let script = build_smbexec_script(&request, &command_paths);
+                    admin
+                        .write_all(&command_paths.script_relative, script.as_bytes())
+                        .await?;
+                }
+                ExecMode::PsExec => {
+                    let script = if self.psexec_service_binary.is_some() {
+                        build_psexec_script(&request)
+                    } else {
+                        build_psexec_wrapper_script(&command_paths)
+                    };
+                    admin
+                        .write_all(&command_paths.script_relative, script.as_bytes())
+                        .await?;
+                    if self.psexec_service_binary.is_none() {
+                        let runner = build_psexec_runner_script(&request, &command_paths);
+                        admin
+                            .write_all(&command_paths.runner_relative, runner.as_bytes())
+                            .await?;
+                    }
+                }
+            }
             if matches!(mode, ExecMode::PsExec) {
                 if let Some(service_binary) = &self.psexec_service_binary {
                     let payload = fs::read(service_binary).await.map_err(CoreError::LocalIo)?;
@@ -666,6 +688,7 @@ impl RemoteExecClient {
             let _ = admin.try_remove(&command_paths.stdout_relative).await;
             let _ = admin.try_remove(&command_paths.stderr_relative).await;
             let _ = admin.try_remove(&command_paths.exit_relative).await;
+            let _ = admin.try_remove(&command_paths.debug_relative).await;
             let _ = admin.try_remove(&command_paths.runner_relative).await;
             let _ = admin.try_remove(&command_paths.script_relative).await;
             if matches!(mode, ExecMode::PsExec) {
@@ -724,12 +747,14 @@ struct CommandPaths {
     stdout_relative: String,
     stderr_relative: String,
     exit_relative: String,
+    debug_relative: String,
     script_relative: String,
     runner_relative: String,
     service_binary_relative: String,
     stdout_absolute: String,
     stderr_absolute: String,
     exit_absolute: String,
+    debug_absolute: String,
     script_absolute: String,
     runner_absolute: String,
     service_binary_absolute: String,
@@ -742,6 +767,7 @@ impl CommandPaths {
         let stdout_relative = join_share_path(staging_directory, &format!("{prefix}.out"));
         let stderr_relative = join_share_path(staging_directory, &format!("{prefix}.err"));
         let exit_relative = join_share_path(staging_directory, &format!("{prefix}.exit"));
+        let debug_relative = join_share_path(staging_directory, &format!("{prefix}.dbg"));
         let script_relative = join_share_path(staging_directory, &format!("{prefix}.cmd"));
         let runner_relative = join_share_path(staging_directory, &format!("{prefix}.bat"));
         let service_binary_relative =
@@ -753,12 +779,14 @@ impl CommandPaths {
             stdout_absolute: admin_absolute_path(&stdout_relative),
             stderr_absolute: admin_absolute_path(&stderr_relative),
             exit_absolute: admin_absolute_path(&exit_relative),
+            debug_absolute: admin_absolute_path(&debug_relative),
             script_absolute: admin_absolute_path(&script_relative),
             runner_absolute: admin_absolute_path(&runner_relative),
             service_binary_absolute: admin_absolute_path(&service_binary_relative),
             stdout_relative,
             stderr_relative,
             exit_relative,
+            debug_relative,
             script_relative,
             runner_relative,
             service_binary_relative,
@@ -1469,21 +1497,30 @@ fn build_psexec_service_command(
 ) -> String {
     match psexec_service_binary {
         Some(_) => format!(
-            "{} --service-name {} --script {} --stdout {} --stderr {} --exit-code {}",
+            "{} --service-name {}{} --script {} --stdout {} --stderr {} --exit-code {}",
             quote_windows_arg(&command_paths.service_binary_absolute),
             quote_windows_arg(&command_paths.service_name),
+            psexec_debug_log_arg(command_paths),
             quote_windows_arg(&command_paths.script_absolute),
             quote_windows_arg(&command_paths.stdout_absolute),
             quote_windows_arg(&command_paths.stderr_absolute),
             quote_windows_arg(&command_paths.exit_absolute),
         ),
         None => format!(
-            r#"%COMSPEC% /Q /V:ON /c ""{}" 1> "{}" 2> "{}" & echo !ERRORLEVEL! > "{}"""#,
-            command_paths.script_absolute,
-            command_paths.stdout_absolute,
-            command_paths.stderr_absolute,
-            command_paths.exit_absolute
+            r#"%COMSPEC% /Q /c {}"#,
+            quote_windows_arg(&command_paths.script_absolute)
         ),
+    }
+}
+
+fn psexec_debug_log_arg(command_paths: &CommandPaths) -> String {
+    if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
+        format!(
+            " --debug-log {}",
+            quote_windows_arg(&command_paths.debug_absolute)
+        )
+    } else {
+        String::new()
     }
 }
 
@@ -1519,10 +1556,34 @@ fn build_psexec_script(request: &ExecRequest) -> String {
     script
 }
 
-fn build_smbexec_script(
-    request: &ExecRequest,
-    command_paths: &CommandPaths,
-) -> String {
+fn build_psexec_wrapper_script(command_paths: &CommandPaths) -> String {
+    let runner_path = quote_windows_arg(&command_paths.runner_absolute);
+    let mut script = String::from("@echo off\r\n");
+    script.push_str(&format!(r#"%COMSPEC% /Q /c {runner_path}"#));
+    script.push_str("\r\n");
+    script
+}
+
+fn build_psexec_runner_script(request: &ExecRequest, command_paths: &CommandPaths) -> String {
+    let stdout_path = quote_windows_arg(&command_paths.stdout_absolute);
+    let stderr_path = quote_windows_arg(&command_paths.stderr_absolute);
+    let exit_path = quote_windows_arg(&command_paths.exit_absolute);
+    let mut script = String::from("@echo off\r\n");
+    if let Some(working_directory) = &request.working_directory {
+        script.push_str(&format!(r#"cd /d "{working_directory}""#));
+        script.push_str("\r\n");
+        script.push_str("if errorlevel 1 goto write_exit\r\n");
+    }
+    script.push_str(request.command_text().expect("validated non-empty command"));
+    script.push_str(&format!(r#" 1> {stdout_path} 2> {stderr_path}"#));
+    script.push_str("\r\n");
+    script.push_str(":write_exit\r\n");
+    script.push_str(&format!(r#"echo %ERRORLEVEL% > {exit_path}"#));
+    script.push_str("\r\n");
+    script
+}
+
+fn build_smbexec_script(request: &ExecRequest, command_paths: &CommandPaths) -> String {
     let runner_script = build_smbexec_runner_script(request, command_paths);
     let runner_path = quote_windows_arg(&command_paths.runner_absolute);
     let mut script = String::from("@echo off\r\n");
@@ -1547,10 +1608,7 @@ fn build_smbexec_script(
     script
 }
 
-fn build_smbexec_runner_script(
-    request: &ExecRequest,
-    command_paths: &CommandPaths,
-) -> String {
+fn build_smbexec_runner_script(request: &ExecRequest, command_paths: &CommandPaths) -> String {
     let stdout_path = quote_windows_arg(&command_paths.stdout_absolute);
     let exit_path = quote_windows_arg(&command_paths.exit_absolute);
     let mut script = String::from("@echo off\r\n");
@@ -1659,8 +1717,7 @@ fn parse_query_service_status_response(response: &[u8]) -> Result<u32, CoreError
             "scmr query-service-status response was too short",
         ));
     }
-    let current_state =
-        u32::from_le_bytes(response[4..8].try_into().expect("current-state slice"));
+    let current_state = u32::from_le_bytes(response[4..8].try_into().expect("current-state slice"));
     let status = u32::from_le_bytes(response[28..32].try_into().expect("status slice"));
     if status != 0 {
         return Err(CoreError::RemoteOperation {
@@ -1861,18 +1918,22 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        build_psexec_interactive_service_command, build_psexec_script,
-        build_psexec_service_command, build_smbexec_runner_script, build_smbexec_script,
-        build_smbexec_service_command, escape_cmd_for_echo, normalize_remote_file_name,
-        parse_create_service_response, parse_exit_code, parse_exit_control_line,
-        parse_open_handle_response, quote_windows_arg, CommandPaths, ExecMode, ExecRequest,
+        build_psexec_interactive_service_command, build_psexec_runner_script, build_psexec_script,
+        build_psexec_service_command, build_psexec_wrapper_script, build_smbexec_runner_script,
+        build_smbexec_script, build_smbexec_service_command, escape_cmd_for_echo,
+        normalize_remote_file_name, parse_create_service_response, parse_exit_code,
+        parse_exit_control_line, parse_open_handle_response, quote_windows_arg, CommandPaths,
+        ExecMode, ExecRequest,
     };
 
     #[test]
     fn smbexec_command_redirects_output_and_exit_code() {
         let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
         let command = build_smbexec_service_command(&paths);
-        assert_eq!(command, format!(r#"%COMSPEC% /Q /c {}"#, paths.script_absolute));
+        assert_eq!(
+            command,
+            format!(r#"%COMSPEC% /Q /c {}"#, paths.script_absolute)
+        );
     }
 
     #[test]
@@ -1883,7 +1944,9 @@ mod tests {
         assert!(script.starts_with("@echo off\r\n"));
         assert!(script.contains(r#"echo @echo off > "C:\Windows\Temp\SMOLDER-"#));
         assert!(script.contains(r#"echo cd /d "C:\" >> "C:\Windows\Temp\SMOLDER-"#));
-        assert!(script.contains(r#"echo if errorlevel 1 goto write_exit >> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(
+            script.contains(r#"echo if errorlevel 1 goto write_exit >> "C:\Windows\Temp\SMOLDER-"#)
+        );
         assert!(script.contains(r#"echo whoami ^> "C:\Windows\Temp\SMOLDER-"#));
         assert!(script.contains(r#".out" 2^>^&1 >> "C:\Windows\Temp\SMOLDER-"#));
         assert!(script.contains(r#"%COMSPEC% /Q /c "C:\Windows\Temp\SMOLDER-"#));
@@ -1924,13 +1987,42 @@ mod tests {
     }
 
     #[test]
-    fn psexec_command_redirects_stdout_and_stderr_separately() {
+    fn psexec_service_command_without_payload_runs_wrapper_script() {
         let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
         let command = build_psexec_service_command(None, &paths);
-        assert!(command.contains(r#""C:\Windows\Temp\SMOLDER-"#));
-        assert!(command.contains(r#".cmd" 1> "C:\Windows\Temp\SMOLDER-"#));
-        assert!(command.contains(r#"2> "C:\Windows\Temp\SMOLDER-"#));
-        assert!(command.contains(r#"echo !ERRORLEVEL! > "C:\Windows\Temp\SMOLDER-"#));
+        assert_eq!(
+            command,
+            format!(r#"%COMSPEC% /Q /c "{}""#, paths.script_absolute)
+        );
+    }
+
+    #[test]
+    fn psexec_runner_redirects_stdout_stderr_and_exit_code() {
+        let request = ExecRequest::command("whoami").with_working_directory(r"C:\");
+        let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
+        let script = build_psexec_runner_script(&request, &paths);
+        assert!(script.starts_with("@echo off\r\n"));
+        assert!(script.contains(r#"cd /d "C:\""#));
+        assert!(script.contains("if errorlevel 1 goto write_exit\r\n"));
+        assert!(script.contains(r#"whoami 1> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#".out" 2> "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(r#".err""#));
+        assert!(script.contains(":write_exit\r\n"));
+        assert!(script.contains(r#"echo %ERRORLEVEL% > "C:\Windows\Temp\SMOLDER-"#));
+        assert!(script.contains(".exit"));
+    }
+
+    #[test]
+    fn psexec_wrapper_invokes_runner_via_cmd() {
+        let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
+        let script = build_psexec_wrapper_script(&paths);
+        assert_eq!(
+            script,
+            format!(
+                "@echo off\r\n%COMSPEC% /Q /c \"{}\"\r\n",
+                paths.runner_absolute
+            )
+        );
     }
 
     #[test]
@@ -2008,7 +2100,10 @@ mod tests {
     fn remote_binary_name_rejects_separators() {
         let error =
             normalize_remote_file_name(r"bad\name.exe").expect_err("separator should be rejected");
-        assert!(matches!(error, smolder_core::error::CoreError::PathInvalid(_)));
+        assert!(matches!(
+            error,
+            smolder_core::error::CoreError::PathInvalid(_)
+        ));
     }
 
     #[test]
