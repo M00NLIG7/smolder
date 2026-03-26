@@ -24,7 +24,10 @@ use smolder_proto::smb::smb2::{
 use smolder_core::dfs::{resolve_unc_path, DfsReferral, UncPath};
 
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
-use crate::client::{Authenticated, Connection, TreeConnected};
+use crate::client::{
+    Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle,
+    TreeConnected,
+};
 use crate::error::CoreError;
 use crate::transport::{TokioTcpTransport, Transport};
 
@@ -477,7 +480,31 @@ where
             self.ensure_lease_support()?;
         }
         let request = options.to_create_request(path.as_ref())?;
-        let response = self.connection_mut().create(&request).await?;
+        let durable = if let Some(durable_options) =
+            options.durable_options(self.connection().state().negotiated.dialect_revision)
+        {
+            Some(
+                self.connection_mut()
+                    .create_durable(&request, durable_options)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let response = if let Some(handle) = durable.as_ref() {
+            handle.create_response().clone()
+        } else {
+            self.connection_mut().create(&request).await?
+        };
+        let resilient = if let Some(timeout) = options.resilient_timeout {
+            Some(
+                self.connection_mut()
+                    .request_resiliency(response.file_id, timeout)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let lease = response
             .lease_v2()
             .map_err(CoreError::from)?
@@ -491,6 +518,8 @@ where
             connection: Some(connection),
             file_id: response.file_id,
             lease,
+            durable,
+            resilient,
             position: 0,
             end_of_file: response.end_of_file,
             max_read_size,
@@ -934,6 +963,8 @@ pub struct RemoteFile<'a, T = TokioTcpTransport> {
     connection: Option<Connection<T, TreeConnected>>,
     file_id: FileId,
     lease: Option<Lease>,
+    durable: Option<DurableHandle>,
+    resilient: Option<ResilientHandle>,
     position: u64,
     end_of_file: u64,
     max_read_size: u32,
@@ -1080,6 +1111,18 @@ where
     #[must_use]
     pub fn lease(&self) -> Option<Lease> {
         self.lease
+    }
+
+    /// Returns the durable open state for the handle, if the open requested one.
+    #[must_use]
+    pub fn durable_handle(&self) -> Option<&DurableHandle> {
+        self.durable.as_ref()
+    }
+
+    /// Returns the granted resiliency state for the handle, if requested.
+    #[must_use]
+    pub fn resilient_handle(&self) -> Option<ResilientHandle> {
+        self.resilient
     }
 
     /// Returns the current logical position for the handle.
@@ -1401,7 +1444,7 @@ where
 }
 
 /// Rust-style options for opening a remote file.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenOptions {
     read: bool,
     write: bool,
@@ -1409,6 +1452,8 @@ pub struct OpenOptions {
     truncate: bool,
     create_new: bool,
     lease: Option<LeaseRequest>,
+    durable: Option<DurableOpenOptions>,
+    resilient_timeout: Option<u32>,
 }
 
 impl OpenOptions {
@@ -1460,7 +1505,21 @@ impl OpenOptions {
         self
     }
 
-    fn to_create_request(self, path: &str) -> Result<CreateRequest, CoreError> {
+    /// Requests a durable handle for the opened file.
+    #[must_use]
+    pub fn durable(mut self, durable: DurableOpenOptions) -> Self {
+        self.durable = Some(durable);
+        self
+    }
+
+    /// Requests handle resiliency for the opened file.
+    #[must_use]
+    pub fn resilient(mut self, timeout: u32) -> Self {
+        self.resilient_timeout = Some(timeout);
+        self
+    }
+
+    fn to_create_request(&self, path: &str) -> Result<CreateRequest, CoreError> {
         if !self.read && !self.write {
             return Err(CoreError::InvalidInput(
                 "open options must request read and/or write access",
@@ -1484,9 +1543,19 @@ impl OpenOptions {
         }
         Ok(request)
     }
+
+    fn durable_options(&self, dialect: Dialect) -> Option<DurableOpenOptions> {
+        self.durable.clone().map(|durable| {
+            if dialect_supports_durable_v2(dialect) && durable.create_guid.is_none() {
+                durable.with_create_guid(random())
+            } else {
+                durable
+            }
+        })
+    }
 }
 
-fn desired_access_mask(options: OpenOptions) -> u32 {
+fn desired_access_mask(options: &OpenOptions) -> u32 {
     let mut desired_access = READ_CONTROL | SYNCHRONIZE;
     if options.read {
         desired_access |= FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES;
@@ -1498,7 +1567,7 @@ fn desired_access_mask(options: OpenOptions) -> u32 {
     desired_access
 }
 
-fn create_disposition(options: OpenOptions) -> CreateDisposition {
+fn create_disposition(options: &OpenOptions) -> CreateDisposition {
     if options.create_new {
         CreateDisposition::Create
     } else if options.create && options.truncate {
@@ -1510,6 +1579,10 @@ fn create_disposition(options: OpenOptions) -> CreateDisposition {
     } else {
         CreateDisposition::Open
     }
+}
+
+fn dialect_supports_durable_v2(dialect: Dialect) -> bool {
+    matches!(dialect, Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311)
 }
 
 fn default_negotiate_contexts(
@@ -1667,21 +1740,22 @@ mod tests {
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
         CipherId, CloseResponse, Command, CreateContext, CreateDisposition, CreateOptions,
-        CreateRequest, CreateResponse, Dialect, DirectoryInformationEntry, FileAttributes,
-        FileBasicInformation, FileId, FileInfoClass, FileStandardInformation, FlushRequest,
-        FlushResponse, GlobalCapabilities, Header, LeaseState, LeaseV2, MessageId,
-        NegotiateRequest, NegotiateResponse, OplockLevel, QueryDirectoryFlags,
-        QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
-        ReadRequest, ReadResponse, ReadResponseFlags, RequestedOplockLevel, SessionFlags,
-        SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest,
-        SetInfoResponse, ShareFlags, ShareType, SigningMode, TreeCapabilities,
+        CreateRequest, CreateResponse, CtlCode, Dialect, DirectoryInformationEntry,
+        DurableHandleFlags, DurableHandleResponseV2, FileAttributes, FileBasicInformation,
+        FileId, FileInfoClass, FileStandardInformation, FlushRequest, FlushResponse, GlobalCapabilities,
+        Header, IoctlRequest, IoctlResponse, LeaseState, LeaseV2, MessageId,
+        NegotiateRequest, NegotiateResponse, NetworkResiliencyRequest, OplockLevel,
+        QueryDirectoryFlags, QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest,
+        QueryInfoResponse, ReadRequest, ReadResponse, ReadResponseFlags, RequestedOplockLevel,
+        SessionFlags, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode,
+        SetInfoRequest, SetInfoResponse, ShareFlags, ShareType, SigningMode, TreeCapabilities,
         TreeConnectRequest, TreeConnectResponse, TreeDisconnectResponse, TreeId, WriteRequest,
         WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-    use crate::client::Connection;
+    use crate::client::{Connection, DurableOpenOptions, ResilientHandle};
     use crate::error::CoreError;
     use crate::fs::{LeaseRequest, OpenOptions, Share, SmbClient};
     use crate::transport::Transport;
@@ -1807,6 +1881,11 @@ mod tests {
     fn outbound_set_info(frame: &[u8]) -> SetInfoRequest {
         let frame = SessionMessage::decode(frame).expect("frame should decode");
         SetInfoRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
+    }
+
+    fn outbound_ioctl(frame: &[u8]) -> IoctlRequest {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        IoctlRequest::decode(&frame.payload[Header::LEN..]).expect("request should decode")
     }
 
     #[test]
@@ -1940,6 +2019,165 @@ mod tests {
         assert_eq!(create.requested_oplock_level, RequestedOplockLevel::Lease);
         let requested = create.lease_v2().expect("lease should parse");
         assert_eq!(requested, Some(requested_lease.into_proto()));
+    }
+
+    #[tokio::test]
+    async fn open_with_durable_handle_requests_v2_context_and_exposes_state() {
+        let file_id = FileId {
+            persistent: 0x11,
+            volatile: 0x22,
+        };
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_id,
+            create_contexts: vec![CreateContext::new(
+                b"DH2Q".to_vec(),
+                DurableHandleResponseV2 {
+                    timeout: 30_000,
+                    flags: DurableHandleFlags::PERSISTENT,
+                }
+                .encode(),
+            )],
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let mut share = build_share(reads).await;
+        let durable = DurableOpenOptions::new()
+            .with_timeout(30_000)
+            .with_persistent(true);
+        let file = share
+            .open("notes.txt", OpenOptions::new().read(true).durable(durable))
+            .await
+            .expect("durable open should succeed");
+
+        let durable_handle = file
+            .durable_handle()
+            .expect("durable state should be present");
+        assert_eq!(durable_handle.file_id(), file_id);
+        assert_eq!(durable_handle.timeout(), 30_000);
+        assert_eq!(durable_handle.flags(), DurableHandleFlags::PERSISTENT);
+        file.close().await.expect("close should succeed");
+
+        let writes = transport_writes(share);
+        let create = outbound_create(&writes[3]);
+        let requested = create
+            .create_contexts
+            .iter()
+            .find_map(|context| {
+                context
+                    .durable_handle_request_v2_data()
+                    .expect("durable request should decode")
+            })
+            .expect("durable request v2 context should be present");
+        assert_eq!(requested.timeout, 30_000);
+        assert_eq!(requested.flags, DurableHandleFlags::PERSISTENT);
+        assert_ne!(requested.create_guid, [0; 16]);
+    }
+
+    #[tokio::test]
+    async fn open_with_resiliency_requests_ioctl_and_exposes_state() {
+        let file_id = FileId {
+            persistent: 0x33,
+            volatile: 0x44,
+        };
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_id,
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 4,
+            end_of_file: 4,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Ioctl,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                IoctlResponse {
+                    ctl_code: CtlCode::FSCTL_LMR_REQUEST_RESILIENCY,
+                    file_id,
+                    input: Vec::new(),
+                    output: Vec::new(),
+                    flags: 0,
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let mut share = build_share(reads).await;
+        let file = share
+            .open("notes.txt", OpenOptions::new().read(true).resilient(45_000))
+            .await
+            .expect("resilient open should succeed");
+
+        assert_eq!(
+            file.resilient_handle(),
+            Some(ResilientHandle {
+                file_id,
+                timeout: 45_000,
+            })
+        );
+        file.close().await.expect("close should succeed");
+
+        let writes = transport_writes(share);
+        let ioctl = outbound_ioctl(&writes[4]);
+        assert_eq!(ioctl.ctl_code, CtlCode::FSCTL_LMR_REQUEST_RESILIENCY);
+        assert_eq!(ioctl.file_id, file_id);
+        assert_eq!(
+            NetworkResiliencyRequest::decode(&ioctl.input)
+                .expect("resiliency request should decode"),
+            NetworkResiliencyRequest { timeout: 45_000 }
+        );
     }
 
     #[tokio::test]
