@@ -1,12 +1,14 @@
 //! Authentication providers and protocol helpers.
 
 mod ntlm;
+mod ntlm_rpc;
 mod spnego;
 
 use smolder_proto::smb::smb2::NegotiateResponse;
 use thiserror::Error;
 
 pub use ntlm::{NtlmAuthenticator, NtlmCredentials};
+pub use ntlm_rpc::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};
 
 /// Authentication errors returned while processing GSS/NTLM tokens.
 #[derive(Debug, Error)]

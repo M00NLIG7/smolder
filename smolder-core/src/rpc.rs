@@ -4,6 +4,7 @@ use smolder_proto::rpc::{
     AuthVerifier, BindAckPdu, BindPdu, Packet, PacketFlags, RequestPdu, ResponsePdu, SyntaxId, Uuid,
 };
 
+use crate::auth::NtlmRpcPacketIntegrity;
 use crate::error::CoreError;
 use crate::pipe::NamedPipe;
 use crate::transport::TokioTcpTransport;
@@ -13,6 +14,7 @@ use crate::transport::TokioTcpTransport;
 pub struct PipeRpcClient<T = TokioTcpTransport> {
     pipe: NamedPipe<T>,
     next_call_id: u32,
+    ntlm_packet_integrity: Option<NtlmRpcPacketIntegrity>,
 }
 
 impl<T> PipeRpcClient<T> {
@@ -22,6 +24,7 @@ impl<T> PipeRpcClient<T> {
         Self {
             pipe,
             next_call_id: 1,
+            ntlm_packet_integrity: None,
         }
     }
 
@@ -29,6 +32,21 @@ impl<T> PipeRpcClient<T> {
     #[must_use]
     pub fn pipe(&self) -> &NamedPipe<T> {
         &self.pipe
+    }
+
+    /// Enables automatic NTLM RPC packet-integrity signing and verification.
+    #[must_use]
+    pub fn with_ntlm_packet_integrity(
+        mut self,
+        ntlm_packet_integrity: NtlmRpcPacketIntegrity,
+    ) -> Self {
+        self.ntlm_packet_integrity = Some(ntlm_packet_integrity);
+        self
+    }
+
+    /// Replaces the active NTLM RPC packet-integrity context.
+    pub fn set_ntlm_packet_integrity(&mut self, ntlm_packet_integrity: NtlmRpcPacketIntegrity) {
+        self.ntlm_packet_integrity = Some(ntlm_packet_integrity);
     }
 
     fn next_call_id(&mut self) -> u32 {
@@ -140,7 +158,13 @@ where
         stub_data: Vec<u8>,
         auth_verifier: Option<AuthVerifier>,
     ) -> Result<ResponsePdu, CoreError> {
-        let request = Packet::Request(RequestPdu {
+        if self.ntlm_packet_integrity.is_some() && auth_verifier.is_some() {
+            return Err(CoreError::InvalidInput(
+                "rpc auth verifier cannot be supplied when NTLM packet integrity is enabled",
+            ));
+        }
+
+        let request = RequestPdu {
             call_id: self.next_call_id(),
             flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
             alloc_hint: stub_data.len() as u32,
@@ -148,10 +172,38 @@ where
             opnum,
             object_uuid,
             stub_data,
-            auth_verifier,
-        });
-        let response = self.pipe.call(request.encode()).await?;
+            auth_verifier: auth_verifier.or_else(|| {
+                self.ntlm_packet_integrity
+                    .as_ref()
+                    .map(NtlmRpcPacketIntegrity::placeholder_auth_verifier)
+            }),
+        };
+        let request_packet =
+            if let Some(ntlm_packet_integrity) = self.ntlm_packet_integrity.as_mut() {
+                let placeholder_packet = request.encode();
+                let signed_verifier =
+                    ntlm_packet_integrity.sign_request_verifier(&placeholder_packet)?;
+                RequestPdu {
+                    auth_verifier: Some(signed_verifier),
+                    ..request
+                }
+                .encode()
+            } else {
+                request.encode()
+            };
+        let response = self.pipe.call(request_packet).await?;
         let packet = Packet::decode(&response)?;
+        if let Some(ntlm_packet_integrity) = self.ntlm_packet_integrity.as_mut() {
+            let verifier = match &packet {
+                Packet::Response(response) => response.auth_verifier.as_ref(),
+                Packet::Fault(fault) => fault.auth_verifier.as_ref(),
+                _ => None,
+            }
+            .ok_or(CoreError::InvalidResponse(
+                "expected rpc packet-integrity auth verifier on the response",
+            ))?;
+            ntlm_packet_integrity.verify_response(&response, verifier)?;
+        }
         match packet {
             Packet::Response(response) => Ok(response),
             Packet::Fault(fault) => Err(CoreError::RemoteOperation {
@@ -170,7 +222,7 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::rpc::{
         AuthLevel, AuthType, AuthVerifier, BindAckPdu, BindAckResult, FaultPdu, Packet,
-        PacketFlags, ResponsePdu, SyntaxId, Uuid,
+        PacketFlags, RequestPdu, ResponsePdu, SyntaxId, Uuid,
     };
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
@@ -182,6 +234,7 @@ mod tests {
     };
     use smolder_proto::smb::status::NtStatus;
 
+    use crate::auth::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};
     use crate::client::{Connection, TreeConnected};
     use crate::error::CoreError;
     use crate::pipe::{NamedPipe, PipeAccess};
@@ -352,6 +405,92 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn call_verifies_ntlm_packet_integrity_response() {
+        let request_placeholder = Packet::Request(RequestPdu {
+            call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 2,
+            context_id: 0,
+            opnum: 15,
+            object_uuid: None,
+            stub_data: vec![0xaa, 0xbb],
+            auth_verifier: Some(ntlm_packet_integrity().placeholder_auth_verifier()),
+        })
+        .encode();
+        let response_placeholder = Packet::Response(ResponsePdu {
+            call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 4,
+            context_id: 0,
+            cancel_count: 0,
+            stub_data: vec![1, 2, 3, 4],
+            auth_verifier: Some(ntlm_packet_integrity().placeholder_auth_verifier()),
+        })
+        .encode();
+
+        let mut responder_integrity = ntlm_packet_integrity();
+        let _ = responder_integrity
+            .sign_request_verifier(&request_placeholder)
+            .expect("request signature should advance sequence");
+        let response_verifier = responder_integrity
+            .sign_response_verifier(&response_placeholder)
+            .expect("response signature should succeed");
+
+        let pipe = open_pipe(vec![rpc_response_frame(Packet::Response(ResponsePdu {
+            call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 4,
+            context_id: 0,
+            cancel_count: 0,
+            stub_data: vec![1, 2, 3, 4],
+            auth_verifier: Some(response_verifier),
+        }))])
+        .await;
+        let mut rpc = PipeRpcClient::new(pipe).with_ntlm_packet_integrity(ntlm_packet_integrity());
+
+        let stub = rpc
+            .call(0, 15, vec![0xaa, 0xbb])
+            .await
+            .expect("rpc call should verify packet integrity");
+
+        assert_eq!(stub, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn call_requires_response_verifier_when_ntlm_packet_integrity_is_enabled() {
+        let pipe = open_pipe(vec![rpc_response_frame(Packet::Response(ResponsePdu {
+            call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 4,
+            context_id: 0,
+            cancel_count: 0,
+            stub_data: vec![1, 2, 3, 4],
+            auth_verifier: None,
+        }))])
+        .await;
+        let mut rpc = PipeRpcClient::new(pipe).with_ntlm_packet_integrity(ntlm_packet_integrity());
+
+        let error = rpc
+            .call(0, 15, vec![0xaa, 0xbb])
+            .await
+            .expect_err("missing verifier should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid response: expected rpc packet-integrity auth verifier on the response"
+        );
+    }
+
+    fn ntlm_packet_integrity() -> NtlmRpcPacketIntegrity {
+        NtlmRpcPacketIntegrity::new(
+            &[0x44; 16],
+            NtlmSessionSecurity::new(true, true, true, false),
+            1,
+        )
+        .expect("packet integrity context")
     }
 
     async fn open_pipe(reads: Vec<Vec<u8>>) -> NamedPipe<ScriptedTransport> {
