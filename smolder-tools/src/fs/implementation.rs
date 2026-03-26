@@ -35,6 +35,7 @@ use smolder_proto::smb::status::NtStatus;
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TRANSFER_CHUNK_SIZE: u32 = 64 * 1024;
 const DEFAULT_DFS_REFERRAL_MAX_RESPONSE: u32 = 64 * 1024;
+const DEFAULT_DFS_REFERRAL_MAX_HOPS: usize = 8;
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
 const FILE_APPEND_DATA: u32 = 0x0000_0004;
@@ -280,6 +281,20 @@ impl SmbClientBuilder {
             connection,
             transfer_chunk_size: self.transfer_chunk_size,
         })
+    }
+
+    /// Connects to the UNC host, follows DFS referrals when needed, and
+    /// returns the connected share plus the resolved relative path within it.
+    pub async fn connect_share_path(
+        self,
+        unc: impl AsRef<str>,
+    ) -> Result<(Share<TokioTcpTransport>, String), CoreError> {
+        let builder = self;
+        connect_share_path_with_resolver(unc.as_ref(), move |server| {
+            let builder = builder.clone().server(server);
+            async move { builder.connect().await }
+        })
+        .await
     }
 }
 
@@ -1904,6 +1919,68 @@ fn resolve_share_path_with_referrals(
     ))
 }
 
+async fn connect_share_path_with_resolver<T, Connect, Fut>(
+    unc: &str,
+    mut connect_server: Connect,
+) -> Result<(Share<T>, String), CoreError>
+where
+    T: Transport + Send,
+    Connect: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<SmbClient<T>, CoreError>>,
+{
+    let mut current_path = UncPath::parse(unc)?;
+    for _ in 0..DEFAULT_DFS_REFERRAL_MAX_HOPS {
+        let client = connect_server(current_path.server().to_string()).await?;
+        let mut ipc = client.share("IPC$").await?;
+        let query_result = ipc
+            .connection_mut()
+            .ioctl(&IoctlRequest::get_dfs_referrals(
+                DfsReferralRequest {
+                    max_referral_level: 4,
+                    request_file_name: current_path.as_unc(),
+                },
+                DEFAULT_DFS_REFERRAL_MAX_RESPONSE,
+            ))
+            .await;
+
+        match query_result {
+            Ok(response) => {
+                let referral_result = response
+                    .dfs_referral_response()?
+                    .ok_or(CoreError::InvalidResponse(
+                        "DFS referral IOCTL did not return a DFS referral response",
+                    ))
+                    .and_then(|response| referrals_from_response(&response));
+                let client = ipc.disconnect().await?;
+                match referral_result {
+                    Ok(referrals) => {
+                        let resolved = resolve_unc_path(&current_path, &referrals);
+                        if resolved == current_path {
+                            return connect_original_share_path(client, &current_path).await;
+                        }
+                        current_path = resolved;
+                    }
+                    Err(error) if should_fallback_direct_share_after_dfs_query(&error) => {
+                        return connect_original_share_path(client, &current_path).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => {
+                let client = ipc.disconnect().await?;
+                if should_fallback_direct_share_after_dfs_query(&error) {
+                    return connect_original_share_path(client, &current_path).await;
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    Err(CoreError::Unsupported(
+        "too many DFS referral hops while resolving UNC path",
+    ))
+}
+
 async fn connect_original_share_path<T>(
     client: SmbClient<T>,
     original: &UncPath,
@@ -1934,8 +2011,9 @@ fn should_fallback_direct_share_after_dfs_query(error: &CoreError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
     use std::io::SeekFrom;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use smolder_core::dfs::{DfsReferral, UncPath};
@@ -3810,6 +3888,130 @@ mod tests {
         assert_eq!(share.server(), "server");
         assert_eq!(share.name(), "teamshare");
         assert_eq!(relative_path, r"docsroot\report.txt");
+    }
+
+    #[tokio::test]
+    async fn connect_share_path_follows_cross_server_dfs_referral_targets() {
+        let ipc_response = TreeConnectResponse {
+            share_type: ShareType::Pipe,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let share_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let namespace_client = build_client_with_tree_response(
+            "namespace",
+            ipc_response.clone(),
+            vec![
+                response_frame(
+                    Command::Ioctl,
+                    NtStatus::SUCCESS.to_u32(),
+                    3,
+                    11,
+                    7,
+                    IoctlResponse {
+                        ctl_code: CtlCode::FSCTL_DFS_GET_REFERRALS,
+                        file_id: FileId::NONE,
+                        input: Vec::new(),
+                        output: encode_dfs_referral_response(
+                            r"\\namespace\dfs\team",
+                            Some(r"\\namespace\dfs"),
+                            r"\\backend\teamshare\docsroot",
+                        ),
+                        flags: 0,
+                    }
+                    .encode(),
+                ),
+                response_frame(
+                    Command::TreeDisconnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    4,
+                    11,
+                    7,
+                    TreeDisconnectResponse.encode(),
+                ),
+            ],
+        )
+        .await;
+        let backend_client = build_client_with_tree_response(
+            "backend",
+            ipc_response,
+            vec![
+                response_frame_with_credits(
+                    Command::Ioctl,
+                    NtStatus::PATH_NOT_COVERED.to_u32(),
+                    3,
+                    11,
+                    7,
+                    1,
+                    Vec::new(),
+                ),
+                response_frame(
+                    Command::TreeDisconnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    4,
+                    11,
+                    7,
+                    TreeDisconnectResponse.encode(),
+                ),
+                response_frame(
+                    Command::TreeConnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    5,
+                    11,
+                    9,
+                    share_response.encode(),
+                ),
+            ],
+        )
+        .await;
+
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let attempts_ref = Arc::clone(&attempts);
+        let clients = Arc::new(Mutex::new(BTreeMap::from([
+            (
+                "namespace".to_string(),
+                VecDeque::from([namespace_client]),
+            ),
+            (
+                "backend".to_string(),
+                VecDeque::from([backend_client]),
+            ),
+        ])));
+        let clients_ref = Arc::clone(&clients);
+
+        let (share, relative_path) = super::connect_share_path_with_resolver::<
+            ScriptedTransport,
+            _,
+            _,
+        >(r"\\namespace\dfs\team\report.txt", move |server: String| {
+                attempts_ref
+                    .lock()
+                    .expect("attempt log should remain accessible")
+                    .push(server.clone());
+                let client = clients_ref
+                    .lock()
+                    .expect("client registry should remain accessible")
+                    .get_mut(&server)
+                    .and_then(VecDeque::pop_front)
+                    .ok_or(CoreError::InvalidInput("missing scripted DFS client"));
+                std::future::ready(client)
+            })
+            .await
+            .expect("cross-server DFS target should reconnect with a fresh client");
+
+        assert_eq!(share.server(), "backend");
+        assert_eq!(share.name(), "teamshare");
+        assert_eq!(relative_path, r"docsroot\report.txt");
+        assert_eq!(
+            *attempts.lock().expect("attempt log should remain readable"),
+            vec!["namespace".to_string(), "backend".to_string()]
+        );
     }
 
     #[tokio::test]

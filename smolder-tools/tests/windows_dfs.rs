@@ -12,7 +12,6 @@ fn required_env(name: &str) -> Option<String> {
 
 #[derive(Debug, Clone)]
 struct WindowsDfsConfig {
-    host: String,
     port: u16,
     username: String,
     password: String,
@@ -24,7 +23,6 @@ struct WindowsDfsConfig {
 impl WindowsDfsConfig {
     fn from_env() -> Option<Self> {
         Some(Self {
-            host: required_env("SMOLDER_WINDOWS_HOST")?,
             port: required_env("SMOLDER_WINDOWS_PORT")
                 .and_then(|value| value.parse::<u16>().ok())
                 .unwrap_or(445),
@@ -49,13 +47,7 @@ impl WindowsDfsConfig {
 
     fn dfs_root_path(&self) -> Option<UncPath> {
         match UncPath::parse(&self.dfs_root) {
-            Ok(root) if root.server().eq_ignore_ascii_case(&self.host) => Some(root),
-            Ok(_) => {
-                eprintln!(
-                    "skipping Windows DFS test: SMOLDER_WINDOWS_DFS_ROOT must use the same host as SMOLDER_WINDOWS_HOST for same-server DFS coverage"
-                );
-                None
-            }
+            Ok(root) => Some(root),
             Err(error) => {
                 eprintln!("skipping Windows DFS test: invalid SMOLDER_WINDOWS_DFS_ROOT: {error}");
                 None
@@ -91,11 +83,11 @@ fn smb_url_from_dfs_root(config: &WindowsDfsConfig, root: &UncPath, leaf: &str) 
             .map(ToString::to_string),
     );
     if segments.is_empty() {
-        format!("smb://{}:{}/{}", config.host, config.port, root.share())
+        format!("smb://{}:{}/{}", root.server(), config.port, root.share())
     } else {
         format!(
             "smb://{}:{}/{}/{}",
-            config.host,
+            root.server(),
             config.port,
             root.share(),
             segments.join("/")
@@ -114,10 +106,10 @@ fn configure_auth(command: &mut Command, config: &WindowsDfsConfig) {
     }
 }
 
-async fn connected_client() -> Option<(WindowsDfsConfig, UncPath, SmbClient)> {
+fn connected_builder() -> Option<(WindowsDfsConfig, UncPath, smolder_tools::prelude::SmbClientBuilder)> {
     let Some(config) = WindowsDfsConfig::from_env() else {
         eprintln!(
-            "skipping Windows DFS test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, SMOLDER_WINDOWS_PASSWORD, and SMOLDER_WINDOWS_DFS_ROOT must be set"
+            "skipping Windows DFS test: SMOLDER_WINDOWS_USERNAME, SMOLDER_WINDOWS_PASSWORD, and SMOLDER_WINDOWS_DFS_ROOT must be set"
         );
         return None;
     };
@@ -125,28 +117,25 @@ async fn connected_client() -> Option<(WindowsDfsConfig, UncPath, SmbClient)> {
         return None;
     };
 
-    let client = SmbClient::builder()
-        .server(config.host.clone())
+    let builder = SmbClient::builder()
+        .server(root.server())
         .port(config.port)
-        .credentials(config.credentials())
-        .connect()
-        .await
-        .expect("should connect authenticated SMB client for Windows DFS test");
-    Some((config, root, client))
+        .credentials(config.credentials());
+    Some((config, root, builder))
 }
 
 #[tokio::test]
 async fn share_path_auto_reads_and_writes_through_live_windows_dfs_when_configured() {
     let _guard = dfs_lock().lock().await;
-    let Some((config, _root, client)) = connected_client().await else {
+    let Some((config, _root, builder)) = connected_builder() else {
         return;
     };
 
     let remote_unc = join_unc(&config.dfs_root, &unique_name("smolder-win-dfs-read"));
     let payload = b"smolder windows dfs payload";
 
-    let (mut share, relative_path) = client
-        .share_path_auto(&remote_unc)
+    let (mut share, relative_path) = builder
+        .connect_share_path(&remote_unc)
         .await
         .expect("Windows DFS namespace should resolve to a writable share");
 
@@ -174,7 +163,7 @@ async fn share_path_auto_reads_and_writes_through_live_windows_dfs_when_configur
 #[tokio::test]
 async fn cli_mv_renames_through_live_windows_dfs_when_configured() {
     let _guard = dfs_lock().lock().await;
-    let Some((config, root, client)) = connected_client().await else {
+    let Some((config, root, builder)) = connected_builder() else {
         return;
     };
 
@@ -184,8 +173,9 @@ async fn cli_mv_renames_through_live_windows_dfs_when_configured() {
     let destination_unc = join_unc(&config.dfs_root, &destination_leaf);
     let payload = b"smolder windows dfs mv payload";
 
-    let (mut share, source_path) = client
-        .share_path_auto(&source_unc)
+    let (mut share, source_path) = builder
+        .clone()
+        .connect_share_path(&source_unc)
         .await
         .expect("Windows DFS source path should resolve");
     share
@@ -207,15 +197,8 @@ async fn cli_mv_renames_through_live_windows_dfs_when_configured() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let client = SmbClient::builder()
-        .server(config.host.clone())
-        .port(config.port)
-        .credentials(config.credentials())
-        .connect()
-        .await
-        .expect("should reconnect SMB client for Windows DFS verification");
-    let (mut share, destination_path) = client
-        .share_path_auto(&destination_unc)
+    let (mut share, destination_path) = builder
+        .connect_share_path(&destination_unc)
         .await
         .expect("Windows DFS destination path should resolve");
     let round_trip = share
