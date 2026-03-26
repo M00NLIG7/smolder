@@ -7,22 +7,24 @@ use sha2::{Digest, Sha256, Sha512};
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
     AsyncId, CloseRequest, CloseResponse, Command, CreateContext, CreateRequest, CreateResponse,
-    Dialect, DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2,
-    DurableHandleRequest, DurableHandleRequestV2, FileId, FlushRequest, FlushResponse, Header,
-    HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest, LogoffResponse, MessageId,
-    NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
-    PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryRequest,
-    QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse,
-    ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
-    SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, SigningMode, TreeConnectRequest,
-    TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse, TreeId, WriteRequest,
-    WriteResponse,
+    CipherId, Dialect, DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2,
+    DurableHandleRequest, DurableHandleRequestV2, FileId, FlushRequest, FlushResponse,
+    GlobalCapabilities, Header, HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest,
+    LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse,
+    NetworkInterfaceInfoResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
+    QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
+    ReadRequest, ReadResponse, ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest,
+    SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, ShareFlags,
+    SigningMode, TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest,
+    TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
+use smolder_proto::smb::transform::{TransformHeader, TRANSFORM_PROTOCOL_ID};
 use std::sync::Arc;
 use tracing::{trace, trace_span, Instrument};
 
 use crate::auth::AuthProvider;
+use crate::crypto::{derive_encryption_keys, EncryptionState};
 use crate::error::CoreError;
 use crate::transport::Transport;
 
@@ -60,6 +62,10 @@ pub struct Authenticated {
     pub signing_required: bool,
     /// Derived request-signing state for the session, if available.
     pub signing: Option<Arc<SigningState>>,
+    /// Whether the session requires SMB 3.x encryption for all subsequent requests.
+    pub encryption_required: bool,
+    /// Derived SMB 3.x encryption state for the session, if available.
+    pub encryption: Option<Arc<EncryptionState>>,
 }
 
 /// The transport is connected to a tree and can issue file operations.
@@ -85,6 +91,10 @@ pub struct TreeConnected {
     pub signing_required: bool,
     /// Derived request-signing state for the session, if available.
     pub signing: Option<Arc<SigningState>>,
+    /// Whether requests on this tree must use SMB 3.x encryption.
+    pub encryption_required: bool,
+    /// Derived SMB 3.x encryption state for the session, if available.
+    pub encryption: Option<Arc<EncryptionState>>,
 }
 
 /// SMB 3.1.1 preauthentication transcript state.
@@ -431,6 +441,8 @@ struct RequestContext {
     tree_id: TreeId,
     signing_required: bool,
     signing: Option<Arc<SigningState>>,
+    encryption_required: bool,
+    encryption: Option<Arc<EncryptionState>>,
 }
 
 impl RequestContext {
@@ -445,11 +457,51 @@ impl RequestContext {
             tree_id,
             signing_required,
             signing,
+            encryption_required: false,
+            encryption: None,
         }
     }
 
     fn unsigned(session_id: SessionId, tree_id: TreeId) -> Self {
         Self::new(session_id, tree_id, false, None)
+    }
+
+    fn with_encryption(
+        mut self,
+        encryption_required: bool,
+        encryption: Option<Arc<EncryptionState>>,
+    ) -> Self {
+        self.encryption_required = encryption_required;
+        self.encryption = encryption;
+        self
+    }
+
+    fn should_encrypt(&self) -> bool {
+        self.encryption_required
+    }
+}
+
+impl Authenticated {
+    fn request_context(&self) -> RequestContext {
+        RequestContext::new(
+            self.session_id,
+            TreeId(0),
+            self.signing_required,
+            self.signing.clone(),
+        )
+        .with_encryption(self.encryption_required, self.encryption.clone())
+    }
+}
+
+impl TreeConnected {
+    fn request_context(&self) -> RequestContext {
+        RequestContext::new(
+            self.session_id,
+            self.tree_id,
+            self.signing_required,
+            self.signing.clone(),
+        )
+        .with_encryption(self.encryption_required, self.encryption.clone())
     }
 }
 
@@ -596,6 +648,11 @@ where
                     session_key.as_deref(),
                     preauth_integrity.as_ref(),
                 )?;
+                let encryption = derive_encryption_state(
+                    &self.state.response,
+                    session_key.as_deref(),
+                    preauth_integrity.as_ref(),
+                )?;
                 verify_final_session_setup_response(
                     self.state.response.dialect_revision,
                     &header,
@@ -615,6 +672,7 @@ where
                     client_signing_mode,
                     ..
                 } = state;
+                let encryption_required = session_encryption_required(response.session_flags);
                 return Ok(Connection {
                     transport,
                     next_message_id,
@@ -628,6 +686,8 @@ where
                         session_key,
                         signing_required,
                         signing,
+                        encryption_required,
+                        encryption,
                     },
                 });
             }
@@ -680,6 +740,7 @@ where
             self.state.response.security_mode,
             response.session_flags,
         );
+        let encryption = derive_encryption_state(&self.state.response, None, preauth_integrity.as_ref())?;
         let Connection {
             transport,
             next_message_id,
@@ -691,6 +752,7 @@ where
             client_signing_mode,
             ..
         } = state;
+        let encryption_required = session_encryption_required(response.session_flags);
 
         Ok(Connection {
             transport,
@@ -705,6 +767,8 @@ where
                 session_key: None,
                 signing_required,
                 signing: None,
+                encryption_required,
+                encryption,
             },
         })
     }
@@ -719,23 +783,13 @@ where
         &mut self,
         requests: &[CompoundRequest],
     ) -> Result<Vec<CompoundResponse>, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            TreeId(0),
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         self.transact_compound_raw(requests, context).await
     }
 
     /// Performs `LOGOFF` and transitions back into the negotiated state.
     pub async fn logoff(mut self) -> Result<Connection<T, Negotiated>, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            TreeId(0),
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let _ = self
             .transact(
                 Command::Logoff,
@@ -775,12 +829,7 @@ where
         mut self,
         request: &TreeConnectRequest,
     ) -> Result<Connection<T, TreeConnected>, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            TreeId(0),
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (header, response) = self
             .transact(
                 Command::TreeConnect,
@@ -811,7 +860,11 @@ where
             session_key,
             signing_required,
             signing,
+            encryption_required: _,
+            encryption,
         } = state;
+        let encryption_required =
+            tree_encryption_required(session.session_flags, response.share_flags);
 
         Ok(Connection {
             transport,
@@ -828,6 +881,8 @@ where
                 session_key,
                 signing_required,
                 signing,
+                encryption_required,
+                encryption,
             },
         })
     }
@@ -842,23 +897,13 @@ where
         &mut self,
         requests: &[CompoundRequest],
     ) -> Result<Vec<CompoundResponse>, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         self.transact_compound_raw(requests, context).await
     }
 
     /// Performs a `TREE_DISCONNECT` request and returns to the authenticated state.
     pub async fn tree_disconnect(mut self) -> Result<Connection<T, Authenticated>, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let _ = self
             .transact(
                 Command::TreeDisconnect,
@@ -883,8 +928,10 @@ where
             session_key,
             signing_required,
             signing,
+            encryption,
             ..
         } = state;
+        let encryption_required = session_encryption_required(session.session_flags);
 
         Ok(Connection {
             transport,
@@ -899,18 +946,15 @@ where
                 session_key,
                 signing_required,
                 signing,
+                encryption_required,
+                encryption,
             },
         })
     }
 
     /// Performs a `CREATE` request on the active tree.
     pub async fn create(&mut self, request: &CreateRequest) -> Result<CreateResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (_, response) = self
             .transact(
                 Command::Create,
@@ -964,12 +1008,7 @@ where
 
     /// Performs a `READ` request on the active tree.
     pub async fn read(&mut self, request: &ReadRequest) -> Result<ReadResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (_, response) = self
             .transact(
                 Command::Read,
@@ -984,12 +1023,7 @@ where
 
     /// Performs a `WRITE` request on the active tree.
     pub async fn write(&mut self, request: &WriteRequest) -> Result<WriteResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (_, response) = self
             .transact(
                 Command::Write,
@@ -1004,12 +1038,7 @@ where
 
     /// Performs a `CLOSE` request on the active tree.
     pub async fn close(&mut self, request: &CloseRequest) -> Result<CloseResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (_, response) = self
             .transact(
                 Command::Close,
@@ -1024,12 +1053,7 @@ where
 
     /// Performs a `FLUSH` request on the active tree.
     pub async fn flush(&mut self, request: &FlushRequest) -> Result<FlushResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (_, response) = self
             .transact(
                 Command::Flush,
@@ -1044,12 +1068,7 @@ where
 
     /// Performs an `IOCTL` request on the active tree.
     pub async fn ioctl(&mut self, request: &IoctlRequest) -> Result<IoctlResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (_, response) = self
             .transact(
                 Command::Ioctl,
@@ -1091,12 +1110,7 @@ where
         &mut self,
         request: &QueryDirectoryRequest,
     ) -> Result<QueryDirectoryResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (header, body) = self
             .transact_raw(
                 Command::QueryDirectory,
@@ -1116,12 +1130,7 @@ where
         &mut self,
         request: &QueryInfoRequest,
     ) -> Result<QueryInfoResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (_, response) = self
             .transact(
                 Command::QueryInfo,
@@ -1139,12 +1148,7 @@ where
         &mut self,
         request: &SetInfoRequest,
     ) -> Result<SetInfoResponse, CoreError> {
-        let context = RequestContext::new(
-            self.state.session_id,
-            self.state.tree_id,
-            self.state.signing_required,
-            self.state.signing.clone(),
-        );
+        let context = self.state.request_context();
         let (_, response) = self
             .transact(
                 Command::SetInfo,
@@ -1190,7 +1194,7 @@ where
             .iter()
             .flat_map(|packet| packet.iter().copied())
             .collect::<Vec<_>>();
-        let frame = SessionMessage::encode_payload(&payload)?;
+        let frame = encode_session_frame(&payload, &context)?;
         let first_command = requests[0].command;
         let last_command = requests[requests.len() - 1].command;
 
@@ -1220,8 +1224,9 @@ where
                 request_count = requests.len()
             ))
             .await?;
-        let response_frame = SessionMessage::decode(&response_frame)?;
-        let response_packets = split_compound_packets(&response_frame.payload)?;
+        let (response_payload, encrypted_response) =
+            decode_session_payload(&response_frame, &context)?;
+        let response_packets = split_compound_packets(&response_payload)?;
         if response_packets.len() != requests.len() {
             return Err(CoreError::InvalidResponse(
                 "compound response count did not match the request chain",
@@ -1255,7 +1260,9 @@ where
                     "compound async SMB responses are not supported yet",
                 ));
             }
-            verify_response_signature(&response_header, response_packet, &context)?;
+            if !encrypted_response {
+                verify_response_signature(&response_header, response_packet, &context)?;
+            }
             if !request.accepted_statuses.contains(&response_header.status) {
                 return Err(CoreError::UnexpectedStatus {
                     command: request.command,
@@ -1318,7 +1325,12 @@ where
         context: RequestContext,
         accepted_statuses: &[u32],
     ) -> Result<TransactionFrames, CoreError> {
-        if context.signing_required && context.signing.is_none() {
+        if context.should_encrypt() && context.encryption.is_none() {
+            return Err(CoreError::InvalidInput(
+                "session requires encryption but no encryption key is available",
+            ));
+        }
+        if !context.should_encrypt() && context.signing_required && context.signing.is_none() {
             return Err(CoreError::InvalidInput(
                 "session requires signing but no signing key is available",
             ));
@@ -1329,16 +1341,20 @@ where
         header.session_id = context.session_id;
         header.tree_id = context.tree_id;
         header.credit_request_response = self.credit_request_hint_after_reserve(1);
-        if context.signing.is_some() {
+        if context.signing.is_some() && !context.should_encrypt() {
             header.flags |= HeaderFlags::SIGNED;
         }
 
         let mut packet = header.encode();
         packet.extend_from_slice(&body);
-        if let Some(signing) = context.signing.as_deref() {
+        if let Some(signing) = context
+            .signing
+            .as_deref()
+            .filter(|_| !context.should_encrypt())
+        {
             signing.sign_packet(&mut packet)?;
         }
-        let frame = SessionMessage::encode_payload(&packet)?;
+        let frame = encode_session_frame(&packet, &context)?;
         self.commit_message_ids(1)?;
 
         trace!(?command, message_id = message_id.0, "sending smb request");
@@ -1354,14 +1370,15 @@ where
                 .recv()
                 .instrument(trace_span!("smb_recv", ?command, message_id = message_id.0))
                 .await?;
-            let response_frame = SessionMessage::decode(&response_frame)?;
-            if response_frame.payload.len() < Header::LEN {
+            let (response_payload, encrypted_response) =
+                decode_session_payload(&response_frame, &context)?;
+            if response_payload.len() < Header::LEN {
                 return Err(CoreError::InvalidResponse(
                     "response shorter than SMB2 header",
                 ));
             }
 
-            let response_header = Header::decode(&response_frame.payload[..Header::LEN])?;
+            let response_header = Header::decode(&response_payload[..Header::LEN])?;
             if response_header.command != command {
                 return Err(CoreError::UnexpectedCommand {
                     expected: command,
@@ -1391,9 +1408,10 @@ where
                 validate_async_final_response(&response_header, async_id)?;
             }
 
-            if command != Command::SessionSetup {
-                verify_response_signature(&response_header, &response_frame.payload, &context)?;
+            if command != Command::SessionSetup && !encrypted_response {
+                verify_response_signature(&response_header, &response_payload, &context)?;
             }
+
 
             if !accepted_statuses.contains(&response_header.status) {
                 return Err(CoreError::UnexpectedStatus {
@@ -1406,7 +1424,7 @@ where
             return Ok(TransactionFrames {
                 header: response_header,
                 request_packet: packet,
-                response_packet: response_frame.payload,
+                response_packet: response_payload,
             });
         }
     }
@@ -1484,7 +1502,12 @@ where
                 "the first compound request element cannot be marked related",
             ));
         }
-        if context.signing_required && context.signing.is_none() {
+        if context.should_encrypt() && context.encryption.is_none() {
+            return Err(CoreError::InvalidInput(
+                "session requires encryption but no encryption key is available",
+            ));
+        }
+        if !context.should_encrypt() && context.signing_required && context.signing.is_none() {
             return Err(CoreError::InvalidInput(
                 "session requires signing but no signing key is available",
             ));
@@ -1505,7 +1528,7 @@ where
             if request.related {
                 header.flags |= HeaderFlags::RELATED_OPERATIONS;
             }
-            if context.signing.is_some() {
+            if context.signing.is_some() && !context.should_encrypt() {
                 header.flags |= HeaderFlags::SIGNED;
             }
 
@@ -1529,7 +1552,11 @@ where
             if index + 1 < requests.len() {
                 packet.resize(packet_len, 0);
             }
-            if let Some(signing) = context.signing.as_deref() {
+            if let Some(signing) = context
+                .signing
+                .as_deref()
+                .filter(|_| !context.should_encrypt())
+            {
                 signing.sign_packet(&mut packet)?;
             }
             packets.push(packet);
@@ -1593,6 +1620,43 @@ fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreError> {
     }
 
     Ok(packets)
+}
+
+fn encode_session_frame(payload: &[u8], context: &RequestContext) -> Result<Vec<u8>, CoreError> {
+    let session_payload = if context.should_encrypt() {
+        let encryption = context.encryption.as_deref().ok_or(CoreError::InvalidInput(
+            "session requires encryption but no encryption key is available",
+        ))?;
+        encryption.encrypt_message(context.session_id.0, payload)?.encode()
+    } else {
+        payload.to_vec()
+    };
+    SessionMessage::encode_payload(&session_payload).map_err(CoreError::from)
+}
+
+fn decode_session_payload(
+    frame: &[u8],
+    context: &RequestContext,
+) -> Result<(Vec<u8>, bool), CoreError> {
+    let frame = SessionMessage::decode(frame)?;
+    if frame.payload.starts_with(&TRANSFORM_PROTOCOL_ID) {
+        let encryption = context.encryption.as_deref().ok_or(CoreError::InvalidResponse(
+            "received encrypted SMB response but no encryption state is available",
+        ))?;
+        let transform = TransformHeader::decode(&frame.payload)?;
+        if transform.session_id != context.session_id.0 {
+            return Err(CoreError::InvalidResponse(
+                "encrypted SMB response session id did not match the active session",
+            ));
+        }
+        return Ok((encryption.decrypt_message(&transform)?, true));
+    }
+    if context.should_encrypt() {
+        return Err(CoreError::InvalidResponse(
+            "session required encryption but the SMB response was not encrypted",
+        ));
+    }
+    Ok((frame.payload, false))
 }
 
 fn durable_create_request(
@@ -1745,9 +1809,12 @@ fn verify_response_signature(
     context: &RequestContext,
 ) -> Result<(), CoreError> {
     if header.flags.contains(HeaderFlags::SIGNED) {
-        let signing = context.signing.as_deref().ok_or(CoreError::InvalidResponse(
-            "received a signed SMB response but no signing key is available",
-        ))?;
+        let signing = context
+            .signing
+            .as_deref()
+            .ok_or(CoreError::InvalidResponse(
+                "received a signed SMB response but no signing key is available",
+            ))?;
         return signing.verify_packet(response_packet);
     }
 
@@ -1910,6 +1977,71 @@ fn derive_signing_state(
     Ok(Some(Arc::new(signing)))
 }
 
+fn derive_encryption_state(
+    negotiated: &NegotiateResponse,
+    session_key: Option<&[u8]>,
+    preauth_integrity: Option<&PreauthIntegrityState>,
+) -> Result<Option<Arc<EncryptionState>>, CoreError> {
+    let Some(session_key) = session_key else {
+        return Ok(None);
+    };
+    let Some(cipher) = negotiated_cipher(negotiated)? else {
+        return Ok(None);
+    };
+
+    let keys = derive_encryption_keys(
+        negotiated.dialect_revision,
+        cipher,
+        session_key,
+        None,
+        preauth_integrity.map(|state| state.hash_value.as_slice()),
+    )?;
+    Ok(Some(Arc::new(EncryptionState::new(
+        negotiated.dialect_revision,
+        keys,
+    ))))
+}
+
+fn negotiated_cipher(negotiated: &NegotiateResponse) -> Result<Option<CipherId>, CoreError> {
+    match negotiated.dialect_revision {
+        Dialect::Smb202 | Dialect::Smb210 => Ok(None),
+        Dialect::Smb300 | Dialect::Smb302 => {
+            if negotiated.capabilities.contains(GlobalCapabilities::ENCRYPTION) {
+                Ok(Some(CipherId::Aes128Ccm))
+            } else {
+                Ok(None)
+            }
+        }
+        Dialect::Smb311 => {
+            let mut selected = None;
+            for context in &negotiated.negotiate_contexts {
+                let Some(capabilities) = context.as_encryption_capabilities()? else {
+                    continue;
+                };
+                if capabilities.ciphers.len() != 1 {
+                    return Err(CoreError::InvalidResponse(
+                        "SMB 3.1.1 negotiate response must select exactly one encryption cipher",
+                    ));
+                }
+                if selected.replace(capabilities.ciphers[0]).is_some() {
+                    return Err(CoreError::InvalidResponse(
+                        "SMB 3.1.1 negotiate response contained multiple encryption contexts",
+                    ));
+                }
+            }
+
+            if negotiated.capabilities.contains(GlobalCapabilities::ENCRYPTION) && selected.is_none()
+            {
+                return Err(CoreError::InvalidResponse(
+                    "SMB 3.1.1 negotiate response did not select an encryption cipher",
+                ));
+            }
+
+            Ok(selected)
+        }
+    }
+}
+
 fn session_signing_required(
     client_signing_mode: SigningMode,
     server_signing_mode: SigningMode,
@@ -1923,6 +2055,14 @@ fn session_signing_required(
 
     client_signing_mode.contains(SigningMode::REQUIRED)
         || server_signing_mode.contains(SigningMode::REQUIRED)
+}
+
+fn session_encryption_required(session_flags: SessionFlags) -> bool {
+    session_flags.contains(SessionFlags::ENCRYPT_DATA)
+}
+
+fn tree_encryption_required(session_flags: SessionFlags, share_flags: ShareFlags) -> bool {
+    session_encryption_required(session_flags) || share_flags.contains(ShareFlags::ENCRYPT_DATA)
 }
 
 fn derive_key(
@@ -1977,19 +2117,22 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
-        AsyncId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse, Dialect,
-        FileAttributes, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
-        HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest, LogoffResponse, MessageId,
-        NegotiateRequest, NegotiateResponse, OplockLevel, PreauthIntegrityCapabilities,
-        PreauthIntegrityHashId, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags,
-        SessionId, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
-        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
-        TreeDisconnectRequest, TreeId, WriteRequest, WriteResponse,
+        AsyncId, CipherId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse,
+        Dialect, EncryptionCapabilities, FileAttributes, FileId, FlushRequest, FlushResponse,
+        GlobalCapabilities, Header, HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest,
+        LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, OplockLevel,
+        PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, ReadResponse,
+        ReadResponseFlags, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
+        SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode, TreeCapabilities,
+        TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeId, WriteRequest,
+        WriteResponse,
     };
+    use smolder_proto::smb::transform::TransformHeader;
     use smolder_proto::smb::status::NtStatus;
 
     use crate::auth::{AuthError, AuthProvider};
     use crate::client::Connection;
+    use crate::crypto::{derive_encryption_keys, EncryptionState};
     use crate::error::CoreError;
     use crate::transport::Transport;
 
@@ -2173,6 +2316,14 @@ mod tests {
         )
     }
 
+    fn encryption_context(cipher: CipherId) -> smolder_proto::smb::smb2::NegotiateContext {
+        smolder_proto::smb::smb2::NegotiateContext::encryption_capabilities(
+            EncryptionCapabilities {
+                ciphers: vec![cipher],
+            },
+        )
+    }
+
     fn sign_response_packet(signing: &super::SigningState, packet: &mut [u8]) {
         let mut header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
         header.flags |= HeaderFlags::SIGNED | HeaderFlags::SERVER_TO_REDIR;
@@ -2247,6 +2398,54 @@ mod tests {
             .expect("signing state should be present")
     }
 
+    fn smb302_encryption_state(session_key: &[u8]) -> Arc<EncryptionState> {
+        let keys = derive_encryption_keys(
+            Dialect::Smb302,
+            CipherId::Aes128Ccm,
+            session_key,
+            None,
+            None,
+        )
+        .expect("SMB 3.0.2 encryption keys should derive");
+        Arc::new(EncryptionState::new(Dialect::Smb302, keys))
+    }
+
+    fn peer_encryption_state(state: &EncryptionState) -> EncryptionState {
+        EncryptionState {
+            dialect: state.dialect,
+            cipher: state.cipher,
+            encrypting_key: state.decrypting_key.clone(),
+            decrypting_key: state.encrypting_key.clone(),
+        }
+    }
+
+    fn encrypted_response_frame(
+        state: &EncryptionState,
+        command: Command,
+        status: u32,
+        message_id: u64,
+        session_id: u64,
+        tree_id: u32,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
+        let packet = response_packet(command, status, message_id, session_id, tree_id, body);
+        let transform = state
+            .encrypt_message(session_id, &packet)
+            .expect("response packet should encrypt");
+        SessionMessage::new(transform.encode())
+            .encode()
+            .expect("encrypted response should frame")
+    }
+
+    fn outbound_encrypted_packet(frame: &[u8], state: &EncryptionState) -> Vec<u8> {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        let transform =
+            TransformHeader::decode(&frame.payload).expect("transform header should decode");
+        state
+            .decrypt_message(&transform)
+            .expect("encrypted payload should decrypt")
+    }
+
     #[derive(Debug)]
     struct MockAuthProvider {
         initial_token: Vec<u8>,
@@ -2298,7 +2497,7 @@ mod tests {
         };
         let tree_response = TreeConnectResponse {
             share_type: ShareType::Disk,
-            share_flags: ShareFlags::ENCRYPT_DATA,
+            share_flags: ShareFlags::empty(),
             capabilities: TreeCapabilities::CONTINUOUS_AVAILABILITY,
             maximal_access: 0x0012_019f,
         };
@@ -3270,6 +3469,207 @@ mod tests {
         let header = outbound_header(&transport.writes[2]);
         assert!(header.flags.contains(HeaderFlags::SIGNED));
         assert_ne!(header.signature, [0; 16]);
+    }
+
+    #[tokio::test]
+    async fn tree_connect_encrypts_when_session_requires_encryption() {
+        let session_key = [0x77; 16];
+        let client_encryption = smb302_encryption_state(&session_key);
+        let server_encryption = peer_encryption_state(client_encryption.as_ref());
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
+            client_guid: *b"client-guid-enc1",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302],
+            negotiate_contexts: vec![encryption_context(CipherId::Aes128Ccm)],
+        };
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: vec![encryption_context(CipherId::Aes128Ccm)],
+            server_guid: *b"server-guid-enc1",
+            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::ENCRYPT_DATA,
+            security_buffer: Vec::new(),
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                77,
+                0,
+                session_response.encode(),
+            ),
+            encrypted_response_frame(
+                &server_encryption,
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                77,
+                9,
+                tree_response.encode(),
+            ),
+        ]);
+
+        let mut auth_provider = MockAuthProvider {
+            initial_token: vec![0x01, 0x02],
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: Some(session_key.to_vec()),
+            finished: false,
+        };
+
+        let connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut auth_provider)
+            .await
+            .expect("authenticate should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+
+        assert!(connection.state().encryption_required);
+
+        let transport = connection.into_transport();
+        let packet = outbound_encrypted_packet(&transport.writes[2], &server_encryption);
+        let header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
+        assert_eq!(header.command, Command::TreeConnect);
+        assert_eq!(header.session_id, SessionId(77));
+        assert!(!header.flags.contains(HeaderFlags::SIGNED));
+    }
+
+    #[tokio::test]
+    async fn tree_disconnect_encrypts_when_share_requires_encryption() {
+        let session_key = [0x66; 16];
+        let client_encryption = smb302_encryption_state(&session_key);
+        let server_encryption = peer_encryption_state(client_encryption.as_ref());
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
+            client_guid: *b"client-guid-enc2",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302],
+            negotiate_contexts: vec![encryption_context(CipherId::Aes128Ccm)],
+        };
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: vec![encryption_context(CipherId::Aes128Ccm)],
+            server_guid: *b"server-guid-enc2",
+            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: Vec::new(),
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::ENCRYPT_DATA,
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let tree_disconnect_response = smolder_proto::smb::smb2::TreeDisconnectResponse;
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                88,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                88,
+                11,
+                tree_response.encode(),
+            ),
+            encrypted_response_frame(
+                &server_encryption,
+                Command::TreeDisconnect,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                88,
+                11,
+                tree_disconnect_response.encode(),
+            ),
+        ]);
+
+        let mut auth_provider = MockAuthProvider {
+            initial_token: vec![0x01, 0x02],
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: Some(session_key.to_vec()),
+            finished: false,
+        };
+
+        let connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut auth_provider)
+            .await
+            .expect("authenticate should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+
+        assert!(connection.state().encryption_required);
+
+        let connection = connection
+            .tree_disconnect()
+            .await
+            .expect("tree disconnect should succeed");
+
+        assert!(!connection.state().encryption_required);
+
+        let transport = connection.into_transport();
+        let packet = outbound_encrypted_packet(&transport.writes[3], &server_encryption);
+        let header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
+        assert_eq!(header.command, Command::TreeDisconnect);
+        assert_eq!(header.session_id, SessionId(88));
+        assert_eq!(header.tree_id, TreeId(11));
+        assert!(!header.flags.contains(HeaderFlags::SIGNED));
     }
 
     #[tokio::test]
