@@ -1178,6 +1178,28 @@ where
         self.len() == 0
     }
 
+    /// Requests or refreshes handle resiliency on the current open file.
+    pub async fn request_resiliency(&mut self, timeout: u32) -> Result<ResilientHandle, CoreError> {
+        if self.closed {
+            return Err(CoreError::InvalidInput("remote file already closed"));
+        }
+        if self.pending_read.is_some()
+            || self.pending_write.is_some()
+            || self.pending_flush.is_some()
+        {
+            return Err(CoreError::InvalidInput(
+                "cannot change remote file resiliency while an async I/O operation is pending",
+            ));
+        }
+        let file_id = self.file_id;
+        let resilient = self
+            .connection_mut()
+            .request_resiliency(file_id, timeout)
+            .await?;
+        self.resilient = Some(resilient);
+        Ok(resilient)
+    }
+
     /// Reads the next chunk into the provided buffer and returns the number of bytes read.
     pub async fn read_chunk(&mut self, buffer: &mut BytesMut) -> Result<usize, CoreError> {
         if self.position >= self.end_of_file {
@@ -2331,6 +2353,133 @@ mod tests {
         assert_eq!(requested.file_id, original_file_id);
         assert_eq!(requested.flags, DurableHandleFlags::empty());
         assert_ne!(requested.create_guid, [0; 16]);
+    }
+
+    #[tokio::test]
+    async fn reopened_durable_file_can_refresh_resiliency() {
+        let original_file_id = FileId {
+            persistent: 0x99,
+            volatile: 0xaa,
+        };
+        let reopened_file_id = FileId {
+            persistent: 0xbb,
+            volatile: 0xcc,
+        };
+        let durable_context = CreateContext::new(
+            b"DH2Q".to_vec(),
+            DurableHandleResponseV2 {
+                timeout: 30_000,
+                flags: DurableHandleFlags::empty(),
+            }
+            .encode(),
+        );
+        let original_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_id: original_file_id,
+            create_contexts: vec![durable_context.clone()],
+        };
+        let reopened_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_id: reopened_file_id,
+            create_contexts: vec![durable_context],
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 8,
+            end_of_file: 8,
+            file_attributes: FileAttributes::ARCHIVE,
+        };
+
+        let mut original_share = build_share(vec![response_frame(
+            Command::Create,
+            NtStatus::SUCCESS.to_u32(),
+            3,
+            11,
+            7,
+            original_response.encode(),
+        )])
+        .await;
+        let durable = original_share
+            .open(
+                "notes.txt",
+                OpenOptions::new()
+                    .read(true)
+                    .durable(DurableOpenOptions::new().with_timeout(30_000)),
+            )
+            .await
+            .expect("durable open should succeed")
+            .durable_handle()
+            .expect("durable state should be present")
+            .clone();
+
+        let reconnect_reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                reopened_response.encode(),
+            ),
+            response_frame(
+                Command::Ioctl,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                IoctlResponse {
+                    ctl_code: CtlCode::FSCTL_LMR_REQUEST_RESILIENCY,
+                    file_id: reopened_file_id,
+                    input: Vec::new(),
+                    output: Vec::new(),
+                    flags: 0,
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+        let mut reconnected_share = build_share(reconnect_reads).await;
+        let mut file = reconnected_share
+            .reopen_durable(&durable)
+            .await
+            .expect("durable reconnect should succeed");
+
+        let resilient = file
+            .request_resiliency(60_000)
+            .await
+            .expect("resiliency refresh should succeed");
+        assert_eq!(
+            resilient,
+            ResilientHandle {
+                file_id: reopened_file_id,
+                timeout: 60_000,
+            }
+        );
+        assert_eq!(file.resilient_handle(), Some(resilient));
+        file.close().await.expect("close should succeed");
+
+        let writes = transport_writes(reconnected_share);
+        let ioctl = outbound_ioctl(&writes[4]);
+        assert_eq!(ioctl.ctl_code, CtlCode::FSCTL_LMR_REQUEST_RESILIENCY);
+        assert_eq!(ioctl.file_id, reopened_file_id);
+        assert_eq!(
+            NetworkResiliencyRequest::decode(&ioctl.input)
+                .expect("resiliency request should decode"),
+            NetworkResiliencyRequest { timeout: 60_000 }
+        );
     }
 
     #[tokio::test]
