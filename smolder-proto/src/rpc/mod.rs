@@ -923,7 +923,7 @@ fn append_auth_verifier(body: &mut Vec<u8>, auth_verifier: Option<&AuthVerifier>
         return 0;
     };
 
-    let auth_pad_length = padding_len_to_alignment(body.len(), 16);
+    let auth_pad_length = padding_len_to_alignment(body.len(), 4);
     body.resize(body.len() + auth_pad_length, 0);
     body.put_u8(auth_verifier.auth_type as u8);
     body.put_u8(auth_verifier.auth_level as u8);
@@ -950,10 +950,10 @@ fn split_auth_verifier<'a>(
     }
 
     let sec_trailer_offset = body.len() - auth_length - SEC_TRAILER_LEN;
-    if !sec_trailer_offset.is_multiple_of(16) {
+    if !sec_trailer_offset.is_multiple_of(4) {
         return Err(ProtocolError::InvalidField {
             field: "auth_verifier",
-            reason: "security trailer is not 16-byte aligned",
+            reason: "security trailer is not 4-byte aligned",
         });
     }
 
@@ -972,7 +972,7 @@ fn split_auth_verifier<'a>(
     }
 
     let body_len = sec_trailer_offset - auth_pad_length;
-    if padding_len_to_alignment(body_len, 16) != auth_pad_length {
+    if padding_len_to_alignment(body_len, 4) != auth_pad_length {
         return Err(ProtocolError::InvalidField {
             field: "auth_pad_length",
             reason: "authentication padding does not align the security trailer",
@@ -1058,8 +1058,8 @@ fn skip_padding(input: &mut &[u8], len: usize, field: &'static str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthLevel, AuthType, AuthVerifier, BindAckPdu, BindAckResult, BindPdu, Packet, PacketFlags,
-        RequestPdu, ResponsePdu, RpcAuth3Pdu, SyntaxId, Uuid,
+        AuthLevel, AuthType, AuthVerifier, BindAckPdu, BindAckResult, BindPdu, CommonHeader,
+        Packet, PacketFlags, RequestPdu, ResponsePdu, RpcAuth3Pdu, SyntaxId, Uuid,
     };
 
     const SVCCTL_SYNTAX: SyntaxId = SyntaxId::new(
@@ -1198,6 +1198,32 @@ mod tests {
         let encoded = packet.encode();
         let decoded = RequestPdu::decode(&encoded).expect("request with auth should decode");
         assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn request_auth_verifier_uses_four_byte_alignment() {
+        let packet = RequestPdu {
+            call_id: 7,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 3,
+            context_id: 0,
+            opnum: 15,
+            object_uuid: None,
+            stub_data: vec![0xaa, 0xbb, 0xcc],
+            auth_verifier: Some(AuthVerifier::new(
+                AuthType::WinNt,
+                AuthLevel::PacketIntegrity,
+                0,
+                vec![0x11; 16],
+            )),
+        };
+        let encoded = packet.encode();
+        let header = CommonHeader::decode(&encoded)
+            .expect("request should decode")
+            .0;
+
+        assert_eq!(header.auth_length, 16);
+        assert_eq!(encoded[30], 1);
     }
 
     #[test]
