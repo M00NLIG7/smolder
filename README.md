@@ -20,23 +20,30 @@ Boundary rule:
 
 Implemented now:
 
-- SMB2/3 packet header types
-- RFC1002 session framing
-- Typed wire bodies for `NEGOTIATE`, `SESSION_SETUP`, `TREE_CONNECT`, `CREATE`, and `CLOSE`
-- Unit tests for packet encode/decode round-trips
+- `smolder-proto`: typed SMB2/3 and DCE/RPC codecs, including compound headers,
+  durable-handle create contexts, named-pipe/RPC packets, and SMB3 transform
+  headers
+- `smolder-core`: SMB negotiate/session setup, NTLMv2/SPNEGO auth, signing,
+  SMB3 encryption, named pipes, DCE/RPC transport, DFS referral handling,
+  compound requests, and durable/resilient reconnect primitives
+- `smolder-tools`: high-level SMB file APIs, DFS-aware path resolution,
+  reconnect helpers, CLI file workflows, `smbexec`, and `psexec`
+- Live interop coverage against both Tiny11/Windows and local Samba fixtures,
+  with a repeatable harness and release gates
 
-Planned next:
+Validated now:
 
-- Async transport and request dispatcher in `smolder-core`
-- NTLMv2/SPNEGO authentication
-- Live interoperability tests against Samba
+- Windows: negotiate, auth, tree connect, file I/O, durable reconnect,
+  encrypted share I/O, named pipes, RPC, DFS, `smbexec`, and `psexec`
+- Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
+  named pipes, and RPC bind over encrypted SMB
 
-Not implemented yet:
+Not implemented on this track:
 
 - Kerberos
-- Read/write/query operations
 - SMB1 compatibility
-- Full Samba `selftest` coverage
+- Fully automated Windows CI; the Tiny11 gate is still manual/self-hosted
+- Full Samba `selftest` parity
 
 ## Quick Start
 
