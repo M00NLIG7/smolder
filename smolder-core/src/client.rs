@@ -6,17 +6,18 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    AsyncId, CloseRequest, CloseResponse, Command, CreateContext, CreateRequest, CreateResponse,
-    CipherId, Dialect, DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2,
-    DurableHandleRequest, DurableHandleRequestV2, FileId, FlushRequest, FlushResponse,
-    GlobalCapabilities, Header, HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest,
-    LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse,
-    NetworkInterfaceInfoResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
-    QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
-    ReadRequest, ReadResponse, ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest,
-    SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, ShareFlags,
-    SigningMode, TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest,
-    TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
+    AsyncId, ChangeNotifyRequest, ChangeNotifyResponse, CloseRequest, CloseResponse, Command,
+    CreateContext, CreateRequest, CreateResponse, EchoRequest, EchoResponse, CipherId, Dialect,
+    DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2, DurableHandleRequest,
+    DurableHandleRequestV2, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
+    HeaderFlags, IoctlRequest, IoctlResponse, LockRequest, LockResponse, LogoffRequest,
+    LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryRequest,
+    QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse,
+    ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
+    SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, ShareFlags, SigningMode,
+    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse,
+    TreeId, WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
 use smolder_proto::smb::transform::{TransformHeader, TRANSFORM_PROTOCOL_ID};
@@ -503,6 +504,16 @@ impl TreeConnected {
         )
         .with_encryption(self.encryption_required, self.encryption.clone())
     }
+
+    fn session_request_context(&self) -> RequestContext {
+        RequestContext::new(
+            self.session_id,
+            TreeId(0),
+            self.signing_required,
+            self.signing.clone(),
+        )
+        .with_encryption(self.encryption_required, self.encryption.clone())
+    }
 }
 
 impl<T> Connection<T, Connected> {
@@ -787,6 +798,21 @@ where
         self.transact_compound_raw(requests, context).await
     }
 
+    /// Performs an `ECHO` request against the active SMB session.
+    pub async fn echo(&mut self) -> Result<EchoResponse, CoreError> {
+        let context = self.state.request_context();
+        let (_, response) = self
+            .transact(
+                Command::Echo,
+                EchoRequest.encode(),
+                context,
+                &[NtStatus::SUCCESS.to_u32()],
+                EchoResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
     /// Performs `LOGOFF` and transitions back into the negotiated state.
     pub async fn logoff(mut self) -> Result<Connection<T, Negotiated>, CoreError> {
         let context = self.state.request_context();
@@ -1004,6 +1030,54 @@ where
             .ioctl(&IoctlRequest::request_resiliency(file_id, timeout))
             .await?;
         Ok(ResilientHandle { file_id, timeout })
+    }
+
+    /// Performs an `ECHO` request against the active SMB session.
+    pub async fn echo(&mut self) -> Result<EchoResponse, CoreError> {
+        let context = self.state.session_request_context();
+        let (_, response) = self
+            .transact(
+                Command::Echo,
+                EchoRequest.encode(),
+                context,
+                &[NtStatus::SUCCESS.to_u32()],
+                EchoResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
+    /// Performs a `LOCK` request on the active tree.
+    pub async fn lock(&mut self, request: &LockRequest) -> Result<LockResponse, CoreError> {
+        let context = self.state.request_context();
+        let (_, response) = self
+            .transact(
+                Command::Lock,
+                request.encode(),
+                context,
+                &[NtStatus::SUCCESS.to_u32()],
+                LockResponse::decode,
+            )
+            .await?;
+        Ok(response)
+    }
+
+    /// Performs a `CHANGE_NOTIFY` request on the active tree.
+    pub async fn change_notify(
+        &mut self,
+        request: &ChangeNotifyRequest,
+    ) -> Result<ChangeNotifyResponse, CoreError> {
+        let context = self.state.request_context();
+        let (_, response) = self
+            .transact(
+                Command::ChangeNotify,
+                request.encode(),
+                context,
+                &[NtStatus::SUCCESS.to_u32()],
+                ChangeNotifyResponse::decode,
+            )
+            .await?;
+        Ok(response)
     }
 
     /// Performs a `READ` request on the active tree.
@@ -2117,10 +2191,12 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
-        AsyncId, CipherId, CloseRequest, CloseResponse, Command, CreateRequest, CreateResponse,
-        Dialect, EncryptionCapabilities, FileAttributes, FileId, FlushRequest, FlushResponse,
-        GlobalCapabilities, Header, HeaderFlags, IoctlRequest, IoctlResponse, LogoffRequest,
-        LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, OplockLevel,
+        AsyncId, ChangeNotifyFlags, ChangeNotifyRequest, ChangeNotifyResponse, CipherId,
+        CloseRequest, CloseResponse, Command, CompletionFilter, CreateRequest, CreateResponse,
+        Dialect, EchoResponse, EncryptionCapabilities, FileAttributes, FileId, FlushRequest,
+        FlushResponse, GlobalCapabilities, Header, HeaderFlags, IoctlRequest, IoctlResponse,
+        LockElement, LockFlags, LockRequest, LockResponse, LogoffRequest, LogoffResponse,
+        MessageId, NegotiateRequest, NegotiateResponse, OplockLevel,
         PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, ReadResponse,
         ReadResponseFlags, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
         SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode, TreeCapabilities,
@@ -3472,6 +3548,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_echo_uses_session_context() {
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
+            server_guid: *b"server-guid-0011",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: Vec::new(),
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: Vec::new(),
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                44,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::Echo,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                44,
+                0,
+                EchoResponse.encode(),
+            ),
+        ]);
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+
+        let mut connection = Connection::new(transport)
+            .negotiate(&NegotiateRequest {
+                security_mode: SigningMode::ENABLED,
+                capabilities: GlobalCapabilities::LARGE_MTU,
+                client_guid: *b"client-guid-0011",
+                dialects: vec![Dialect::Smb210, Dialect::Smb302],
+                negotiate_contexts: Vec::new(),
+            })
+            .await
+            .expect("negotiate should succeed")
+            .session_setup(&session_request)
+            .await
+            .expect("session setup should succeed");
+
+        let response = connection.echo().await.expect("echo should succeed");
+        assert_eq!(response, EchoResponse);
+
+        let transport = connection.into_transport();
+        let header = outbound_header(&transport.writes[2]);
+        assert_eq!(header.command, Command::Echo);
+        assert_eq!(header.session_id, SessionId(44));
+        assert_eq!(header.tree_id, TreeId(0));
+    }
+
+    #[tokio::test]
     async fn tree_connect_encrypts_when_session_requires_encryption() {
         let session_key = [0x77; 16];
         let client_encryption = smb302_encryption_state(&session_key);
@@ -3670,6 +3824,230 @@ mod tests {
         assert_eq!(header.session_id, SessionId(88));
         assert_eq!(header.tree_id, TreeId(11));
         assert!(!header.flags.contains(HeaderFlags::SIGNED));
+    }
+
+    #[tokio::test]
+    async fn tree_lock_uses_tree_context() {
+        let file_id = FileId {
+            persistent: 0x1122_3344_5566_7788,
+            volatile: 0x8877_6655_4433_2211,
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                NegotiateResponse {
+                    security_mode: SigningMode::ENABLED,
+                    dialect_revision: Dialect::Smb302,
+                    negotiate_contexts: Vec::new(),
+                    server_guid: *b"server-guid-0021",
+                    capabilities: GlobalCapabilities::LARGE_MTU,
+                    max_transact_size: 65_536,
+                    max_read_size: 65_536,
+                    max_write_size: 65_536,
+                    system_time: 1,
+                    server_start_time: 1,
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                55,
+                0,
+                SessionSetupResponse {
+                    session_flags: SessionFlags::empty(),
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                55,
+                9,
+                TreeConnectResponse {
+                    share_type: ShareType::Disk,
+                    share_flags: ShareFlags::empty(),
+                    capabilities: TreeCapabilities::empty(),
+                    maximal_access: 0x0012_019f,
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::Lock,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                55,
+                9,
+                LockResponse.encode(),
+            ),
+        ]);
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+        let mut connection = Connection::new(transport)
+            .negotiate(&NegotiateRequest {
+                security_mode: SigningMode::ENABLED,
+                capabilities: GlobalCapabilities::LARGE_MTU,
+                client_guid: *b"client-guid-0021",
+                dialects: vec![Dialect::Smb210, Dialect::Smb302],
+                negotiate_contexts: Vec::new(),
+            })
+            .await
+            .expect("negotiate should succeed")
+            .session_setup(&session_request)
+            .await
+            .expect("session setup should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+
+        let request = LockRequest::for_file(
+            file_id,
+            vec![LockElement {
+                offset: 4096,
+                length: 512,
+                flags: LockFlags::EXCLUSIVE_LOCK | LockFlags::FAIL_IMMEDIATELY,
+            }],
+        );
+        let response = connection.lock(&request).await.expect("lock should succeed");
+        assert_eq!(response, LockResponse);
+
+        let transport = connection.into_transport();
+        let header = outbound_header(&transport.writes[3]);
+        assert_eq!(header.command, Command::Lock);
+        assert_eq!(header.session_id, SessionId(55));
+        assert_eq!(header.tree_id, TreeId(9));
+    }
+
+    #[tokio::test]
+    async fn change_notify_handles_interim_async_response() {
+        let file_id = FileId {
+            persistent: 0x0102_0304_0506_0708,
+            volatile: 0x1112_1314_1516_1718,
+        };
+        let response = ChangeNotifyResponse {
+            output_buffer: vec![1, 2, 3, 4],
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                NegotiateResponse {
+                    security_mode: SigningMode::ENABLED,
+                    dialect_revision: Dialect::Smb302,
+                    negotiate_contexts: Vec::new(),
+                    server_guid: *b"server-guid-noti",
+                    capabilities: GlobalCapabilities::LARGE_MTU,
+                    max_transact_size: 65_536,
+                    max_read_size: 65_536,
+                    max_write_size: 65_536,
+                    system_time: 1,
+                    server_start_time: 1,
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                66,
+                0,
+                SessionSetupResponse {
+                    session_flags: SessionFlags::empty(),
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                66,
+                12,
+                TreeConnectResponse {
+                    share_type: ShareType::Disk,
+                    share_flags: ShareFlags::empty(),
+                    capabilities: TreeCapabilities::empty(),
+                    maximal_access: 0x0012_019f,
+                }
+                .encode(),
+            ),
+            async_response_frame(
+                Command::ChangeNotify,
+                NtStatus::PENDING.to_u32(),
+                3,
+                0x4444,
+                66,
+                Vec::new(),
+            ),
+            async_response_frame(
+                Command::ChangeNotify,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                0x4444,
+                66,
+                response.encode(),
+            ),
+        ]);
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+        let mut connection = Connection::new(transport)
+            .negotiate(&NegotiateRequest {
+                security_mode: SigningMode::ENABLED,
+                capabilities: GlobalCapabilities::LARGE_MTU,
+                client_guid: *b"client-guid-noti",
+                dialects: vec![Dialect::Smb210, Dialect::Smb302],
+                negotiate_contexts: Vec::new(),
+            })
+            .await
+            .expect("negotiate should succeed")
+            .session_setup(&session_request)
+            .await
+            .expect("session setup should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+
+        let request = ChangeNotifyRequest {
+            flags: ChangeNotifyFlags::WATCH_TREE,
+            output_buffer_length: 4096,
+            file_id,
+            completion_filter: CompletionFilter::FILE_NAME | CompletionFilter::LAST_WRITE,
+        };
+        let notify = connection
+            .change_notify(&request)
+            .await
+            .expect("change notify should succeed");
+        assert_eq!(notify, response);
+
+        let transport = connection.into_transport();
+        let header = outbound_header(&transport.writes[3]);
+        assert_eq!(header.command, Command::ChangeNotify);
+        assert_eq!(header.session_id, SessionId(66));
+        assert_eq!(header.tree_id, TreeId(12));
     }
 
     #[tokio::test]
