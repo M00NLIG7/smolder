@@ -9,9 +9,11 @@ license = "MIT"
 
 [dependencies]
 aes = "0.8"
+aes-gcm = "0.10"
 async-trait = "0.1"
 bitflags = "2"
 bytes = "1"
+ccm = "0.5"
 cmac = "0.7"
 hmac = "0.12"
 md-5 = "0.10"
