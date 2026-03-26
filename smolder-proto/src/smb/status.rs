@@ -23,6 +23,8 @@ impl NtStatus {
     pub const OBJECT_PATH_NOT_FOUND: Self = Self(0xc000_003a);
     /// `STATUS_PATH_NOT_COVERED`
     pub const PATH_NOT_COVERED: Self = Self(0xc000_0257);
+    /// `STATUS_NOT_FOUND`
+    pub const NOT_FOUND: Self = Self(0xc000_0225);
     /// `STATUS_OBJECT_NAME_COLLISION`
     pub const OBJECT_NAME_COLLISION: Self = Self(0xc000_0035);
     /// `STATUS_ACCESS_DENIED`

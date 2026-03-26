@@ -2021,6 +2021,7 @@ fn should_fallback_direct_share_after_dfs_query(error: &CoreError) -> bool {
         CoreError::UnexpectedStatus { command, status }
             if *command == Command::Ioctl
                 && (*status == NtStatus::PATH_NOT_COVERED.to_u32()
+                    || *status == NtStatus::NOT_FOUND.to_u32()
                     || *status == NtStatus::OBJECT_PATH_NOT_FOUND.to_u32()
                     || *status == NtStatus::OBJECT_NAME_NOT_FOUND.to_u32()) =>
         {
@@ -3896,6 +3897,63 @@ mod tests {
             share_request.path,
             smolder_proto::smb::smb2::utf16le(r"\\server\share")
         );
+    }
+
+    #[tokio::test]
+    async fn share_path_auto_falls_back_to_direct_share_when_dfs_query_returns_not_found() {
+        let ipc_response = TreeConnectResponse {
+            share_type: ShareType::Pipe,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let share_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let client = build_client_with_tree_response(
+            "server",
+            ipc_response,
+            vec![
+                response_frame_with_credits(
+                    Command::Ioctl,
+                    NtStatus::NOT_FOUND.to_u32(),
+                    3,
+                    11,
+                    7,
+                    1,
+                    Vec::new(),
+                ),
+                response_frame(
+                    Command::TreeDisconnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    4,
+                    11,
+                    7,
+                    TreeDisconnectResponse.encode(),
+                ),
+                response_frame(
+                    Command::TreeConnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    5,
+                    11,
+                    9,
+                    share_response.encode(),
+                ),
+            ],
+        )
+        .await;
+
+        let (share, relative_path) = client
+            .share_path_auto(r"\\server\share\docs\report.txt")
+            .await
+            .expect("not-found DFS query should fall back to direct share");
+
+        assert_eq!(share.server(), "server");
+        assert_eq!(share.name(), "share");
+        assert_eq!(relative_path, r"docs\report.txt");
     }
 
     #[tokio::test]
