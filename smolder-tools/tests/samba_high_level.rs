@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use smolder_core::prelude::{LeaseRequest, NtlmCredentials, OpenOptions, Share, SmbClient};
 use smolder_proto::smb::smb2::LeaseState;
+use smolder_tools::prelude::{LeaseRequest, NtlmCredentials, OpenOptions, Share, SmbClient};
 use tokio::sync::Mutex;
 
 fn required_env(name: &str) -> Option<String> {
@@ -200,12 +200,8 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .list("")
         .await
         .expect("listing should succeed after rename");
-    assert!(!renamed_listing
-        .iter()
-        .any(|entry| entry.name == original_path));
-    assert!(renamed_listing
-        .iter()
-        .any(|entry| entry.name == renamed_path));
+    assert!(!renamed_listing.iter().any(|entry| entry.name == original_path));
+    assert!(renamed_listing.iter().any(|entry| entry.name == renamed_path));
 
     share
         .remove(&renamed_path)
@@ -260,40 +256,30 @@ async fn opens_file_with_lease_when_configured() {
 
     let remote_path = unique_name("smolder-high-level-lease");
     let lease_key = *b"lease-key-000000";
-    let file = share
+    let requested = LeaseRequest::new(
+        lease_key,
+        LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING,
+    );
+
+    let mut file = share
         .open(
             &remote_path,
             OpenOptions::new()
+                .read(true)
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .lease(LeaseRequest::new(
-                    lease_key,
-                    LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING,
-                )),
+                .lease(requested),
         )
         .await
         .expect("lease open should succeed");
-    let lease = file.lease();
-    file.close().await.expect("close should succeed");
-    let Some(lease) = lease else {
-        eprintln!(
-            "skipping lease grant assertion: Samba accepted the lease-aware open but did not grant a lease under the current fixture policy"
-        );
-        share
-            .remove(&remote_path)
-            .await
-            .expect("remove should succeed");
-        return;
-    };
+    let granted = file.lease().expect("server should grant lease metadata");
+    assert_eq!(granted.key, lease_key);
+    assert!(granted.state.contains(LeaseState::READ_CACHING));
 
-    assert_eq!(lease.key, lease_key);
-    assert!(
-        lease
-            .state
-            .contains(LeaseState::READ_CACHING | LeaseState::HANDLE_CACHING),
-        "server should grant at least read and handle caching on the first open"
-    );
+    file.write_all(b"lease test").await.expect("write should succeed");
+    file.flush().await.expect("flush should succeed");
+    file.close().await.expect("close should succeed");
 
     share
         .remove(&remote_path)

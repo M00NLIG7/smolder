@@ -12,7 +12,11 @@ name = "smolder"
 path = "src/main.rs"
 
 [dependencies]
+bytes = "1"
 rand = "0.8"
 smolder-core = { path = "../smolder-core" }
 smolder-proto = { path = "../smolder-proto" }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+async-trait = "0.1"

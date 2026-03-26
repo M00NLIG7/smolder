@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use smolder_core::prelude::{NtlmCredentials, Share, SmbClient};
+use smolder_tools::prelude::{NtlmCredentials, Share, SmbClient};
 use tokio::sync::Mutex;
 
 fn required_env(name: &str) -> Option<String> {

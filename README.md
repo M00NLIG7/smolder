@@ -7,8 +7,8 @@ An SMB research toolkit in Rust. The current codebase is being rebuilt around a 
 Smolder is organized as a small workspace:
 
 - `smolder-proto`: SMB wire types, framing, codecs, and packet validation.
-- `smolder-core`: reusable SMB/RPC primitives, transport logic, auth/session state, and share/file operations.
-- `smolder-tools`: CLI commands and higher-level integrations such as remote execution workflows.
+- `smolder-core`: reusable SMB/RPC primitives, transport logic, and auth/session state.
+- `smolder-tools`: CLI commands and higher-level integrations such as SMB file workflows and remote execution.
 
 Boundary rule:
 

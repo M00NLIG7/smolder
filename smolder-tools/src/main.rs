@@ -4,9 +4,9 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use smolder_core::prelude::{NtlmCredentials, SmbClient, SmbMetadata};
 use smolder_tools::prelude::{
-    ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, RemoteExecClient,
+    ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, NtlmCredentials,
+    RemoteExecClient, Share, SmbClient, SmbMetadata,
 };
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -211,10 +211,7 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
     Ok(0)
 }
 
-async fn connect_share(
-    options: &AuthOptions,
-    remote: &RemoteLocation,
-) -> Result<smolder_core::prelude::Share, String> {
+async fn connect_share(options: &AuthOptions, remote: &RemoteLocation) -> Result<Share, String> {
     let mut credentials = NtlmCredentials::new(&options.username, &options.password);
     if let Some(domain) = &options.domain {
         credentials = credentials.with_domain(domain.as_str());
