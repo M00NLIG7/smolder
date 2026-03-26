@@ -1,0 +1,47 @@
+name: Windows Interop
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smolder-windows-interop
+  cancel-in-progress: false
+
+jobs:
+  windows-interop:
+    runs-on:
+      - self-hosted
+      - smolder-windows-gate
+    timeout-minutes: 60
+    env:
+      SMOLDER_WINDOWS_HOST: 127.0.0.1
+      SMOLDER_WINDOWS_PORT: 445
+      SMOLDER_WINDOWS_ENCRYPTED_SHARE: SMOLDERENC
+      SMOLDER_WINDOWS_VM: Tiny11
+      SMOLDER_WINDOWS_NATPF_RULE: smb445
+      SMOLDER_WINDOWS_USERNAME: ${{ secrets.SMOLDER_WINDOWS_USERNAME }}
+      SMOLDER_WINDOWS_PASSWORD: ${{ secrets.SMOLDER_WINDOWS_PASSWORD }}
+      SMOLDER_WINDOWS_DFS_ROOT: ${{ vars.SMOLDER_WINDOWS_DFS_ROOT }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Ensure Tiny11 SMB port forward
+        run: scripts/ensure-tiny11-smb-forward.sh
+
+      - name: Show Tiny11 fixture status
+        run: |
+          VBoxManage showvminfo "$SMOLDER_WINDOWS_VM" --machinereadable | \
+            grep -E '^(name|VMState|Forwarding)'
+
+      - name: Run Windows release gate
+        run: scripts/run-windows-release-gate.sh

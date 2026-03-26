@@ -162,6 +162,10 @@ Use [scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop
 entrypoint that fans out to the enabled Windows and Samba gates from the current
 environment. The Samba-backed subset is also wired into GitHub Actions via
 [interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml).
+The Tiny11 / Windows gate can now run through the optional self-hosted workflow
+[interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml),
+which uses [ensure-tiny11-smb-forward.sh](/Users/cmagana/Projects/smolder/scripts/ensure-tiny11-smb-forward.sh)
+to verify the local VirtualBox port forward before running the release gate.
 For the full manual Tiny11 pass, including remote execution smoke checks, use
 [run-windows-release-gate.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-release-gate.sh)
 and [docs/testing/windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).

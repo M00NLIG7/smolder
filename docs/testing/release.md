@@ -39,6 +39,7 @@ Recommended local replay:
 Required before release:
 
 - `scripts/run-windows-release-gate.sh`
+- or a green [interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml) run on the Tiny11 self-hosted runner
 
 This includes:
 
@@ -85,6 +86,7 @@ If the service payload changed too:
 Healthy release validation should end with:
 
 - Samba interop workflow green
+- Windows self-hosted interop workflow green, or an equivalent local Windows release-gate run
 - Windows release gate printing:
   - `nt authority\system` for `smbexec`
   - `nt authority\system` for `psexec`

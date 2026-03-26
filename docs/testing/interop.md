@@ -15,7 +15,9 @@ For a single entrypoint instead of running each command manually, use
 
 The repository also includes a GitHub Actions workflow at
 [interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml)
-that runs the Samba-backed subset on hosted Linux runners.
+that runs the Samba-backed subset on hosted Linux runners, plus
+[interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml)
+for an optional self-hosted Tiny11 gate.
 Release policy and required gate selection live in
 [release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
 
@@ -122,7 +124,8 @@ Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 ## CI Boundary
 
 - GitHub Actions runs the Samba-backed subset through `scripts/run-interop.sh --samba --core --tools`.
-- Tiny11 / Windows gates stay manual or self-hosted because they depend on the local VM fixture, local credentials, and the current port-forward setup.
+- GitHub Actions can also run the Windows gate through the self-hosted `interop-windows-self-hosted.yml` workflow when a runner labeled `smolder-windows-gate` is available.
+- Tiny11 / Windows still depends on the local VM fixture, local credentials, and the current VirtualBox port-forward setup.
 
 ## Core Commands
 
