@@ -130,6 +130,11 @@ SMOLDER_SAMBA_PASSWORD=smolderpass \
 cargo test -p smolder-core --test samba_rpc_encryption -- --nocapture
 ```
 
+## Live Interop Matrix
+
+The current supported live matrix, target fixtures, and repeatable verification
+commands are documented in [docs/testing/interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md).
+
 ## Security Notice
 
 This tool is designed for security research and penetration testing. Always ensure you have proper authorization before testing any systems or networks.
