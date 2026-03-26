@@ -61,7 +61,7 @@ impl NtlmRpcBindHandshake {
     }
 
     pub(crate) fn bind_flags(&self) -> PacketFlags {
-        PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT | PacketFlags::SUPPORT_HEADER_SIGN
+        PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT
     }
 
     pub(crate) fn initial_auth_verifier(&mut self) -> Result<AuthVerifier, CoreError> {
@@ -128,9 +128,7 @@ impl NtlmRpcBindHandshake {
         Ok(NtlmRpcBindComplete {
             auth3: RpcAuth3Pdu {
                 call_id: bind_ack.call_id,
-                flags: PacketFlags::FIRST_FRAGMENT
-                    | PacketFlags::LAST_FRAGMENT
-                    | PacketFlags::SUPPORT_HEADER_SIGN,
+                flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
                 pad: [0; 4],
                 auth_verifier: AuthVerifier::new(
                     AuthType::WinNt,
