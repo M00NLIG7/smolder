@@ -224,6 +224,7 @@ impl SigningState {
 pub struct Connection<T, State> {
     transport: T,
     next_message_id: u64,
+    available_credits: u32,
     state: State,
 }
 
@@ -243,6 +244,61 @@ impl TransactionFrames {
         let body = self.response_packet.split_off(Header::LEN);
         (self.header, body)
     }
+}
+
+/// A raw SMB request element within a compound chain.
+#[derive(Debug, Clone)]
+pub struct CompoundRequest {
+    /// The SMB2 command to send.
+    pub command: Command,
+    /// The encoded SMB2 request body for this command.
+    pub body: Vec<u8>,
+    /// Whether this request should be flagged as related to the previous request.
+    pub related: bool,
+    /// Accepted NTSTATUS values for this response element.
+    pub accepted_statuses: Vec<u32>,
+}
+
+impl CompoundRequest {
+    /// Builds a new raw compound request that expects `STATUS_SUCCESS`.
+    #[must_use]
+    pub fn new(command: Command, body: Vec<u8>) -> Self {
+        Self {
+            command,
+            body,
+            related: false,
+            accepted_statuses: vec![NtStatus::SUCCESS.to_u32()],
+        }
+    }
+
+    /// Marks this request as related to the previous request in the chain.
+    #[must_use]
+    pub fn related(command: Command, body: Vec<u8>) -> Self {
+        Self::new(command, body).with_related(true)
+    }
+
+    /// Sets whether this request is related to the previous request in the chain.
+    #[must_use]
+    pub fn with_related(mut self, related: bool) -> Self {
+        self.related = related;
+        self
+    }
+
+    /// Replaces the accepted status list for this response element.
+    #[must_use]
+    pub fn with_accepted_statuses(mut self, statuses: impl Into<Vec<u32>>) -> Self {
+        self.accepted_statuses = statuses.into();
+        self
+    }
+}
+
+/// A raw SMB response element returned from a compound chain.
+#[derive(Debug, Clone)]
+pub struct CompoundResponse {
+    /// The SMB2 response header for this element.
+    pub header: Header,
+    /// The raw SMB2 response body for this element, including any compound alignment padding.
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +336,7 @@ impl<T> Connection<T, Connected> {
         Self {
             transport,
             next_message_id: 0,
+            available_credits: 1,
             state: Connected,
         }
     }
@@ -333,6 +390,7 @@ where
         Ok(Connection {
             transport: self.transport,
             next_message_id: self.next_message_id,
+            available_credits: self.available_credits,
             state: Negotiated {
                 response,
                 client_signing_mode: request.security_mode,
@@ -425,6 +483,7 @@ where
                 let Connection {
                     transport,
                     next_message_id,
+                    available_credits,
                     state,
                 } = self;
                 let Negotiated {
@@ -435,6 +494,7 @@ where
                 return Ok(Connection {
                     transport,
                     next_message_id,
+                    available_credits,
                     state: Authenticated {
                         negotiated,
                         client_signing_mode,
@@ -499,6 +559,7 @@ where
         let Connection {
             transport,
             next_message_id,
+            available_credits,
             state,
         } = self;
         let Negotiated {
@@ -510,6 +571,7 @@ where
         Ok(Connection {
             transport,
             next_message_id,
+            available_credits,
             state: Authenticated {
                 negotiated,
                 client_signing_mode,
@@ -528,6 +590,20 @@ impl<T> Connection<T, Authenticated>
 where
     T: Transport + Send,
 {
+    /// Executes a raw compound request within the authenticated session.
+    pub async fn compound_raw(
+        &mut self,
+        requests: &[CompoundRequest],
+    ) -> Result<Vec<CompoundResponse>, CoreError> {
+        let context = RequestContext::new(
+            self.state.session_id,
+            TreeId(0),
+            self.state.signing_required,
+            self.state.signing.clone(),
+        );
+        self.transact_compound_raw(requests, context).await
+    }
+
     /// Performs `LOGOFF` and transitions back into the negotiated state.
     pub async fn logoff(mut self) -> Result<Connection<T, Negotiated>, CoreError> {
         let context = RequestContext::new(
@@ -548,6 +624,7 @@ where
         let Connection {
             transport,
             next_message_id,
+            available_credits,
             state,
         } = self;
         let Authenticated {
@@ -560,6 +637,7 @@ where
         Ok(Connection {
             transport,
             next_message_id,
+            available_credits,
             state: Negotiated {
                 response,
                 client_signing_mode,
@@ -597,6 +675,7 @@ where
         let Connection {
             transport,
             next_message_id,
+            available_credits,
             state,
         } = self;
         let Authenticated {
@@ -613,6 +692,7 @@ where
         Ok(Connection {
             transport,
             next_message_id,
+            available_credits,
             state: TreeConnected {
                 negotiated,
                 client_signing_mode,
@@ -633,6 +713,20 @@ impl<T> Connection<T, TreeConnected>
 where
     T: Transport + Send,
 {
+    /// Executes a raw compound request on the active tree.
+    pub async fn compound_raw(
+        &mut self,
+        requests: &[CompoundRequest],
+    ) -> Result<Vec<CompoundResponse>, CoreError> {
+        let context = RequestContext::new(
+            self.state.session_id,
+            self.state.tree_id,
+            self.state.signing_required,
+            self.state.signing.clone(),
+        );
+        self.transact_compound_raw(requests, context).await
+    }
+
     /// Performs a `TREE_DISCONNECT` request and returns to the authenticated state.
     pub async fn tree_disconnect(mut self) -> Result<Connection<T, Authenticated>, CoreError> {
         let context = RequestContext::new(
@@ -653,6 +747,7 @@ where
         let Connection {
             transport,
             next_message_id,
+            available_credits,
             state,
         } = self;
         let TreeConnected {
@@ -670,6 +765,7 @@ where
         Ok(Connection {
             transport,
             next_message_id,
+            available_credits,
             state: Authenticated {
                 negotiated,
                 client_signing_mode,
@@ -921,6 +1017,102 @@ impl<T, State> Connection<T, State>
 where
     T: Transport + Send,
 {
+    async fn transact_compound_raw(
+        &mut self,
+        requests: &[CompoundRequest],
+        context: RequestContext,
+    ) -> Result<Vec<CompoundResponse>, CoreError> {
+        let request_packets = self.build_compound_request_packets(requests, &context)?;
+        let payload = request_packets
+            .iter()
+            .flat_map(|packet| packet.iter().copied())
+            .collect::<Vec<_>>();
+        let frame = SessionMessage::encode_payload(&payload)?;
+        let first_command = requests[0].command;
+        let last_command = requests[requests.len() - 1].command;
+
+        trace!(
+            first_command = ?first_command,
+            last_command = ?last_command,
+            request_count = requests.len(),
+            "sending compound smb request"
+        );
+        self.transport
+            .send(&frame)
+            .instrument(trace_span!(
+                "smb_send_compound",
+                first_command = ?first_command,
+                last_command = ?last_command,
+                request_count = requests.len()
+            ))
+            .await?;
+
+        let response_frame = self
+            .transport
+            .recv()
+            .instrument(trace_span!(
+                "smb_recv_compound",
+                first_command = ?first_command,
+                last_command = ?last_command,
+                request_count = requests.len()
+            ))
+            .await?;
+        let response_frame = SessionMessage::decode(&response_frame)?;
+        let response_packets = split_compound_packets(&response_frame.payload)?;
+        if response_packets.len() != requests.len() {
+            return Err(CoreError::InvalidResponse(
+                "compound response count did not match the request chain",
+            ));
+        }
+
+        let mut responses = Vec::with_capacity(requests.len());
+        let mut granted_credits = 0u32;
+        for ((request, request_packet), response_packet) in requests
+            .iter()
+            .zip(request_packets.iter())
+            .zip(response_packets.iter())
+        {
+            let request_header = Header::decode(&request_packet[..Header::LEN])?;
+            let response_header = Header::decode(&response_packet[..Header::LEN])?;
+            if response_header.command != request.command {
+                return Err(CoreError::UnexpectedCommand {
+                    expected: request.command,
+                    actual: response_header.command,
+                });
+            }
+            if response_header.message_id != request_header.message_id {
+                return Err(CoreError::InvalidResponse(
+                    "compound response message id did not match the request element",
+                ));
+            }
+            if response_header.status == NtStatus::PENDING.to_u32()
+                || response_header.flags.contains(HeaderFlags::ASYNC_COMMAND)
+            {
+                return Err(CoreError::Unsupported(
+                    "compound async SMB responses are not supported yet",
+                ));
+            }
+            verify_response_signature(&response_header, response_packet, &context)?;
+            if !request.accepted_statuses.contains(&response_header.status) {
+                return Err(CoreError::UnexpectedStatus {
+                    command: request.command,
+                    status: response_header.status,
+                });
+            }
+            granted_credits = granted_credits
+                .checked_add(u32::from(response_header.credit_request_response))
+                .ok_or(CoreError::InvalidResponse(
+                    "server granted too many SMB credits",
+                ))?;
+            responses.push(CompoundResponse {
+                header: response_header,
+                body: response_packet[Header::LEN..].to_vec(),
+            });
+        }
+        self.apply_credit_grant(granted_credits)?;
+        Ok(responses)
+    }
+
     async fn transact<Response>(
         &mut self,
         command: Command,
@@ -963,17 +1155,17 @@ where
         context: RequestContext,
         accepted_statuses: &[u32],
     ) -> Result<TransactionFrames, CoreError> {
-        let message_id = MessageId(self.next_message_id);
-        self.next_message_id += 1;
-
-        let mut header = Header::new(command, message_id);
-        header.session_id = context.session_id;
-        header.tree_id = context.tree_id;
         if context.signing_required && context.signing.is_none() {
             return Err(CoreError::InvalidInput(
                 "session requires signing but no signing key is available",
             ));
         }
+        let message_id = self.preview_message_ids(1)?[0];
+
+        let mut header = Header::new(command, message_id);
+        header.session_id = context.session_id;
+        header.tree_id = context.tree_id;
+        header.credit_request_response = self.credit_request_hint_after_reserve(1);
         if context.signing.is_some() {
             header.flags |= HeaderFlags::SIGNED;
         }
@@ -984,6 +1176,7 @@ where
             signing.sign_packet(&mut packet)?;
         }
         let frame = SessionMessage::encode_payload(&packet)?;
+        self.commit_message_ids(1)?;
 
         trace!(?command, message_id = message_id.0, "sending smb request");
         self.transport
@@ -1020,6 +1213,7 @@ where
 
             if response_header.status == NtStatus::PENDING.to_u32() {
                 let async_id = validate_pending_response(&response_header)?;
+                self.apply_credit_grant(u32::from(response_header.credit_request_response))?;
                 pending_async_id = Some(async_id);
                 trace!(
                     ?command,
@@ -1044,6 +1238,7 @@ where
                     status: response_header.status,
                 });
             }
+            self.apply_credit_grant(u32::from(response_header.credit_request_response))?;
 
             return Ok(TransactionFrames {
                 header: response_header,
@@ -1052,6 +1247,189 @@ where
             });
         }
     }
+
+    fn preview_message_ids(&self, count: usize) -> Result<Vec<MessageId>, CoreError> {
+        let count = self.validate_request_count(count)?;
+        let start = self.next_message_id;
+
+        Ok((0..count)
+            .map(|offset| MessageId(start + u64::from(offset)))
+            .collect())
+    }
+
+    fn commit_message_ids(&mut self, count: usize) -> Result<(), CoreError> {
+        let count = self.validate_request_count(count)?;
+        self.next_message_id = self
+            .next_message_id
+            .checked_add(u64::from(count))
+            .ok_or(CoreError::InvalidInput(
+                "message id space exhausted for SMB request dispatch",
+            ))?;
+        self.available_credits -= count;
+        Ok(())
+    }
+
+    fn validate_request_count(&self, count: usize) -> Result<u32, CoreError> {
+        if count == 0 {
+            return Err(CoreError::InvalidInput(
+                "compound request chain must contain at least one element",
+            ));
+        }
+        let count = u32::try_from(count)
+            .map_err(|_| CoreError::InvalidInput("too many SMB requests in one chain"))?;
+        if self.available_credits < count {
+            return Err(CoreError::Unsupported(
+                "insufficient SMB credits available for the requested chain",
+            ));
+        }
+
+        Ok(count)
+    }
+
+    fn apply_credit_grant(&mut self, granted: u32) -> Result<(), CoreError> {
+        self.available_credits = self
+            .available_credits
+            .checked_add(granted)
+            .ok_or(CoreError::InvalidResponse(
+                "server granted too many SMB credits",
+            ))?;
+        Ok(())
+    }
+
+    fn credit_request_hint_after_reserve(&self, count: usize) -> u16 {
+        const TARGET_CREDIT_FLOOR: u32 = 32;
+
+        let count = u32::try_from(count).unwrap_or(u32::MAX);
+        let available_after_reserve = self.available_credits.saturating_sub(count);
+        count
+            .max(TARGET_CREDIT_FLOOR.saturating_sub(available_after_reserve))
+            .min(u32::from(u16::MAX)) as u16
+    }
+
+    fn build_compound_request_packets(
+        &mut self,
+        requests: &[CompoundRequest],
+        context: &RequestContext,
+    ) -> Result<Vec<Vec<u8>>, CoreError> {
+        if requests.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "compound request chain must contain at least one element",
+            ));
+        }
+        if requests[0].related {
+            return Err(CoreError::InvalidInput(
+                "the first compound request element cannot be marked related",
+            ));
+        }
+        if context.signing_required && context.signing.is_none() {
+            return Err(CoreError::InvalidInput(
+                "session requires signing but no signing key is available",
+            ));
+        }
+
+        let message_ids = self.preview_message_ids(requests.len())?;
+        let last_request_credit = self.credit_request_hint_after_reserve(requests.len());
+        let mut packets = Vec::with_capacity(requests.len());
+        for (index, (request, message_id)) in requests.iter().zip(message_ids.iter()).enumerate() {
+            let mut header = Header::new(request.command, *message_id);
+            header.session_id = context.session_id;
+            header.tree_id = context.tree_id;
+            header.credit_request_response = if index + 1 == requests.len() {
+                last_request_credit
+            } else {
+                1
+            };
+            if request.related {
+                header.flags |= HeaderFlags::RELATED_OPERATIONS;
+            }
+            if context.signing.is_some() {
+                header.flags |= HeaderFlags::SIGNED;
+            }
+
+            let base_len = Header::LEN
+                .checked_add(request.body.len())
+                .ok_or(CoreError::InvalidInput("compound request element was too large"))?;
+            let packet_len = if index + 1 == requests.len() {
+                base_len
+            } else {
+                align_to_8(base_len)
+            };
+            if index + 1 < requests.len() {
+                header.next_command =
+                    u32::try_from(packet_len).map_err(|_| CoreError::InvalidInput(
+                        "compound request element exceeded SMB next-command limits",
+                    ))?;
+            }
+
+            let mut packet = header.encode();
+            packet.extend_from_slice(&request.body);
+            if index + 1 < requests.len() {
+                packet.resize(packet_len, 0);
+            }
+            if let Some(signing) = context.signing.as_deref() {
+                signing.sign_packet(&mut packet)?;
+            }
+            packets.push(packet);
+        }
+        self.commit_message_ids(requests.len())?;
+
+        Ok(packets)
+    }
+}
+
+fn session_setup_debug_enabled() -> bool {
+    std::env::var_os("SMOLDER_NTLM_DEBUG").is_some()
+}
+
+fn align_to_8(len: usize) -> usize {
+    (len + 7) & !7
+}
+
+fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreError> {
+    if payload.len() < Header::LEN {
+        return Err(CoreError::InvalidResponse(
+            "response shorter than SMB2 header",
+        ));
+    }
+
+    let mut packets = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let header_end = offset
+            .checked_add(Header::LEN)
+            .ok_or(CoreError::InvalidResponse("compound response offset overflowed"))?;
+        if header_end > payload.len() {
+            return Err(CoreError::InvalidResponse(
+                "compound response packet was truncated",
+            ));
+        }
+        let header = Header::decode(&payload[offset..header_end])?;
+        let next = header.next_command as usize;
+        let end = if next == 0 {
+            payload.len()
+        } else {
+            if next < Header::LEN || next % 8 != 0 {
+                return Err(CoreError::InvalidResponse(
+                    "compound response next-command offset was invalid",
+                ));
+            }
+            offset.checked_add(next).ok_or(CoreError::InvalidResponse(
+                "compound response offset overflowed",
+            ))?
+        };
+        if end > payload.len() || end <= offset {
+            return Err(CoreError::InvalidResponse(
+                "compound response next-command offset was invalid",
+            ));
+        }
+        packets.push(&payload[offset..end]);
+        if next == 0 {
+            break;
+        }
+        offset = end;
+    }
+
+    Ok(packets)
 }
 
 fn validate_pending_response(header: &Header) -> Result<AsyncId, CoreError> {
@@ -1376,7 +1754,25 @@ mod tests {
         tree_id: u32,
         body: Vec<u8>,
     ) -> Vec<u8> {
-        let packet = response_packet(command, status, message_id, session_id, tree_id, body);
+        let packet =
+            response_packet_with_credits(command, status, message_id, session_id, tree_id, 1, body);
+        SessionMessage::new(packet)
+            .encode()
+            .expect("response should frame")
+    }
+
+    fn response_frame_with_credits(
+        command: Command,
+        status: u32,
+        message_id: u64,
+        session_id: u64,
+        tree_id: u32,
+        credits: u16,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
+        let packet = response_packet_with_credits(
+            command, status, message_id, session_id, tree_id, credits, body,
+        );
         SessionMessage::new(packet)
             .encode()
             .expect("response should frame")
@@ -1390,27 +1786,42 @@ mod tests {
         tree_id: u32,
         body: Vec<u8>,
     ) -> Vec<u8> {
+        response_packet_with_credits(command, status, message_id, session_id, tree_id, 1, body)
+    }
+
+    fn response_packet_with_credits(
+        command: Command,
+        status: u32,
+        message_id: u64,
+        session_id: u64,
+        tree_id: u32,
+        credits: u16,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
         let mut header = Header::new(command, MessageId(message_id));
         header.status = status;
         header.flags = HeaderFlags::SERVER_TO_REDIR;
         header.session_id = SessionId(session_id);
         header.tree_id = TreeId(tree_id);
+        header.credit_request_response = credits;
 
         let mut packet = header.encode();
         packet.extend_from_slice(&body);
         packet
     }
 
-    fn request_packet(
+    fn request_packet_with_credits(
         command: Command,
         message_id: u64,
         session_id: u64,
         tree_id: u32,
+        credits: u16,
         body: Vec<u8>,
     ) -> Vec<u8> {
         let mut header = Header::new(command, MessageId(message_id));
         header.session_id = SessionId(session_id);
         header.tree_id = TreeId(tree_id);
+        header.credit_request_response = credits;
 
         let mut packet = header.encode();
         packet.extend_from_slice(&body);
@@ -1441,6 +1852,15 @@ mod tests {
     fn outbound_header(frame: &[u8]) -> Header {
         let frame = SessionMessage::decode(frame).expect("frame should decode");
         Header::decode(&frame.payload[..Header::LEN]).expect("header should decode")
+    }
+
+    fn outbound_headers(frame: &[u8]) -> Vec<Header> {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        super::split_compound_packets(&frame.payload)
+            .expect("compound frame should decode")
+            .iter()
+            .map(|packet| Header::decode(&packet[..Header::LEN]).expect("header should decode"))
+            .collect()
     }
 
     fn outbound_session_setup(frame: &[u8]) -> SessionSetupRequest {
@@ -1484,17 +1904,45 @@ mod tests {
         signing.sign_packet(packet).expect("response should sign");
     }
 
+    fn compound_response_frame(
+        elements: Vec<(Command, u32, u64, u64, u32, u16, Vec<u8>)>,
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        let total = elements.len();
+        for (index, (command, status, message_id, session_id, tree_id, credits, body)) in
+            elements.into_iter().enumerate()
+        {
+            let mut packet = response_packet_with_credits(
+                command, status, message_id, session_id, tree_id, credits, body,
+            );
+            let is_last = index + 1 == total;
+            if !is_last {
+                let packet_len = super::align_to_8(packet.len());
+                let mut header =
+                    Header::decode(&packet[..Header::LEN]).expect("header should decode");
+                header.next_command = u32::try_from(packet_len).expect("packet length should fit");
+                packet[..Header::LEN].copy_from_slice(&header.encode());
+                packet.resize(packet_len, 0);
+            }
+            payload.extend_from_slice(&packet);
+        }
+        SessionMessage::new(payload)
+            .encode()
+            .expect("compound frame should encode")
+    }
+
     fn smb311_signing_state(
         negotiate_request: &NegotiateRequest,
         negotiate_response: &NegotiateResponse,
         session_request: &SessionSetupRequest,
         session_key: &[u8],
     ) -> Arc<super::SigningState> {
-        let negotiate_request_packet = request_packet(
+        let negotiate_request_packet = request_packet_with_credits(
             Command::Negotiate,
             0,
             0,
             0,
+            32,
             negotiate_request.encode().expect("request should encode"),
         );
         let negotiate_response_packet = response_packet(
@@ -1514,7 +1962,7 @@ mod tests {
         .expect("preauth state should derive")
         .expect("SMB 3.1.1 should negotiate preauth");
         let session_request_packet =
-            request_packet(Command::SessionSetup, 1, 0, 0, session_request.encode());
+            request_packet_with_credits(Command::SessionSetup, 1, 0, 0, 32, session_request.encode());
         preauth
             .update(&session_request_packet)
             .expect("session request should update preauth state");
@@ -2210,6 +2658,239 @@ mod tests {
         );
         assert_eq!(request.file_id, create_response.file_id);
         assert_eq!(request.max_output_response, 32);
+    }
+
+    #[tokio::test]
+    async fn compound_raw_uses_consecutive_message_ids_and_related_flag() {
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![preauth_context(b"server-salt-0100")],
+            server_guid: *b"server-guid-0100",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: vec![0xa1, 0x01],
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let file_id = FileId {
+            persistent: 0x11,
+            volatile: 0x22,
+        };
+        let write_body = WriteRequest::for_file(file_id, 0, b"hello".to_vec()).encode();
+        let flush_body = FlushRequest::for_file(file_id).encode();
+        let transport = ScriptedTransport::new(vec![
+            response_frame_with_credits(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                32,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                55,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                55,
+                9,
+                tree_response.encode(),
+            ),
+            compound_response_frame(vec![
+                (
+                    Command::Write,
+                    NtStatus::SUCCESS.to_u32(),
+                    3,
+                    55,
+                    9,
+                    1,
+                    WriteResponse { count: 5 }.encode(),
+                ),
+                (
+                    Command::Flush,
+                    NtStatus::SUCCESS.to_u32(),
+                    4,
+                    55,
+                    9,
+                    1,
+                    FlushResponse.encode(),
+                ),
+            ]),
+        ]);
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0100",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client-salt-0100")],
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+        let mut connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .session_setup(&session_request)
+            .await
+            .expect("session setup should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+
+        let responses = connection
+            .compound_raw(&[
+                super::CompoundRequest::new(Command::Write, write_body.clone()),
+                super::CompoundRequest::related(Command::Flush, flush_body.clone()),
+            ])
+            .await
+            .expect("compound request should succeed");
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0].header.command, Command::Write);
+        assert_eq!(responses[0].header.message_id, MessageId(3));
+        assert_eq!(responses[1].header.command, Command::Flush);
+        assert_eq!(responses[1].header.message_id, MessageId(4));
+
+        let transport = connection.into_transport();
+        let headers = outbound_headers(&transport.writes[3]);
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].message_id, MessageId(3));
+        assert_eq!(
+            headers[0].next_command as usize,
+            super::align_to_8(Header::LEN + write_body.len())
+        );
+        assert!(!headers[0].flags.contains(HeaderFlags::RELATED_OPERATIONS));
+        assert_eq!(headers[1].message_id, MessageId(4));
+        assert_eq!(headers[1].next_command, 0);
+        assert!(headers[1].flags.contains(HeaderFlags::RELATED_OPERATIONS));
+        assert_eq!(headers[1].session_id, SessionId(55));
+        assert_eq!(headers[1].tree_id, TreeId(9));
+    }
+
+    #[tokio::test]
+    async fn compound_raw_requires_enough_credits_for_the_chain() {
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![preauth_context(b"server-salt-0101")],
+            server_guid: *b"server-guid-0101",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: vec![0xa1, 0x01],
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0101",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client-salt-0101")],
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+        let file_id = FileId {
+            persistent: 0x33,
+            volatile: 0x44,
+        };
+        let mut connection = Connection::new(ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                55,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                55,
+                9,
+                tree_response.encode(),
+            ),
+        ]))
+        .negotiate(&negotiate_request)
+        .await
+        .expect("negotiate should succeed")
+        .session_setup(&session_request)
+        .await
+        .expect("session setup should succeed")
+        .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+        .await
+        .expect("tree connect should succeed");
+
+        let error = connection
+            .compound_raw(&[
+                super::CompoundRequest::new(
+                    Command::Write,
+                    WriteRequest::for_file(file_id, 0, b"hello".to_vec()).encode(),
+                ),
+                super::CompoundRequest::related(
+                    Command::Flush,
+                    FlushRequest::for_file(file_id).encode(),
+                ),
+            ])
+            .await
+            .expect_err("compound request should fail without enough credits");
+
+        assert!(matches!(error, CoreError::Unsupported(_)));
+        let transport = connection.into_transport();
+        assert_eq!(transport.writes.len(), 3);
     }
 
     #[tokio::test]

@@ -22,7 +22,10 @@ pub mod prelude {
         AuthProvider, NtlmAuthenticator, NtlmCredentials, NtlmRpcPacketIntegrity,
         NtlmSessionSecurity,
     };
-    pub use crate::client::{Authenticated, Connected, Connection, Negotiated, TreeConnected};
+    pub use crate::client::{
+        Authenticated, CompoundRequest, CompoundResponse, Connected, Connection, Negotiated,
+        TreeConnected,
+    };
     pub use crate::error::CoreError;
     pub use crate::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::rpc::PipeRpcClient;
