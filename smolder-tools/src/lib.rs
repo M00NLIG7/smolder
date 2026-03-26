@@ -13,6 +13,7 @@
 pub use smolder_core::{auth, client, error, transport};
 
 pub mod fs;
+pub mod reconnect;
 pub mod remote_exec;
 pub mod prelude {
     //! Common types and traits
@@ -21,9 +22,12 @@ pub mod prelude {
         Lease, LeaseRequest, OpenOptions, RemoteFile, Share, SmbClient, SmbClientBuilder,
         SmbDirectoryEntry, SmbMetadata,
     };
+    pub use crate::reconnect::ShareReconnectPlan;
     pub use crate::remote_exec::{
         ExecMode, ExecRequest, ExecResult, InteractiveReader, InteractiveSession, InteractiveStdin,
         InteractiveWaiter, RemoteExecBuilder, RemoteExecClient,
     };
-    pub use smolder_core::prelude::NtlmCredentials;
+    pub use smolder_core::prelude::{
+        DurableHandle, DurableOpenOptions, NtlmCredentials, ResilientHandle,
+    };
 }

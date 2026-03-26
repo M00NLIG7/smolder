@@ -190,9 +190,8 @@ impl EncryptionCapabilities {
     /// Serializes the context payload.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = BytesMut::with_capacity(4 + self.ciphers.len() * 2);
+        let mut out = BytesMut::with_capacity(2 + self.ciphers.len() * 2);
         out.put_u16_le(self.ciphers.len() as u16);
-        out.put_u16_le(0);
         for cipher in &self.ciphers {
             out.put_u16_le(*cipher as u16);
         }
@@ -203,7 +202,6 @@ impl EncryptionCapabilities {
     pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
         let mut input = data;
         let cipher_count = usize::from(get_u16(&mut input, "cipher_count")?);
-        let _reserved = get_u16(&mut input, "reserved")?;
         if cipher_count == 0 {
             return Err(ProtocolError::InvalidField {
                 field: "cipher_count",
@@ -615,8 +613,8 @@ fn decode_contexts(
 mod tests {
     use super::{
         CipherId, Dialect, EncryptionCapabilities, GlobalCapabilities, NegotiateContext,
-        NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities,
-        PreauthIntegrityHashId, SigningMode,
+        NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
+        SigningMode,
     };
 
     #[test]
@@ -646,6 +644,18 @@ mod tests {
             .expect("context should decode")
             .expect("context should be encryption");
         assert_eq!(decoded, capabilities);
+    }
+
+    #[test]
+    fn encryption_capabilities_decode_accepts_single_cipher_response_shape() {
+        let decoded = EncryptionCapabilities::decode(&[0x01, 0x00, 0x02, 0x00])
+            .expect("single-cipher encryption capabilities should decode");
+        assert_eq!(
+            decoded,
+            EncryptionCapabilities {
+                ciphers: vec![CipherId::Aes128Gcm],
+            }
+        );
     }
 
     #[test]
