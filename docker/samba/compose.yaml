@@ -11,3 +11,4 @@ services:
     volumes:
       - ./data:/data
       - ./share:/samba/share
+      - ./share-encrypted:/samba/share-encrypted

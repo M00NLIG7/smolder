@@ -8,6 +8,7 @@ auth:
 global:
   - "map to guest = never"
   - "server min protocol = SMB2_10"
+  - "include = /data/encrypted-share.conf"
 
 share:
   - name: share
