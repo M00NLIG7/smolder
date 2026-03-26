@@ -1,7 +1,7 @@
 //! Reusable DCE/RPC transport primitives built on top of named pipes.
 
 use smolder_proto::rpc::{
-    BindAckPdu, BindPdu, Packet, PacketFlags, RequestPdu, ResponsePdu, SyntaxId, Uuid,
+    AuthVerifier, BindAckPdu, BindPdu, Packet, PacketFlags, RequestPdu, ResponsePdu, SyntaxId, Uuid,
 };
 
 use crate::error::CoreError;
@@ -48,6 +48,16 @@ where
         context_id: u16,
         abstract_syntax: SyntaxId,
     ) -> Result<BindAckPdu, CoreError> {
+        self.bind_with_auth(context_id, abstract_syntax, None).await
+    }
+
+    /// Sends a bind PDU with an optional authentication verifier.
+    pub async fn bind_with_auth(
+        &mut self,
+        context_id: u16,
+        abstract_syntax: SyntaxId,
+        auth_verifier: Option<AuthVerifier>,
+    ) -> Result<BindAckPdu, CoreError> {
         let bind = Packet::Bind(BindPdu {
             call_id: self.next_call_id(),
             max_xmit_frag: self.pipe.fragment_size() as u16,
@@ -56,7 +66,7 @@ where
             context_id,
             abstract_syntax,
             transfer_syntax: SyntaxId::NDR32,
-            auth_verifier: None,
+            auth_verifier,
         });
         let response = self.pipe.call(bind.encode()).await?;
         let packet = Packet::decode(&response)?;
@@ -89,7 +99,21 @@ where
         opnum: u16,
         stub_data: Vec<u8>,
     ) -> Result<Vec<u8>, CoreError> {
-        self.call_with_object(context_id, opnum, None, stub_data)
+        let response = self
+            .call_with_auth(context_id, opnum, stub_data, None)
+            .await?;
+        Ok(response.stub_data)
+    }
+
+    /// Sends a request PDU and returns the decoded response PDU.
+    pub async fn call_with_auth(
+        &mut self,
+        context_id: u16,
+        opnum: u16,
+        stub_data: Vec<u8>,
+        auth_verifier: Option<AuthVerifier>,
+    ) -> Result<ResponsePdu, CoreError> {
+        self.call_with_object_pdu(context_id, opnum, None, stub_data, auth_verifier)
             .await
     }
 
@@ -101,6 +125,21 @@ where
         object_uuid: Option<Uuid>,
         stub_data: Vec<u8>,
     ) -> Result<Vec<u8>, CoreError> {
+        let response = self
+            .call_with_object_pdu(context_id, opnum, object_uuid, stub_data, None)
+            .await?;
+        Ok(response.stub_data)
+    }
+
+    /// Sends a request PDU with an optional object UUID and authentication verifier.
+    pub async fn call_with_object_pdu(
+        &mut self,
+        context_id: u16,
+        opnum: u16,
+        object_uuid: Option<Uuid>,
+        stub_data: Vec<u8>,
+        auth_verifier: Option<AuthVerifier>,
+    ) -> Result<ResponsePdu, CoreError> {
         let request = Packet::Request(RequestPdu {
             call_id: self.next_call_id(),
             flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
@@ -109,12 +148,12 @@ where
             opnum,
             object_uuid,
             stub_data,
-            auth_verifier: None,
+            auth_verifier,
         });
         let response = self.pipe.call(request.encode()).await?;
         let packet = Packet::decode(&response)?;
         match packet {
-            Packet::Response(ResponsePdu { stub_data, .. }) => Ok(stub_data),
+            Packet::Response(response) => Ok(response),
             Packet::Fault(fault) => Err(CoreError::RemoteOperation {
                 operation: "rpc_fault",
                 code: fault.status,
@@ -130,7 +169,8 @@ mod tests {
 
     use async_trait::async_trait;
     use smolder_proto::rpc::{
-        BindAckPdu, BindAckResult, FaultPdu, Packet, PacketFlags, ResponsePdu, SyntaxId, Uuid,
+        AuthLevel, AuthType, AuthVerifier, BindAckPdu, BindAckResult, FaultPdu, Packet,
+        PacketFlags, ResponsePdu, SyntaxId, Uuid,
     };
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
@@ -204,6 +244,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_preserves_auth_verifier_on_bind_ack() {
+        let verifier = AuthVerifier::new(
+            AuthType::WinNt,
+            AuthLevel::PacketIntegrity,
+            0,
+            vec![0x55; 16],
+        );
+        let pipe = open_pipe(vec![rpc_response_frame(Packet::BindAck(BindAckPdu {
+            call_id: 1,
+            max_xmit_frag: 4280,
+            max_recv_frag: 4280,
+            assoc_group_id: 0,
+            secondary_address: b"\\PIPE\\svcctl\0".to_vec(),
+            result: BindAckResult {
+                result: 0,
+                reason: 0,
+                transfer_syntax: SyntaxId::NDR32,
+            },
+            auth_verifier: Some(verifier.clone()),
+        }))])
+        .await;
+        let mut rpc = PipeRpcClient::new(pipe);
+
+        let bind_ack = rpc
+            .bind_with_auth(0, TEST_SYNTAX, Some(verifier.clone()))
+            .await
+            .expect("bind with auth should succeed");
+
+        assert_eq!(bind_ack.auth_verifier, Some(verifier));
+    }
+
+    #[tokio::test]
     async fn call_returns_stub_data_on_response() {
         let pipe = open_pipe(vec![rpc_response_frame(Packet::Response(ResponsePdu {
             call_id: 1,
@@ -223,6 +295,35 @@ mod tests {
             .expect("rpc call should succeed");
 
         assert_eq!(stub, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn call_with_auth_returns_response_pdu() {
+        let verifier = AuthVerifier::new(
+            AuthType::WinNt,
+            AuthLevel::PacketIntegrity,
+            1,
+            vec![0x77; 16],
+        );
+        let pipe = open_pipe(vec![rpc_response_frame(Packet::Response(ResponsePdu {
+            call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 4,
+            context_id: 0,
+            cancel_count: 0,
+            stub_data: vec![9, 8, 7, 6],
+            auth_verifier: Some(verifier.clone()),
+        }))])
+        .await;
+        let mut rpc = PipeRpcClient::new(pipe);
+
+        let response = rpc
+            .call_with_auth(0, 15, vec![0xaa, 0xbb], Some(verifier.clone()))
+            .await
+            .expect("authenticated rpc call should succeed");
+
+        assert_eq!(response.stub_data, vec![9, 8, 7, 6]);
+        assert_eq!(response.auth_verifier, Some(verifier));
     }
 
     #[tokio::test]
