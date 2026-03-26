@@ -1,10 +1,11 @@
 //! Reusable DCE/RPC transport primitives built on top of named pipes.
 
 use smolder_proto::rpc::{
-    AuthVerifier, BindAckPdu, BindPdu, Packet, PacketFlags, RequestPdu, ResponsePdu, SyntaxId, Uuid,
+    AuthLevel, AuthVerifier, BindAckPdu, BindPdu, Packet, PacketFlags, RequestPdu, ResponsePdu,
+    SyntaxId, Uuid,
 };
 
-use crate::auth::NtlmRpcPacketIntegrity;
+use crate::auth::{NtlmCredentials, NtlmRpcBindHandshake, NtlmRpcPacketIntegrity};
 use crate::error::CoreError;
 use crate::pipe::NamedPipe;
 use crate::transport::TokioTcpTransport;
@@ -134,6 +135,40 @@ where
         })
     }
 
+    /// Performs a secure NTLM bind and sends the follow-up `rpc_auth_3` leg.
+    pub async fn bind_ntlm(
+        &mut self,
+        context_id: u16,
+        abstract_syntax: SyntaxId,
+        credentials: NtlmCredentials,
+        auth_level: AuthLevel,
+    ) -> Result<BindAckPdu, CoreError> {
+        self.ntlm_packet_integrity = None;
+
+        let mut handshake = NtlmRpcBindHandshake::new(credentials, auth_level, context_id)?;
+        let bind_ack = self
+            .bind_with_flags_and_auth(
+                context_id,
+                abstract_syntax,
+                handshake.bind_flags(),
+                Some(handshake.initial_auth_verifier()?),
+            )
+            .await?;
+        if bind_ack.result.result != 0 {
+            return Err(CoreError::RemoteOperation {
+                operation: "rpc_bind",
+                code: u32::from(bind_ack.result.reason),
+            });
+        }
+
+        let completed = handshake.complete(&bind_ack)?;
+        self.pipe
+            .write_all(&Packet::RpcAuth3(completed.auth3).encode())
+            .await?;
+        self.ntlm_packet_integrity = completed.packet_integrity;
+        Ok(bind_ack)
+    }
+
     /// Sends a request PDU and returns the decoded response stub bytes.
     pub async fn call(
         &mut self,
@@ -242,6 +277,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use smolder_proto::rpc::{
@@ -250,15 +286,15 @@ mod tests {
     };
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
-        Command, CreateResponse, Dialect, FileAttributes, FileId, GlobalCapabilities, Header,
-        MessageId, NegotiateRequest, NegotiateResponse, OplockLevel, ReadResponse,
+        utf16le, Command, CreateResponse, Dialect, FileAttributes, FileId, GlobalCapabilities,
+        Header, MessageId, NegotiateRequest, NegotiateResponse, OplockLevel, ReadResponse,
         ReadResponseFlags, SessionFlags, SessionSetupRequest, SessionSetupResponse,
         SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode, TreeCapabilities,
-        TreeConnectRequest, TreeConnectResponse, TreeId, WriteResponse,
+        TreeConnectRequest, TreeConnectResponse, TreeId, WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
-    use crate::auth::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};
+    use crate::auth::{NtlmCredentials, NtlmRpcPacketIntegrity, NtlmSessionSecurity};
     use crate::client::{Connection, TreeConnected};
     use crate::error::CoreError;
     use crate::pipe::{NamedPipe, PipeAccess};
@@ -280,14 +316,14 @@ mod tests {
     #[derive(Debug)]
     struct ScriptedTransport {
         reads: VecDeque<Vec<u8>>,
-        writes: Vec<Vec<u8>>,
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl ScriptedTransport {
-        fn new(reads: Vec<Vec<u8>>) -> Self {
+        fn new(reads: Vec<Vec<u8>>, writes: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
             Self {
                 reads: reads.into(),
-                writes: Vec::new(),
+                writes,
             }
         }
     }
@@ -295,7 +331,10 @@ mod tests {
     #[async_trait]
     impl Transport for ScriptedTransport {
         async fn send(&mut self, frame: &[u8]) -> std::io::Result<()> {
-            self.writes.push(frame.to_vec());
+            self.writes
+                .lock()
+                .expect("writes lock")
+                .push(frame.to_vec());
             Ok(())
         }
 
@@ -509,20 +548,105 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn bind_ntlm_sends_auth3_and_enables_packet_integrity() {
+        let bind_type2 = ntlm_type2_challenge();
+        let (pipe, writes) = open_pipe_with_writes(vec![
+            rpc_response_frame(Packet::BindAck(BindAckPdu {
+                call_id: 1,
+                flags: PacketFlags::FIRST_FRAGMENT
+                    | PacketFlags::LAST_FRAGMENT
+                    | PacketFlags::SUPPORT_HEADER_SIGN,
+                max_xmit_frag: 4280,
+                max_recv_frag: 4280,
+                assoc_group_id: 0,
+                secondary_address: b"\\PIPE\\svcctl\0".to_vec(),
+                result: BindAckResult {
+                    result: 0,
+                    reason: 0,
+                    transfer_syntax: SyntaxId::NDR32,
+                },
+                auth_verifier: Some(AuthVerifier::new(
+                    AuthType::WinNt,
+                    AuthLevel::PacketIntegrity,
+                    79_231,
+                    bind_type2,
+                )),
+            })),
+            response_frame(
+                Command::Write,
+                NtStatus::SUCCESS.to_u32(),
+                7,
+                11,
+                7,
+                WriteResponse { count: 144 }.encode(),
+            ),
+            response_frame(
+                Command::Flush,
+                NtStatus::SUCCESS.to_u32(),
+                8,
+                11,
+                7,
+                smolder_proto::smb::smb2::FlushResponse.encode(),
+            ),
+        ])
+        .await;
+        let mut rpc = PipeRpcClient::new(pipe);
+
+        rpc.bind_ntlm(
+            0,
+            TEST_SYNTAX,
+            NtlmCredentials::new("alice", "password")
+                .with_domain("DOMAIN")
+                .with_workstation("WORKSTATION"),
+            AuthLevel::PacketIntegrity,
+        )
+        .await
+        .expect("secure bind should succeed");
+        assert!(rpc.ntlm_packet_integrity.is_some());
+
+        let writes = writes.lock().expect("writes lock");
+        let auth3_packet = decode_last_rpc_write(&writes).expect("auth3 write should decode");
+        match auth3_packet {
+            Packet::RpcAuth3(auth3) => {
+                assert_eq!(auth3.call_id, 1);
+                assert_eq!(auth3.auth_verifier.auth_type, AuthType::WinNt);
+                assert_eq!(auth3.auth_verifier.auth_level, AuthLevel::PacketIntegrity);
+                assert_eq!(auth3.auth_verifier.auth_context_id, 79_231);
+                assert_eq!(&auth3.auth_verifier.auth_value[..8], b"NTLMSSP\0");
+            }
+            other => panic!("expected rpc_auth_3 write, got {other:?}"),
+        }
+    }
+
     fn ntlm_packet_integrity() -> NtlmRpcPacketIntegrity {
+        ntlm_packet_integrity_with_context(1)
+    }
+
+    fn ntlm_packet_integrity_with_context(auth_context_id: u32) -> NtlmRpcPacketIntegrity {
         NtlmRpcPacketIntegrity::new(
             &[0x44; 16],
             NtlmSessionSecurity::new(true, true, true, false),
-            1,
+            auth_context_id,
         )
         .expect("packet integrity context")
     }
 
     async fn open_pipe(reads: Vec<Vec<u8>>) -> NamedPipe<ScriptedTransport> {
-        let connection = build_tree_connection(reads).await;
+        let (connection, _) = build_tree_connection(reads).await;
         NamedPipe::open(connection, "svcctl", PipeAccess::ReadWrite)
             .await
             .expect("pipe open should succeed")
+    }
+
+    async fn open_pipe_with_writes(
+        reads: Vec<Vec<u8>>,
+    ) -> (NamedPipe<ScriptedTransport>, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let (connection, writes) = build_tree_connection(reads).await;
+        let pipe = NamedPipe::open(connection, "svcctl", PipeAccess::ReadWrite)
+            .await
+            .expect("pipe open should succeed");
+        (pipe, writes)
     }
 
     fn bind_ack_response_frame() -> Vec<u8> {
@@ -543,8 +667,12 @@ mod tests {
     }
 
     fn rpc_response_frame(packet: Packet) -> Vec<u8> {
+        rpc_response_frame_with_message_id(packet, 6)
+    }
+
+    fn rpc_response_frame_with_message_id(packet: Packet, message_id: u64) -> Vec<u8> {
         let packet = packet.encode();
-        let mut header = Header::new(Command::Read, MessageId(6));
+        let mut header = Header::new(Command::Read, MessageId(message_id));
         header.status = NtStatus::SUCCESS.to_u32();
         header.session_id = smolder_proto::smb::smb2::SessionId(11);
         header.tree_id = TreeId(7);
@@ -565,7 +693,10 @@ mod tests {
 
     async fn build_tree_connection(
         reads: Vec<Vec<u8>>,
-    ) -> Connection<ScriptedTransport, TreeConnected> {
+    ) -> (
+        Connection<ScriptedTransport, TreeConnected>,
+        Arc<Mutex<Vec<Vec<u8>>>>,
+    ) {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb302,
@@ -653,7 +784,8 @@ mod tests {
         ];
         scripted_reads.extend(reads);
 
-        let transport = ScriptedTransport::new(scripted_reads);
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let transport = ScriptedTransport::new(scripted_reads, Arc::clone(&writes));
         let connection = Connection::new(transport);
         let negotiate_request = NegotiateRequest {
             security_mode: SigningMode::ENABLED,
@@ -682,7 +814,73 @@ mod tests {
             .tree_connect(&TreeConnectRequest::from_unc(r"\\server\IPC$"))
             .await
             .expect("tree connect should succeed");
-        connection
+        (connection, writes)
+    }
+
+    fn decode_last_rpc_write(
+        writes: &[Vec<u8>],
+    ) -> Result<Packet, smolder_proto::smb::ProtocolError> {
+        for frame in writes.iter().rev() {
+            let session = SessionMessage::decode(frame)?;
+            let header = Header::decode(&session.payload)?;
+            if header.command != Command::Write {
+                continue;
+            }
+            let write_request = WriteRequest::decode(&session.payload[Header::LEN..])?;
+            return Packet::decode(&write_request.data);
+        }
+
+        panic!("at least one SMB write should be captured");
+    }
+
+    fn ntlm_type2_challenge() -> Vec<u8> {
+        let target_info = encode_target_info(&[
+            (0x0001, utf16le("SERVER")),
+            (0x0002, utf16le("DOMAIN")),
+            (0x0003, utf16le("server.example")),
+            (0x0007, 9_999u64.to_le_bytes().to_vec()),
+        ]);
+        let flags: u32 = 0x0000_0001
+            | 0x0000_0004
+            | 0x0000_0200
+            | 0x0000_0010
+            | 0x0000_0020
+            | 0x0000_8000
+            | 0x0008_0000
+            | 0x0080_0000
+            | 0x0200_0000
+            | 0x2000_0000
+            | 0x4000_0000
+            | 0x8000_0000;
+        let target_info_len = target_info.len() as u16;
+        let target_info_offset = 48u32;
+
+        let mut out = Vec::with_capacity(48 + target_info.len());
+        out.extend_from_slice(b"NTLMSSP\0");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&48u32.to_le_bytes());
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&[8, 7, 6, 5, 4, 3, 2, 1]);
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&target_info_len.to_le_bytes());
+        out.extend_from_slice(&target_info_len.to_le_bytes());
+        out.extend_from_slice(&target_info_offset.to_le_bytes());
+        out.extend_from_slice(&target_info);
+        out
+    }
+
+    fn encode_target_info(pairs: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (av_id, value) in pairs {
+            out.extend_from_slice(&av_id.to_le_bytes());
+            out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            out.extend_from_slice(value);
+        }
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
     }
 
     fn response_frame(

@@ -2,6 +2,7 @@
 
 mod ntlm;
 mod ntlm_rpc;
+mod ntlm_rpc_bind;
 mod spnego;
 
 use smolder_proto::smb::smb2::NegotiateResponse;
@@ -9,6 +10,7 @@ use thiserror::Error;
 
 pub use ntlm::{NtlmAuthenticator, NtlmCredentials};
 pub use ntlm_rpc::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};
+pub(crate) use ntlm_rpc_bind::NtlmRpcBindHandshake;
 
 /// Authentication errors returned while processing GSS/NTLM tokens.
 #[derive(Debug, Error)]
