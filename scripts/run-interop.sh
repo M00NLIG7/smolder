@@ -184,7 +184,7 @@ run_samba_core() {
     "SMOLDER_SAMBA_PASSWORD=${SMOLDER_SAMBA_PASSWORD}" \
     "SMOLDER_SAMBA_SHARE=${share}" \
     "SMOLDER_SAMBA_DOMAIN=${domain}" \
-    cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
+    cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture --test-threads=1
 
   run_env_cmd \
     "SMOLDER_SAMBA_HOST=${SMOLDER_SAMBA_HOST}" \
