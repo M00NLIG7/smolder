@@ -86,6 +86,8 @@ Still in progress on this track:
 - `smolder-core` is moving into an API-stability and docs phase. The current
   public-surface notes are in
   [docs/reference/smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
+  The current wire-layer hardening entrypoints are documented in
+  [docs/testing/fuzzing.md](/Users/cmagana/Projects/smolder/docs/testing/fuzzing.md).
 
 ## Quick Start
 

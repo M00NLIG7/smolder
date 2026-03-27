@@ -1,0 +1,36 @@
+[package]
+name = "smolder-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+smolder-proto = { path = "../smolder-proto" }
+
+[[bin]]
+name = "netbios_session_message"
+path = "fuzz_targets/netbios_session_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rpc_packet"
+path = "fuzz_targets/rpc_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smb2_decode_surface"
+path = "fuzz_targets/smb2_decode_surface.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
