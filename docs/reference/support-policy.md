@@ -1,6 +1,6 @@
-# Smolder `0.1.x` Support Policy
+# Smolder `0.2.x` Support Policy
 
-This document defines the current support contract for the published `0.1.x`
+This document defines the current support contract for the published `0.2.x`
 line.
 
 It is intentionally stricter than "whatever exists in the repo." The goal is to
@@ -19,7 +19,7 @@ MSRV and semver rules live in
 
 ## Versioning Direction
 
-For the `0.1.x` line:
+For the `0.2.x` line:
 
 - additive changes are preferred over public API churn
 - public behavior that is documented here should not change casually
@@ -30,7 +30,7 @@ For the `0.1.x` line:
 
 ## Readiness Statement
 
-The `0.1.x` line is intended to be usable in real projects.
+The `0.2.x` line is intended to be usable in real projects.
 
 That does not mean "frozen forever." It means:
 
@@ -141,7 +141,7 @@ Not guaranteed:
 
 ### NTLM / SPNEGO
 
-Supported in `0.1.x`:
+Supported in `0.2.x`:
 
 - NTLMv2 over SPNEGO for SMB `SESSION_SETUP`
 - session-key derivation feeding SMB signing and SMB3 encryption
@@ -149,7 +149,7 @@ Supported in `0.1.x`:
 
 ### Kerberos
 
-Supported in `0.1.x`, but feature-gated:
+Supported in `0.2.x`, but feature-gated:
 
 - enable with `kerberos`
 - default documented backend path is the password-backed `kerberos-sspi` lane
@@ -164,7 +164,7 @@ Current constraints:
 
 ## Transport, Encryption, and RPC Policy
 
-Supported in `0.1.x`:
+Supported in `0.2.x`:
 
 - SMB2/3 only
 - SMB signing
@@ -223,7 +223,7 @@ The policy is only as strong as the gates behind it.
 The narrower change-to-gate mapping remains in
 [release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
 
-## Non-Goals for `0.1.x`
+## Non-Goals for `0.2.x`
 
 - SMB1 support
 - claiming universal parity with every Windows or Samba deployment
@@ -239,4 +239,4 @@ If behavior is:
 - backed by the interop matrix
 - and covered by the required gates
 
-then it is part of the `0.1.x` support story and should not be changed lightly.
+then it is part of the `0.2.x` support story and should not be changed lightly.

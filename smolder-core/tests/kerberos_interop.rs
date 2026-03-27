@@ -1,3 +1,5 @@
+#![cfg(any(feature = "kerberos-sspi", all(unix, feature = "kerberos-gssapi")))]
+
 use smolder_core::auth::AuthProvider;
 use smolder_core::prelude::{
     Connection, KerberosAuthenticator, KerberosCredentials, KerberosTarget, TokioTcpTransport,
@@ -88,7 +90,7 @@ async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
         .await
         .expect("server should respond to SMB negotiate");
 
-    let mut credentials = match (config.keytab, config.password) {
+    let mut credentials: KerberosCredentials = match (config.keytab, config.password) {
         #[cfg(all(unix, feature = "kerberos-gssapi"))]
         (Some(keytab), _) => KerberosCredentials::from_keytab(config.username, keytab),
         #[cfg(not(all(unix, feature = "kerberos-gssapi")))]

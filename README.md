@@ -66,7 +66,7 @@ Release notes and published change summaries live in
 
 ## Can I Use This In A Real Project?
 
-Yes, if your usage fits the documented `0.1.x` support surface.
+Yes, if your usage fits the documented `0.2.x` support surface.
 
 The practical promise is:
 
@@ -140,7 +140,7 @@ Still in progress on this track:
 - `smolder-core` is moving into an API-stability and docs phase. The current
   public-surface notes are in
   [docs/reference/smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
-  The formal `0.1.x` support contract is in
+  The formal `0.2.x` support contract is in
   [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
   MSRV and semver rules are in
   [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md).
@@ -279,7 +279,7 @@ For the full manual Tiny11 pass, including remote execution smoke checks, use
 and [docs/testing/windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
 For merge/release policy, required gate selection, and failure triage, use
 [docs/testing/release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
-For the formal `0.1.x` support scope and guarantees behind those gates, use
+For the formal `0.2.x` support scope and guarantees behind those gates, use
 [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
 
 ## Security Notice

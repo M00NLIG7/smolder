@@ -11,7 +11,7 @@ It includes SMB file workflows, DFS-aware path handling, reconnect helpers,
 Real-project readiness:
 
 - intended for direct CLI and high-level library use within the documented
-  `0.1.x` support policy
+  `0.2.x` support policy
 - file workflows are the more stable surface; operator workflows are supported
   but have a narrower target matrix
 - additive API evolution is preferred over churn, even though the project is

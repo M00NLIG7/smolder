@@ -1,6 +1,6 @@
 [package]
 name = "smolder-smb-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["M00NLIG7"]
@@ -45,7 +45,7 @@ md-5 = "0.10"
 md4 = "0.10"
 rand = "0.8"
 sha2 = "0.10"
-smolder-proto = { path = "../smolder-proto", version = "0.1.0" }
+smolder-proto = { path = "../smolder-proto", version = "0.2.0" }
 sspi = { version = "0.19.2", optional = true, default-features = false, features = ["network_client", "ring"] }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }

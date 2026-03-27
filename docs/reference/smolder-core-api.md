@@ -1,7 +1,7 @@
 # smolder-core Public API Notes
 
 This document captures the intended public surface of `smolder-smb-core` as of
-the current `0.1.x` line.
+the current `0.2.x` line.
 
 The broader release/support contract for the workspace lives in
 [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
@@ -54,7 +54,7 @@ machinery rather than primary API concepts.
 
 ## Compatibility Direction
 
-The current direction for `0.1.x` is:
+The current direction for `0.2.x` is:
 
 - prefer additive changes over signature churn
 - keep `prelude` curated rather than exhaustive

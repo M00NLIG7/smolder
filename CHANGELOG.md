@@ -17,33 +17,6 @@ and the versioning/MSRV rules are defined in
 
 ## [Unreleased]
 
-### Added
-
-- Added a compile-only GitHub Actions benchmark smoke workflow for
-  `smolder-proto` and `smolder-smb-core`.
-- Added an examples guide plus a compile-checked interactive `psexec` tools
-  example.
-- Added a compile-checked high-level SMB file roundtrip example for the
-  published `smolder` tools crate.
-- Added a feature-gated Kerberos high-level share-listing example for the
-  published `smolder` tools crate.
-- Added a tiny standalone `smolder-core-demo` reference client crate for users
-  who want a copy-and-adapt binary built directly on `smolder-smb-core`.
-
-### Fixed
-
-- Stabilized the staged interactive `psexec` console path so direct interactive
-  `cmd.exe` and direct interactive `powershell.exe` startup now use a real
-  Windows pseudoconsole-backed session on the Tiny11 fixture.
-
-### Docs
-
-- Tightened the examples guide and top-level README so the interactive
-  `psexec` example is documented as a stable direct-shell workflow, not a fully
-  polished nested-shell terminal emulator.
-- Added a cookbook set for core sessions, named pipes/RPC, Kerberos, tools
-  file workflows, and remote-exec usage.
-
 ### Release Notes Flow
 
 - Add user-visible changes here as they land.
@@ -57,6 +30,57 @@ and the versioning/MSRV rules are defined in
 - After tagging:
   - recreate an empty `Unreleased` section
   - use the matching version section as the basis for the GitHub release body
+
+## [0.2.0] - 2026-03-27
+
+### Added
+
+- Added Kerberos support as a real feature track across the published crates,
+  including:
+  - mechanism-aware SPNEGO
+  - password-backed Kerberos
+  - Unix ticket-cache and keytab support behind `kerberos-gssapi`
+  - Samba AD and Windows domain-member interop gates
+  - Kerberos-enabled file and remote-exec workflows in `smolder`
+- Added stronger protocol hardening and release discipline:
+  - property tests and fuzz entrypoints for `smolder-proto`
+  - benchmark harnesses for `smolder-proto` and `smolder-smb-core`
+  - formal support policy, versioning policy, and release checklist
+- Added a larger docs/examples surface:
+  - cookbook pages
+  - direct-library core examples
+  - high-level tools examples
+  - a standalone `smolder-core-demo` reference client crate in the repo
+
+### Changed
+
+- Moved the project from the initial `0.1.0` publish baseline into a documented
+  `0.2.x` support line aimed at real-project use.
+- Improved crate onboarding and docs.rs/crates.io presentation across
+  `smolder-proto`, `smolder-smb-core`, `smolder`, and `smolder-psexecsvc`.
+- Split Kerberos backend features so the default documented build remains more
+  static-friendly unless `kerberos-gssapi` is enabled explicitly.
+
+### Fixed
+
+- Stabilized interactive `psexec` so direct interactive `cmd.exe` and direct
+  interactive `powershell.exe` use a real Windows pseudoconsole-backed session.
+- Improved Windows and Samba interop coverage and fixture reliability,
+  including Kerberos and remote-exec paths.
+
+### Docs
+
+- Clarified real-project readiness expectations for the `0.2.x` line.
+- Added start-here guidance and adoption-oriented crate docs for all published
+  packages.
+
+### Validation
+
+- Samba interop workflow in GitHub Actions
+- Tiny11 / Windows release gate
+- Samba AD Kerberos gate
+- Windows Kerberos gate
+- Benchmark smoke workflow
 
 ## [0.1.0] - 2026-03-27
 

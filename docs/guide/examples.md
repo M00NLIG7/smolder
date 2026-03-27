@@ -11,7 +11,7 @@ For a tiny standalone binary crate instead of an example target, use
 It focuses on examples that are:
 
 - compile-checked in the workspace
-- aligned with the current `0.1.x` support policy
+- aligned with the current `0.2.x` support policy
 - backed by real interop where possible
 
 The support contract for these examples lives in
