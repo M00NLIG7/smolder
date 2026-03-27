@@ -2,3 +2,5 @@
 .tmp/
 target/
 Cargo.lock
+docker/cross/private/
+docker/cross/*.local
