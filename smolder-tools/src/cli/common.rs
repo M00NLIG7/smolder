@@ -646,11 +646,7 @@ async fn wait_for_interactive_output_task(
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => {
             task.abort();
-            match task.await {
-                Ok(result) => result,
-                Err(error) if error.is_cancelled() => Ok(()),
-                Err(error) => Err(error.to_string()),
-            }
+            Ok(())
         }
     }
 }

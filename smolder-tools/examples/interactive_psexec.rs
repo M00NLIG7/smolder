@@ -127,11 +127,7 @@ async fn wait_for_output_task(
         Ok(Err(error)) => Err(error.into()),
         Err(_) => {
             task.abort();
-            match task.await {
-                Ok(result) => result,
-                Err(error) if error.is_cancelled() => Ok(()),
-                Err(error) => Err(error.into()),
-            }
+            Ok(())
         }
     }
 }

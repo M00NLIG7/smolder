@@ -1461,8 +1461,8 @@ fn parse_exit_control_line(line: &str) -> Result<Option<i32>, CoreError> {
     if let Some(exit_code) = line.strip_prefix("EXIT ") {
         return exit_code
             .trim()
-            .parse::<i32>()
-            .map(Some)
+            .parse::<u32>()
+            .map(|value| Some(value as i32))
             .map_err(|_| CoreError::InvalidResponse("interactive exit line was not numeric"));
     }
     Err(CoreError::InvalidResponse(
@@ -1946,6 +1946,10 @@ mod tests {
         assert_eq!(
             parse_exit_control_line("EXIT 17").expect("exit line should parse"),
             Some(17)
+        );
+        assert_eq!(
+            parse_exit_control_line("EXIT 3221225794").expect("unsigned exit line should parse"),
+            Some(0xC000_0142u32 as i32)
         );
     }
 

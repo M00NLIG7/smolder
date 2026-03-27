@@ -11,8 +11,8 @@ mod windows_main {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::ptr;
-    use std::thread;
     use std::sync::OnceLock;
+    use std::thread;
 
     use smolder_psexecsvc::{
         parse_launch_config, parse_payload_request, run_service_once, PayloadRequest, PipeNames,
@@ -54,6 +54,14 @@ mod windows_main {
     const INFINITE: Dword = 0xffff_ffff;
     const DEFAULT_CONSOLE_COLUMNS: u16 = 120;
     const DEFAULT_CONSOLE_ROWS: u16 = 40;
+    const TOKEN_ASSIGN_PRIMARY: Dword = 0x0000_0001;
+    const TOKEN_DUPLICATE: Dword = 0x0000_0002;
+    const TOKEN_QUERY: Dword = 0x0000_0008;
+    const TOKEN_ADJUST_DEFAULT: Dword = 0x0000_0080;
+    const TOKEN_ADJUST_SESSIONID: Dword = 0x0000_0100;
+    const SECURITY_IMPERSONATION: Dword = 2;
+    const TOKEN_PRIMARY: Dword = 1;
+    const TOKEN_SESSION_ID_CLASS: Dword = 12;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -165,6 +173,38 @@ mod windows_main {
             handler: Option<HandlerExFn>,
             context: *mut c_void,
         ) -> ServiceStatusHandle;
+        fn OpenProcessToken(
+            process_handle: Handle,
+            desired_access: Dword,
+            token_handle: *mut Handle,
+        ) -> Bool;
+        fn DuplicateTokenEx(
+            existing_token: Handle,
+            desired_access: Dword,
+            token_attributes: *const SecurityAttributes,
+            impersonation_level: Dword,
+            token_type: Dword,
+            new_token: *mut Handle,
+        ) -> Bool;
+        fn SetTokenInformation(
+            token_handle: Handle,
+            token_information_class: Dword,
+            token_information: *const c_void,
+            token_information_length: Dword,
+        ) -> Bool;
+        fn CreateProcessAsUserW(
+            token: Handle,
+            application_name: *const u16,
+            command_line: *mut u16,
+            process_attributes: *mut SecurityAttributes,
+            thread_attributes: *mut SecurityAttributes,
+            inherit_handles: Bool,
+            creation_flags: Dword,
+            environment: *mut c_void,
+            current_directory: *const u16,
+            startup_info: *mut StartupInfoW,
+            process_information: *mut ProcessInformation,
+        ) -> Bool;
         fn SetServiceStatus(
             status_handle: ServiceStatusHandle,
             service_status: *const ServiceStatus,
@@ -206,6 +246,7 @@ mod windows_main {
         ) -> Bool;
         fn FlushFileBuffers(handle: Handle) -> Bool;
         fn GetExitCodeProcess(process: Handle, exit_code: *mut Dword) -> Bool;
+        fn GetCurrentProcess() -> Handle;
         fn GetModuleHandleW(module_name: *const u16) -> Handle;
         fn GetProcAddress(module: Handle, proc_name: *const u8) -> *mut c_void;
         fn InitializeProcThreadAttributeList(
@@ -225,6 +266,7 @@ mod windows_main {
         ) -> Bool;
         fn DeleteProcThreadAttributeList(attribute_list: *mut c_void);
         fn WaitForSingleObject(handle: Handle, milliseconds: Dword) -> Dword;
+        fn WTSGetActiveConsoleSessionId() -> Dword;
     }
 
     #[derive(Debug, Clone)]
@@ -388,7 +430,7 @@ mod windows_main {
                     );
                     error_code(&error)
                 }
-            }
+            },
             Err(error) => {
                 append_debug_log(
                     debug_log_path,
@@ -399,10 +441,7 @@ mod windows_main {
         }
     }
 
-    fn run_pipe_service(
-        debug_log_path: Option<&Path>,
-        args: &PipeServiceArgs,
-    ) -> io::Result<u32> {
+    fn run_pipe_service(debug_log_path: Option<&Path>, args: &PipeServiceArgs) -> io::Result<u32> {
         let pipes = PipeNames::new(&args.pipe_prefix);
         append_debug_log(
             debug_log_path,
@@ -437,7 +476,14 @@ mod windows_main {
             debug_log_path,
             "CreatePseudoConsole unavailable, falling back to redirected pipes",
         );
-        run_legacy_pipe_service(debug_log_path, args, stdin_pipe, stdout_pipe, stderr_pipe, control_pipe)
+        run_legacy_pipe_service(
+            debug_log_path,
+            args,
+            stdin_pipe,
+            stdout_pipe,
+            stderr_pipe,
+            control_pipe,
+        )
     }
 
     fn run_legacy_pipe_service(
@@ -488,8 +534,6 @@ mod windows_main {
             pty_input_read.as_raw_handle() as Handle,
             pty_output_write.as_raw_handle() as Handle,
         )?;
-        drop(pty_input_read);
-        drop(pty_output_write);
         drop(stderr_pipe);
 
         let stdin_thread = thread::spawn(move || {
@@ -504,6 +548,8 @@ mod windows_main {
         });
 
         let child = spawn_pseudoconsole_child(debug_log_path, args, api, hpc)?;
+        drop(pty_input_read);
+        drop(pty_output_write);
         append_debug_log(debug_log_path, "interactive ConPTY child spawned");
         write_control_line(&mut control_pipe, "READY")?;
         let exit_code = child.wait()?;
@@ -682,14 +728,11 @@ mod windows_main {
     ) -> io::Result<PseudoConsoleChild> {
         let mut attribute_list_size = 0;
         unsafe {
-            let _ = InitializeProcThreadAttributeList(
-                ptr::null_mut(),
-                1,
-                0,
-                &mut attribute_list_size,
-            );
+            let _ =
+                InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut attribute_list_size);
         }
-        let mut attribute_list = vec![0_u8; attribute_list_size];
+        let attribute_list_units = attribute_list_size.div_ceil(std::mem::size_of::<usize>());
+        let mut attribute_list = vec![0_usize; attribute_list_units];
         if unsafe {
             InitializeProcThreadAttributeList(
                 attribute_list.as_mut_ptr() as *mut c_void,
@@ -703,13 +746,14 @@ mod windows_main {
             return Err(io::Error::last_os_error());
         }
 
-        let mut hpc_value = hpc;
+        // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE expects the pseudoconsole handle
+        // value itself, not a pointer-to-handle wrapper.
         if unsafe {
             UpdateProcThreadAttribute(
                 attribute_list.as_mut_ptr() as *mut c_void,
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                (&mut hpc_value as *mut HpcOn).cast::<c_void>(),
+                hpc.cast::<c_void>(),
                 std::mem::size_of::<HpcOn>(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -723,11 +767,12 @@ mod windows_main {
             return Err(io::Error::last_os_error());
         }
 
+        let mut desktop = wide_null(OsStr::new("WinSta0\\Default"));
         let mut startup_info = StartupInfoExW {
             startup_info: StartupInfoW {
                 cb: std::mem::size_of::<StartupInfoExW>() as Dword,
                 reserved: ptr::null_mut(),
-                desktop: ptr::null_mut(),
+                desktop: desktop.as_mut_ptr(),
                 title: ptr::null_mut(),
                 x: 0,
                 y: 0,
@@ -757,28 +802,61 @@ mod windows_main {
             .working_directory
             .as_ref()
             .map(|path| wide_null(path.as_os_str()));
+        let primary_token = active_console_primary_system_token(debug_log_path)?;
+        let created = if let Some(token) = primary_token {
+            append_debug_log(
+                debug_log_path,
+                "launching ConPTY child in the active console session",
+            );
+            let result = unsafe {
+                CreateProcessAsUserW(
+                    token,
+                    ptr::null(),
+                    command_line.as_mut_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                    EXTENDED_STARTUPINFO_PRESENT,
+                    ptr::null_mut(),
+                    current_directory
+                        .as_ref()
+                        .map_or(ptr::null(), |value| value.as_ptr()),
+                    &mut startup_info.startup_info,
+                    &mut process_info,
+                )
+            };
+            unsafe {
+                let _ = CloseHandle(token);
+            }
+            result
+        } else {
+            append_debug_log(
+                debug_log_path,
+                "launching ConPTY child in the current service session",
+            );
+            unsafe {
+                CreateProcessW(
+                    ptr::null(),
+                    command_line.as_mut_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                    EXTENDED_STARTUPINFO_PRESENT,
+                    ptr::null_mut(),
+                    current_directory
+                        .as_ref()
+                        .map_or(ptr::null(), |value| value.as_ptr()),
+                    &mut startup_info.startup_info,
+                    &mut process_info,
+                )
+            }
+        };
 
-        if unsafe {
-            CreateProcessW(
-                ptr::null(),
-                command_line.as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                0,
-                EXTENDED_STARTUPINFO_PRESENT,
-                ptr::null_mut(),
-                current_directory
-                    .as_ref()
-                    .map_or(ptr::null(), |value| value.as_ptr()),
-                &mut startup_info.startup_info,
-                &mut process_info,
-            )
-        } == 0
-        {
+        if created == 0 {
             let error = io::Error::last_os_error();
             append_debug_log(
                 debug_log_path,
-                &format!("CreateProcessW with ConPTY failed: {error:?}"),
+                &format!("ConPTY child CreateProcess failed: {error:?}"),
             );
             unsafe {
                 DeleteProcThreadAttributeList(attribute_list.as_mut_ptr() as *mut c_void);
@@ -797,6 +875,84 @@ mod windows_main {
             hpc,
             api,
         })
+    }
+
+    fn active_console_primary_system_token(
+        debug_log_path: Option<&Path>,
+    ) -> io::Result<Option<Handle>> {
+        let session_id = unsafe { WTSGetActiveConsoleSessionId() };
+        if session_id == u32::MAX {
+            append_debug_log(
+                debug_log_path,
+                "no active console session was available for ConPTY",
+            );
+            return Ok(None);
+        }
+
+        let mut current_token = ptr::null_mut();
+        if unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_ASSIGN_PRIMARY
+                    | TOKEN_DUPLICATE
+                    | TOKEN_QUERY
+                    | TOKEN_ADJUST_DEFAULT
+                    | TOKEN_ADJUST_SESSIONID,
+                &mut current_token,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut primary_token = ptr::null_mut();
+        if unsafe {
+            DuplicateTokenEx(
+                current_token,
+                TOKEN_ASSIGN_PRIMARY
+                    | TOKEN_DUPLICATE
+                    | TOKEN_QUERY
+                    | TOKEN_ADJUST_DEFAULT
+                    | TOKEN_ADJUST_SESSIONID,
+                ptr::null(),
+                SECURITY_IMPERSONATION,
+                TOKEN_PRIMARY,
+                &mut primary_token,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            unsafe {
+                let _ = CloseHandle(current_token);
+            }
+            return Err(error);
+        }
+
+        unsafe {
+            let _ = CloseHandle(current_token);
+        }
+
+        if unsafe {
+            SetTokenInformation(
+                primary_token,
+                TOKEN_SESSION_ID_CLASS,
+                (&session_id as *const Dword).cast::<c_void>(),
+                std::mem::size_of::<Dword>() as Dword,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            unsafe {
+                let _ = CloseHandle(primary_token);
+            }
+            return Err(error);
+        }
+
+        append_debug_log(
+            debug_log_path,
+            &format!("using active console session {session_id} for ConPTY"),
+        );
+        Ok(Some(primary_token))
     }
 
     fn console_size(args: &PipeServiceArgs) -> Coord {
