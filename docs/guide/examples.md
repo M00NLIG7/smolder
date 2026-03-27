@@ -50,6 +50,14 @@ interactive shell through a Windows pseudoconsole, so `cmd.exe` and
 `powershell.exe` behave like proper console applications instead of plain
 redirected pipe processes.
 
+Recommended usage patterns:
+
+- Start directly in the shell you want to use for the whole session.
+- Use the default interactive `cmd.exe` shell for the most stable baseline.
+- If you want PowerShell, start PowerShell directly with `SMOLDER_PSEXEC_COMMAND=powershell.exe`
+  or `--command powershell.exe` instead of entering `cmd.exe` first and then
+  launching a nested shell inside it.
+
 Required environment:
 
 ```bash
@@ -112,6 +120,9 @@ target/debug/smolder psexec smb://127.0.0.1 \
 
 - The interactive `psexec` example currently depends on the staged
   `smolder-psexecsvc` payload path.
+- The example is validated for direct interactive `cmd.exe` and direct
+  interactive `powershell.exe` startup. It is not positioned yet as a full
+  terminal-emulator replacement with polished nested-shell parity.
 - The no-helper `psexec` fallback remains the default one-shot execution path.
 - For repeatable validation, prefer the documented Windows gates in
   [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md) and

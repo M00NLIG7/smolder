@@ -24,6 +24,18 @@ and the versioning/MSRV rules are defined in
 - Added an examples guide plus a compile-checked interactive `psexec` tools
   example.
 
+### Fixed
+
+- Stabilized the staged interactive `psexec` console path so direct interactive
+  `cmd.exe` and direct interactive `powershell.exe` startup now use a real
+  Windows pseudoconsole-backed session on the Tiny11 fixture.
+
+### Docs
+
+- Tightened the examples guide and top-level README so the interactive
+  `psexec` example is documented as a stable direct-shell workflow, not a fully
+  polished nested-shell terminal emulator.
+
 ### Release Notes Flow
 
 - Add user-visible changes here as they land.
