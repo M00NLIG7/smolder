@@ -17,6 +17,11 @@ and the versioning/MSRV rules are defined in
 
 ## [Unreleased]
 
+### Added
+
+- Added a compile-only GitHub Actions benchmark smoke workflow for
+  `smolder-proto` and `smolder-smb-core`.
+
 ### Release Notes Flow
 
 - Add user-visible changes here as they land.

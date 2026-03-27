@@ -62,6 +62,22 @@ cargo bench -p smolder-smb-core --bench crypto_paths
 cargo bench -p smolder-proto --bench decode_paths
 ```
 
+## CI Smoke
+
+The repo now includes a compile-only GitHub Actions smoke workflow at
+[bench-smoke.yml](/Users/cmagana/Projects/smolder/.github/workflows/bench-smoke.yml).
+
+It runs:
+
+```bash
+cargo check --benches -p smolder-proto
+cargo check --benches -p smolder-smb-core
+```
+
+This is intentionally a structure/compile gate, not a performance regression
+gate. It keeps the benchmark harness healthy without making CI runtime depend on
+machine-specific throughput.
+
 ## Scope Notes
 
 - These benches intentionally stay on public APIs.

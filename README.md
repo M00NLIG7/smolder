@@ -96,7 +96,9 @@ Still in progress on this track:
   The current wire-layer hardening entrypoints are documented in
   [docs/testing/fuzzing.md](/Users/cmagana/Projects/smolder/docs/testing/fuzzing.md).
   The current perf harness is documented in
-  [docs/testing/benchmarks.md](/Users/cmagana/Projects/smolder/docs/testing/benchmarks.md).
+  [docs/testing/benchmarks.md](/Users/cmagana/Projects/smolder/docs/testing/benchmarks.md),
+  with a compile-only CI smoke workflow at
+  [bench-smoke.yml](/Users/cmagana/Projects/smolder/.github/workflows/bench-smoke.yml).
 
 ## Quick Start
 

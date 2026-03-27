@@ -1,0 +1,28 @@
+name: Bench Smoke
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check proto benches
+        run: cargo check --benches -p smolder-proto
+
+      - name: Check core benches
+        run: cargo check --benches -p smolder-smb-core
