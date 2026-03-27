@@ -6,6 +6,7 @@ This document is intentionally operational. The detailed fixture descriptions
 live in:
 
 - [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+- [versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
 - [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md)
 - [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md)
 - [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md)

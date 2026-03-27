@@ -88,6 +88,8 @@ Still in progress on this track:
   [docs/reference/smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
   The formal `0.1.x` support contract is in
   [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
+  MSRV and semver rules are in
+  [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md).
   The current wire-layer hardening entrypoints are documented in
   [docs/testing/fuzzing.md](/Users/cmagana/Projects/smolder/docs/testing/fuzzing.md).
   The current perf harness is documented in

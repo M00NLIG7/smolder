@@ -14,6 +14,8 @@ The operational test commands that back this policy live in
 [docs/testing/interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md)
 and
 [docs/testing/release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
+MSRV and semver rules live in
+[versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md).
 
 ## Versioning Direction
 

@@ -2,6 +2,7 @@
 name = "smolder-proto"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 authors = ["M00NLIG7"]
 description = "Typed SMB2/3 and DCE/RPC wire codecs for Smolder"
 repository = "https://github.com/M00NLIG7/smolder"
