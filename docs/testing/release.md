@@ -5,6 +5,7 @@ Use this checklist before merging high-risk SMB changes or cutting a release.
 This document is intentionally operational. The detailed fixture descriptions
 live in:
 
+- [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
 - [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md)
 - [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md)
 - [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md)

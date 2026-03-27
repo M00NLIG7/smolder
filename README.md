@@ -86,6 +86,8 @@ Still in progress on this track:
 - `smolder-core` is moving into an API-stability and docs phase. The current
   public-surface notes are in
   [docs/reference/smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
+  The formal `0.1.x` support contract is in
+  [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
   The current wire-layer hardening entrypoints are documented in
   [docs/testing/fuzzing.md](/Users/cmagana/Projects/smolder/docs/testing/fuzzing.md).
   The current perf harness is documented in
@@ -219,6 +221,8 @@ For the full manual Tiny11 pass, including remote execution smoke checks, use
 and [docs/testing/windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
 For merge/release policy, required gate selection, and failure triage, use
 [docs/testing/release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
+For the formal `0.1.x` support scope and guarantees behind those gates, use
+[docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
 
 ## Security Notice
 

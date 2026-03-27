@@ -5,6 +5,8 @@ This document is the current live interoperability matrix for `smolder-core` and
 
 Use it as the repeatable verification gate for protocol changes, transport
 changes, auth changes, pipe/RPC work, and tools-layer workflow changes.
+The higher-level support contract that this matrix backs is documented in
+[support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
 
 Detailed Samba fixture notes still live in [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md).
 The AD-backed Samba Kerberos fixture is documented in
