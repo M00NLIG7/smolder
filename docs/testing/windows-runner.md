@@ -36,8 +36,8 @@ Optional repository variable:
 Example commands after `gh auth login`:
 
 ```bash
-printf '%s' 'windowsfixture' | gh secret set SMOLDER_WINDOWS_USERNAME --repo M00NLIG7/smolder
-printf '%s' 'windowsfixture' | gh secret set SMOLDER_WINDOWS_PASSWORD --repo M00NLIG7/smolder
+printf '%s' '<windows-username>' | gh secret set SMOLDER_WINDOWS_USERNAME --repo M00NLIG7/smolder
+printf '%s' '<windows-password>' | gh secret set SMOLDER_WINDOWS_PASSWORD --repo M00NLIG7/smolder
 gh variable set SMOLDER_WINDOWS_DFS_ROOT --repo M00NLIG7/smolder --body '\\\\127.0.0.1\\your-dfs-root'
 ```
 

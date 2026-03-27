@@ -53,8 +53,8 @@ Required environment:
 ```bash
 export SMOLDER_WINDOWS_HOST=127.0.0.1
 export SMOLDER_WINDOWS_PORT=445
-export SMOLDER_WINDOWS_USERNAME=windowsfixture
-export SMOLDER_WINDOWS_PASSWORD=windowsfixture
+export SMOLDER_WINDOWS_USERNAME='<windows-username>'
+export SMOLDER_WINDOWS_PASSWORD='<windows-password>'
 export SMOLDER_PSEXEC_SERVICE_BINARY=target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe
 ```
 
@@ -91,8 +91,8 @@ The standalone CLI flow for the same interactive path is:
 target/debug/psexec smb://127.0.0.1 \
   --interactive \
   --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \
-  --username windowsfixture \
-  --password windowsfixture
+  --username "$SMOLDER_WINDOWS_USERNAME" \
+  --password "$SMOLDER_WINDOWS_PASSWORD"
 ```
 
 To start `powershell.exe` directly instead of the default `cmd.exe` shell:
@@ -102,8 +102,8 @@ target/debug/psexec smb://127.0.0.1 \
   --interactive \
   --command powershell.exe \
   --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \
-  --username windowsfixture \
-  --password windowsfixture
+  --username "$SMOLDER_WINDOWS_USERNAME" \
+  --password "$SMOLDER_WINDOWS_PASSWORD"
 ```
 
 ## Scope Notes

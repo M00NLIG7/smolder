@@ -6,6 +6,16 @@ cd "${repo_root}"
 
 dc_config="/var/lib/smolder-ad-dc/etc/smb.conf"
 
+require_env() {
+  local name="$1"
+  local value="${!name:-}"
+  if [[ -z "${value}" ]]; then
+    printf 'missing required environment variable: %s\n' "${name}" >&2
+    exit 1
+  fi
+  printf '%s' "${value}"
+}
+
 scripts/prepare-samba-ad-fixture.sh
 docker compose -f docker/samba-ad/compose.yaml up -d dc1 files1
 
@@ -30,8 +40,8 @@ export SMOLDER_KERBEROS_SHARE="${SMOLDER_KERBEROS_SHARE:-IPC$}"
 export SMOLDER_KERBEROS_REALM="${SMOLDER_KERBEROS_REALM:-LAB.EXAMPLE}"
 export SMOLDER_KERBEROS_TARGET_HOST="${SMOLDER_KERBEROS_TARGET_HOST:-DESKTOP-PTNJUS5.lab.example}"
 export SMOLDER_KERBEROS_KDC_URL="${SMOLDER_KERBEROS_KDC_URL:-tcp://dc1.lab.example:1088}"
-export SMOLDER_WINDOWS_USERNAME="${SMOLDER_WINDOWS_USERNAME:-windowsfixture}"
-export SMOLDER_WINDOWS_PASSWORD="${SMOLDER_WINDOWS_PASSWORD:-windowsfixture}"
+export SMOLDER_WINDOWS_USERNAME="$(require_env SMOLDER_WINDOWS_USERNAME)"
+export SMOLDER_WINDOWS_PASSWORD="$(require_env SMOLDER_WINDOWS_PASSWORD)"
 
 kerberos_netbios_domain="${SMOLDER_KERBEROS_NETBIOS_DOMAIN:-${SMOLDER_KERBEROS_REALM%%.*}}"
 kerberos_user="${SMOLDER_KERBEROS_USERNAME%%@*}"

@@ -165,8 +165,8 @@ Then run the positive Windows encryption test:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
 cargo test -p smolder --test windows_encryption -- --nocapture
 ```
@@ -183,8 +183,8 @@ Then run the core encrypted `IPC$` test:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test windows_rpc_encryption -- --nocapture
 ```
 

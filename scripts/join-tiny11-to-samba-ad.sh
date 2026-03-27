@@ -8,8 +8,6 @@ compose_file="docker/samba-ad/compose.yaml"
 vm_name="${SMOLDER_WINDOWS_VM:-Tiny11}"
 windows_host="${SMOLDER_WINDOWS_HOST:-127.0.0.1}"
 windows_port="${SMOLDER_WINDOWS_PORT:-445}"
-windows_username="${SMOLDER_WINDOWS_USERNAME:-windowsfixture}"
-windows_password="${SMOLDER_WINDOWS_PASSWORD:-windowsfixture}"
 guest_blob_path="${SMOLDER_WINDOWS_ODJ_GUEST_PATH:-C:\\Windows\\Temp\\tiny11-odj.txt}"
 host_blob_path="${SMOLDER_WINDOWS_ODJ_HOST_PATH:-/tmp/tiny11-odj.txt}"
 ad_domain="${SMOLDER_AD_DOMAIN:-LAB.EXAMPLE}"
@@ -26,6 +24,18 @@ require_cmd() {
   fi
 }
 
+require_env() {
+  local name="$1"
+  local value="${!name:-}"
+  if [[ -z "${value}" ]]; then
+    printf 'missing required environment variable: %s\n' "${name}" >&2
+    exit 1
+  fi
+  printf '%s' "${value}"
+}
+
+windows_username="$(require_env SMOLDER_WINDOWS_USERNAME)"
+windows_password="$(require_env SMOLDER_WINDOWS_PASSWORD)"
 require_cmd docker
 require_cmd VBoxManage
 require_cmd nc

@@ -25,8 +25,8 @@ the correct `cifs/<hostname>` SPN.
 
 - Tiny11 reachable on host port `445`
 - working Windows credentials:
-  - username `windowsfixture`
-  - password `windowsfixture`
+  - username from `SMOLDER_WINDOWS_USERNAME`
+  - password from `SMOLDER_WINDOWS_PASSWORD`
 - local Samba AD fixture reachable as:
   - `dc1.lab.example:1088`
   - `files1.lab.example:2445`

@@ -35,8 +35,8 @@ Release policy and required gate selection live in
 
 - Host: `127.0.0.1`
 - Default port: `445`
-- Username: `windowsfixture`
-- Password: `windowsfixture`
+- Windows test credentials: set `SMOLDER_WINDOWS_USERNAME` and
+  `SMOLDER_WINDOWS_PASSWORD` for your local VM account
 - Plain share fixture: `ADMIN$`
 - Encrypted share fixture: `SMOLDERENC`
 - Global encrypted `IPC$` fixture: server `EncryptData=True`
@@ -46,8 +46,8 @@ Base environment:
 
 ```bash
 export SMOLDER_WINDOWS_HOST=127.0.0.1
-export SMOLDER_WINDOWS_USERNAME=windowsfixture
-export SMOLDER_WINDOWS_PASSWORD=windowsfixture
+export SMOLDER_WINDOWS_USERNAME='<windows-username>'
+export SMOLDER_WINDOWS_PASSWORD='<windows-password>'
 ```
 
 ### Local Samba
@@ -110,8 +110,8 @@ Run only the Windows core matrix:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 scripts/run-interop.sh --windows --core
 ```
 
@@ -147,8 +147,8 @@ Baseline SMB session/file path:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test windows_interop -- --nocapture
 ```
 
@@ -156,8 +156,8 @@ Durable reconnect:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test windows_reconnect -- --nocapture
 ```
 
@@ -165,8 +165,8 @@ Encrypted file I/O:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
 cargo test -p smolder-smb-core --test windows_encryption -- --nocapture
 ```
@@ -175,8 +175,8 @@ Named-pipe interop:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test named_pipe_interop \
   exchanges_srvsvc_bind_over_windows_named_pipe_when_configured -- --nocapture
 ```
@@ -185,8 +185,8 @@ RPC interop:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test rpc_interop -- --nocapture
 ```
 
@@ -194,8 +194,8 @@ Encrypted `IPC$` / RPC interop:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test windows_rpc_encryption -- --nocapture
 ```
 
@@ -266,8 +266,8 @@ Encrypted-share enforcement:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
 cargo test -p smolder --test windows_encryption -- --nocapture
 ```
@@ -276,8 +276,8 @@ Reconnect helper:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder --test windows_reconnect -- --nocapture
 ```
 
@@ -285,8 +285,8 @@ DFS path resolution:
 
 ```bash
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
-SMOLDER_WINDOWS_USERNAME=windowsfixture \
-SMOLDER_WINDOWS_PASSWORD=windowsfixture \
+SMOLDER_WINDOWS_USERNAME='<windows-username>' \
+SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_DFS_ROOT='\\\\127.0.0.1\\your-dfs-root' \
 cargo test -p smolder --test windows_dfs -- --nocapture
 ```
@@ -294,8 +294,8 @@ cargo test -p smolder --test windows_dfs -- --nocapture
 Remote execution smoke checks:
 
 ```bash
-target/debug/smbexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture
-target/debug/psexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture
+target/debug/smbexec smb://127.0.0.1 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
+target/debug/psexec smb://127.0.0.1 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
 ```
 
 ### Samba

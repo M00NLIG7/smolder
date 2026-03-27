@@ -19,8 +19,8 @@ Current local fixture assumptions:
 - VM: `Tiny11`
 - Guest host: `DESKTOP-PTNJUS5`
 - Port forward: host `127.0.0.1:445` -> guest `445`
-- Username: `windowsfixture`
-- Password: `windowsfixture`
+- Windows test credentials: set `SMOLDER_WINDOWS_USERNAME` and
+  `SMOLDER_WINDOWS_PASSWORD` for your local VM account
 - Encrypted share: `SMOLDERENC`
 - Global SMB encryption: `Set-SmbServerConfiguration -EncryptData $true`
 - Optional DFS namespace root: `SMOLDER_WINDOWS_DFS_ROOT`
@@ -40,16 +40,16 @@ Minimum environment:
 
 ```bash
 export SMOLDER_WINDOWS_HOST=127.0.0.1
-export SMOLDER_WINDOWS_USERNAME=windowsfixture
-export SMOLDER_WINDOWS_PASSWORD=windowsfixture
+export SMOLDER_WINDOWS_USERNAME='<windows-username>'
+export SMOLDER_WINDOWS_PASSWORD='<windows-password>'
 ```
 
 Recommended full environment:
 
 ```bash
 export SMOLDER_WINDOWS_HOST=127.0.0.1
-export SMOLDER_WINDOWS_USERNAME=windowsfixture
-export SMOLDER_WINDOWS_PASSWORD=windowsfixture
+export SMOLDER_WINDOWS_USERNAME='<windows-username>'
+export SMOLDER_WINDOWS_PASSWORD='<windows-password>'
 export SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC
 ```
 

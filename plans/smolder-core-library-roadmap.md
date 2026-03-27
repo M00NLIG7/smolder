@@ -118,7 +118,7 @@ Verification:
 - `cargo build -p smolder-smb-core -p smolder`
 - `cargo test -p smolder-smb-core`
 - `cargo test -p smolder`
-- `target/debug/smolder psexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture`
+- `target/debug/smolder psexec smb://127.0.0.1 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"`
 
 Exit criteria:
 
@@ -153,7 +153,7 @@ Verification:
 - `cargo test -p smolder-proto`
 - `cargo test -p smolder-smb-core`
 - `cargo test -p smolder`
-- `target/debug/smolder psexec smb://127.0.0.1 --command hostname --username windowsfixture --password windowsfixture`
+- `target/debug/smolder psexec smb://127.0.0.1 --command hostname --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"`
 
 Exit criteria:
 
@@ -344,8 +344,8 @@ Verification:
 - `cargo test -p smolder-proto`
 - `cargo test -p smolder-smb-core`
 - `cargo test -p smolder`
-- `target/debug/smolder smbexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture`
-- `target/debug/smolder psexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture`
+- `target/debug/smolder smbexec smb://127.0.0.1 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"`
+- `target/debug/smolder psexec smb://127.0.0.1 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"`
 
 Exit criteria:
 
