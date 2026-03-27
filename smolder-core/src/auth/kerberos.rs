@@ -7,11 +7,13 @@
 
 use std::fmt;
 use std::marker::PhantomData;
+#[cfg(all(unix, feature = "kerberos-gssapi"))]
+use std::path::{Path, PathBuf};
 
 use smolder_proto::smb::smb2::NegotiateResponse;
 
 #[cfg(all(unix, feature = "kerberos-gssapi"))]
-use super::kerberos_gssapi::GssapiTicketCacheKerberosBackend;
+use super::kerberos_gssapi::GssapiKerberosBackend;
 #[cfg(feature = "kerberos-sspi")]
 use super::kerberos_sspi::SspiNegotiateKerberosBackend;
 use super::kerberos_spn::KerberosTarget;
@@ -39,6 +41,9 @@ pub enum KerberosCredentialSourceKind {
     /// Ticket-cache-backed Kerberos credentials.
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
     TicketCache,
+    /// Client-keytab-backed Kerberos credentials.
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    Keytab,
 }
 
 /// Kerberos credentials and backend selection for SMB authentication.
@@ -49,18 +54,24 @@ pub struct KerberosCredentials {
     domain: String,
     workstation: String,
     kdc_url: Option<String>,
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    keytab_name: Option<String>,
     backend: KerberosBackendKind,
     source_kind: KerberosCredentialSourceKind,
 }
 
 impl fmt::Debug for KerberosCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KerberosCredentials")
+        let mut debug = f.debug_struct("KerberosCredentials");
+        debug
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .field("domain", &self.domain)
             .field("workstation", &self.workstation)
-            .field("kdc_url", &self.kdc_url)
+            .field("kdc_url", &self.kdc_url);
+        #[cfg(all(unix, feature = "kerberos-gssapi"))]
+        debug.field("keytab_name", &self.keytab_name);
+        debug
             .field("backend", &self.backend)
             .field("source_kind", &self.source_kind)
             .finish()
@@ -83,6 +94,8 @@ impl KerberosCredentials {
             domain: String::new(),
             workstation: "smolder".to_owned(),
             kdc_url: None,
+            #[cfg(all(unix, feature = "kerberos-gssapi"))]
+            keytab_name: None,
             backend: default_backend_kind(),
             source_kind: KerberosCredentialSourceKind::Password,
         }
@@ -97,6 +110,7 @@ impl KerberosCredentials {
             domain: String::new(),
             workstation: "smolder".to_owned(),
             kdc_url: None,
+            keytab_name: None,
             backend: KerberosBackendKind::Gssapi,
             source_kind: KerberosCredentialSourceKind::TicketCache,
         }
@@ -106,6 +120,28 @@ impl KerberosCredentials {
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
     pub fn from_ticket_cache(username: impl Into<String>) -> Self {
         Self::from_default_ticket_cache().with_username(username)
+    }
+
+    /// Creates Kerberos credentials that acquire initiator credentials from a client keytab.
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    pub fn from_keytab(username: impl Into<String>, keytab_name: impl Into<String>) -> Self {
+        Self::from_default_keytab(keytab_name).with_username(username)
+    }
+
+    /// Creates Kerberos credentials that acquire initiator credentials from the default principal
+    /// in a client keytab.
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    pub fn from_default_keytab(keytab_name: impl Into<String>) -> Self {
+        Self {
+            username: String::new(),
+            password: String::new(),
+            domain: String::new(),
+            workstation: "smolder".to_owned(),
+            kdc_url: None,
+            keytab_name: Some(normalize_keytab_name(keytab_name.into())),
+            backend: KerberosBackendKind::Gssapi,
+            source_kind: KerberosCredentialSourceKind::Keytab,
+        }
     }
 
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
@@ -151,6 +187,11 @@ impl KerberosCredentials {
     }
 
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    pub(super) fn keytab_name(&self) -> Option<&str> {
+        self.keytab_name.as_deref()
+    }
+
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
     pub(super) fn initiator_principal(&self) -> Result<Option<String>, AuthError> {
         let username = self.username.trim();
         let domain = self.domain.trim();
@@ -189,6 +230,7 @@ impl KerberosCredentials {
         })
     }
 
+    #[cfg(any(feature = "kerberos-sspi", test))]
     pub(super) fn client_computer_name(&self) -> &str {
         if self.workstation.is_empty() {
             "smolder"
@@ -197,8 +239,26 @@ impl KerberosCredentials {
         }
     }
 
+    #[cfg(any(feature = "kerberos-sspi", test))]
     pub(super) fn kdc_url(&self) -> Option<&str> {
         self.kdc_url.as_deref()
+    }
+}
+
+#[cfg(all(unix, feature = "kerberos-gssapi"))]
+fn normalize_keytab_name(keytab_name: String) -> String {
+    if keytab_name.contains(':') {
+        keytab_name
+    } else {
+        let path = Path::new(&keytab_name);
+        let canonical = if path.is_absolute() {
+            PathBuf::from(path)
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(path)
+        };
+        format!("FILE:{}", canonical.to_string_lossy())
     }
 }
 
@@ -209,7 +269,7 @@ fn default_backend_kind() -> KerberosBackendKind {
 
 enum KerberosAuthenticatorInner {
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
-    Gssapi(KerberosAuthEngine<GssapiTicketCacheKerberosBackend>),
+    Gssapi(KerberosAuthEngine<GssapiKerberosBackend>),
     #[cfg(feature = "kerberos-sspi")]
     Sspi(KerberosAuthEngine<SspiNegotiateKerberosBackend>),
 }
@@ -652,6 +712,23 @@ mod tests {
 
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
     #[test]
+    fn keytab_credentials_select_gssapi_backend() {
+        let credentials =
+            KerberosCredentials::from_keytab("alice", "/tmp/alice.keytab").with_domain("EXAMPLE.COM");
+
+        assert_eq!(credentials.backend_kind(), KerberosBackendKind::Gssapi);
+        assert_eq!(
+            credentials.credential_source_kind(),
+            KerberosCredentialSourceKind::Keytab
+        );
+        assert_eq!(
+            credentials.keytab_name(),
+            Some("FILE:/tmp/alice.keytab")
+        );
+    }
+
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    #[test]
     fn default_ticket_cache_credentials_use_default_principal() {
         let credentials = KerberosCredentials::from_default_ticket_cache();
 
@@ -660,6 +737,25 @@ mod tests {
                 .initiator_principal()
                 .expect("default cache should allow an unspecified principal"),
             None
+        );
+    }
+
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    #[test]
+    fn default_keytab_credentials_use_default_principal() {
+        let credentials = KerberosCredentials::from_default_keytab("./alice.keytab");
+
+        assert_eq!(
+            credentials
+                .initiator_principal()
+                .expect("default keytab should allow an unspecified principal"),
+            None
+        );
+        assert!(
+            credentials
+                .keytab_name()
+                .expect("keytab should be recorded")
+                .starts_with("FILE:")
         );
     }
 

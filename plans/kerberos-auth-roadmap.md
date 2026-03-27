@@ -152,15 +152,13 @@ Current status note:
 
 - the current implementation behind `kerberos` is `sspi`-backed and
   password-oriented
-- `kerberos-gssapi` now adds a Unix ticket-cache backend behind the same
-  public `KerberosCredentials` / `KerberosAuthenticator` surface
+- `kerberos-gssapi` now adds Unix ticket-cache and keytab backends behind the
+  same public `KerberosCredentials` / `KerberosAuthenticator` surface
 - `kerberos-gssapi` is now feature-independent from `kerberos-sspi`, so the
   default and `kerberos` builds stay free of Unix GSS/Kerberos native linkage
-- the vendored `sspi` `0.19.2` path used by Smolder requires outbound auth data
-  and does not expose a clean ticket-cache/keytab flow through the current
-  integration shape
-- that means keytab support should still be treated as a backend/credential
-  store expansion milestone, not a small extension to `KerberosCredentials`
+- the Unix keytab lane is validated against the local Samba AD fixture using a
+  Linux/MIT containerized interop run, instead of depending on host-specific
+  macOS GSS behavior
 
 ### Client Integration
 

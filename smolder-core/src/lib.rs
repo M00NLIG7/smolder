@@ -11,13 +11,13 @@
 //!   backend
 //! - `kerberos-sspi`: backend-only flag for the current password-backed
 //!   Kerberos implementation
-//! - `kerberos-gssapi`: Unix ticket-cache backend using system GSS/Kerberos
-//!   libraries
+//! - `kerberos-gssapi`: Unix ticket-cache and keytab backend using system
+//!   GSS/Kerberos libraries
 //!
 //! The default build enables none of these features and stays the most
 //! static-friendly profile. `kerberos-gssapi` is intentionally independent from
-//! `kerberos-sspi`, so enabling Unix ticket-cache support does not also pull in
-//! the SSPI backend.
+//! `kerberos-sspi`, so enabling Unix GSS credential-store support does not also
+//! pull in the SSPI backend.
 //!
 //! It owns SMB auth/session state, request dispatch, and transport logic.
 //! High-level SMB file facades, execution flows, and other operator workflows

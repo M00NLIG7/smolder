@@ -139,7 +139,7 @@ fn empty_token() -> gss_buffer_desc {
 }
 
 fn step<CU: OutboundUsable>(
-    mut ctx: Option<ContextHandle>,
+    ctx: Option<ContextHandle>,
     cred: Arc<Credentials<CU>>,
     flags: CapabilityFlags,
     mut target_principal: Option<NameHandle>,
@@ -147,7 +147,7 @@ fn step<CU: OutboundUsable>(
     requested_duration: Option<Duration>,
     channel_bindings: Option<Box<[u8]>>,
 ) -> Result<StepOut<CU>, Error> {
-    let mut ctx_ptr = ctx.as_mut().map(ContextHandle::as_mut).unwrap_or_default();
+    let mut ctx_ptr = ctx.as_ref().map(ContextHandle::as_ptr).unwrap_or_default();
     let mut minor_status = 0;
     let mut remaining_seconds = 0;
     let mut attributes = 0;
@@ -185,7 +185,7 @@ fn step<CU: OutboundUsable>(
         GSS_S_COMPLETE => Ok(StepOut::Finished(ClientContext {
             attributes,
             cred,
-            context: ctx.unwrap_or_else(|| unsafe { ContextHandle::pick_up(NonNull::new(ctx_ptr).unwrap()) }),
+            context: ctx.unwrap_or_else(|| unsafe { ContextHandle::pick_up(ctx_ptr) }),
             next_token: unsafe { Token::pick_up(next_token) },
             marker: PhantomData,
         })),
@@ -193,7 +193,7 @@ fn step<CU: OutboundUsable>(
             let valid_until = Instant::now() + Duration::from_secs(remaining_seconds.into());
             Ok(StepOut::Pending(PendingClientContext {
                 cred,
-                context: ctx.unwrap_or_else(|| unsafe { ContextHandle::pick_up(NonNull::new(ctx_ptr).unwrap()) }),
+                context: ctx.unwrap_or_else(|| unsafe { ContextHandle::pick_up(ctx_ptr) }),
                 next_token: unsafe { Token::pick_up(next_token).unwrap() },
                 flags,
                 target_principal,

@@ -86,7 +86,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Windows | encrypted `IPC$`, named pipe, and `OpenSCManagerW` over `svcctl` | `windows_rpc_encryption.rs` |
 | `smolder-core` | Windows AD member | Kerberos SMB session setup and post-auth tree connect | `kerberos_interop.rs` via `run-windows-kerberos-interop.sh` |
 | `smolder-tools` | Windows AD member | Kerberos-enabled file CLI over `IPC$` | `run-windows-kerberos-interop.sh` |
-| `smolder-core` | Samba AD | Kerberos SMB session setup and post-auth tree connect | `kerberos_interop.rs` via `run-kerberos-interop.sh` |
+| `smolder-core` | Samba AD | Kerberos SMB session setup and post-auth tree connect with password and Linux/MIT keytab lanes | `kerberos_interop.rs` via `run-kerberos-interop.sh` |
 | `smolder-core` | Samba | negotiate, auth, file I/O, IOCTLs, lease-aware create, durable reconnect attempt | `samba_negotiate.rs` |
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |

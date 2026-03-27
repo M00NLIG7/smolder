@@ -52,8 +52,8 @@ Optional later:
 
 - `client`
   - Linux domain member used for `kinit`, `smbclient`, and debugging
-  - not required for the first Smolder gate because the host machine can act as
-    the client
+  - not required for the first Smolder gate because the repo harness now uses a
+    Linux/MIT container directly for the keytab lane
 
 ## Network Plan
 
@@ -184,7 +184,7 @@ image magic so the provisioning and join steps are inspectable.
 
 ## Environment For Smolder
 
-Once the fixture is up, the first host-side Kerberos lane should be:
+Once the fixture is up, the first host-side password-backed Kerberos lane is:
 
 ```bash
 export SMOLDER_KERBEROS_HOST=files1.lab.example
@@ -203,16 +203,27 @@ cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --
 cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect
 ```
 
+The repo harness at [scripts/run-kerberos-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-kerberos-interop.sh)
+now drives two live gates:
+
+1. host-side password-backed Kerberos against `files1.lab.example:2445`
+2. Linux/MIT containerized keytab-backed Kerberos against `files1.lab.example:445`
+
+The second lane exists so the published `kerberos-gssapi` backend is validated
+against the same GSS/Kerberos family it uses in practice, instead of depending
+on host-specific macOS GSS behavior.
+
 ## Success Criteria
 
 The fixture is "good enough" for the first merge gate when all of these are
 true:
 
 1. `kerberos_interop.rs` passes against the fixture
-2. `KerberosAuthenticator::session_key()` is non-empty after auth
-3. a post-auth SMB tree connect succeeds without falling back to NTLM
-4. the fixture can be brought up and torn down by script
-5. the topology is isolated from the existing WORKGROUP Samba fixtures
+2. `kerberos_interop.rs` passes with a Linux/MIT keytab lane
+3. `KerberosAuthenticator::session_key()` is non-empty after auth
+4. a post-auth SMB tree connect succeeds without falling back to NTLM
+5. the fixture can be brought up and torn down by script
+6. the topology is isolated from the existing WORKGROUP Samba fixtures
 
 ## Failure Checklist
 

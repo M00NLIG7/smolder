@@ -1,7 +1,7 @@
 use std::{ffi::c_void, ops::Deref};
 
 use kenobi_core::typestate::{Encryption, Signing};
-use libgssapi_sys::{GSS_C_QOP_DEFAULT, gss_buffer_desc, gss_ctx_id_t_desc_struct, gss_release_buffer, gss_unwrap, gss_wrap};
+use libgssapi_sys::{GSS_C_QOP_DEFAULT, gss_buffer_desc, gss_release_buffer, gss_unwrap, gss_wrap};
 
 use crate::{Error, client::ClientContext};
 
@@ -21,7 +21,7 @@ impl<CU, C, E, D> ClientContext<CU, C, E, D> {
         if let Some(major) = Error::gss(unsafe {
             gss_wrap(
                 &mut minor,
-                self.context.as_ptr() as *mut gss_ctx_id_t_desc_struct,
+                self.context.as_ptr(),
                 if encrypt { 1 } else { 0 },
                 GSS_C_QOP_DEFAULT,
                 &mut input_buffer_desc,
@@ -53,7 +53,7 @@ impl<CU, C, E, D> ClientContext<CU, C, E, D> {
         if let Some(major) = Error::gss(unsafe {
             gss_unwrap(
                 &mut minor,
-                self.context.as_ptr() as *mut gss_ctx_id_t_desc_struct,
+                self.context.as_ptr(),
                 &mut input_buffer_desc,
                 &mut output_buffer,
                 &mut conf_state,

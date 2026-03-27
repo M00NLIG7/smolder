@@ -38,7 +38,8 @@ struct KerberosConfig {
     target_host: String,
     target_principal: Option<String>,
     username: String,
-    password: String,
+    password: Option<String>,
+    keytab: Option<String>,
     share: String,
     domain: Option<String>,
     workstation: Option<String>,
@@ -57,13 +58,15 @@ impl KerberosConfig {
                 .or_else(|| required_env("SMOLDER_KERBEROS_HOST"))?,
             target_principal: required_env("SMOLDER_KERBEROS_TARGET_PRINCIPAL"),
             username: required_env("SMOLDER_KERBEROS_USERNAME")?,
-            password: required_env("SMOLDER_KERBEROS_PASSWORD")?,
+            password: required_env("SMOLDER_KERBEROS_PASSWORD"),
+            keytab: required_env("SMOLDER_KERBEROS_KEYTAB"),
             share: required_env("SMOLDER_KERBEROS_SHARE").unwrap_or_else(|| "IPC$".to_owned()),
             domain: required_env("SMOLDER_KERBEROS_DOMAIN"),
             workstation: required_env("SMOLDER_KERBEROS_WORKSTATION"),
             realm: required_env("SMOLDER_KERBEROS_REALM"),
             kdc_url: required_env("SMOLDER_KERBEROS_KDC_URL"),
         })
+        .filter(|config| config.password.is_some() || config.keytab.is_some())
     }
 }
 
@@ -71,7 +74,7 @@ impl KerberosConfig {
 async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
     let Some(config) = KerberosConfig::from_env() else {
         eprintln!(
-            "skipping kerberos interop test: SMOLDER_KERBEROS_HOST, SMOLDER_KERBEROS_USERNAME, and SMOLDER_KERBEROS_PASSWORD must be set"
+            "skipping kerberos interop test: SMOLDER_KERBEROS_HOST, SMOLDER_KERBEROS_USERNAME, and either SMOLDER_KERBEROS_PASSWORD or SMOLDER_KERBEROS_KEYTAB must be set"
         );
         return;
     };
@@ -85,7 +88,17 @@ async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
         .await
         .expect("server should respond to SMB negotiate");
 
-    let mut credentials = KerberosCredentials::new(config.username, config.password);
+    let mut credentials = match (config.keytab, config.password) {
+        #[cfg(all(unix, feature = "kerberos-gssapi"))]
+        (Some(keytab), _) => KerberosCredentials::from_keytab(config.username, keytab),
+        #[cfg(not(all(unix, feature = "kerberos-gssapi")))]
+        (Some(_), _) => panic!("SMOLDER_KERBEROS_KEYTAB requires the kerberos-gssapi feature"),
+        #[cfg(feature = "kerberos-sspi")]
+        (None, Some(password)) => KerberosCredentials::new(config.username, password),
+        #[cfg(not(feature = "kerberos-sspi"))]
+        (None, Some(_)) => panic!("SMOLDER_KERBEROS_PASSWORD requires the kerberos or kerberos-sspi feature"),
+        (None, None) => unreachable!("config construction requires password or keytab"),
+    };
     if let Some(domain) = config.domain {
         credentials = credentials.with_domain(domain);
     }
