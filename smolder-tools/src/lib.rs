@@ -7,6 +7,13 @@
 //! depends on the `smolder-smb-core` package for SMB/RPC primitives rather than
 //! extending the core crate with tool-specific behavior.
 //!
+//! # Feature Flags
+//!
+//! The main optional feature is:
+//!
+//! - `kerberos`: enables Kerberos-capable high-level workflows and re-exports
+//!   the Kerberos auth types from `smolder-smb-core`
+//!
 //! This crate is the right entry point when you want:
 //!
 //! - a higher-level SMB client builder and share/file API
@@ -21,6 +28,7 @@
 //!
 //! Copyright (c) 2025 M00NLIG7
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -44,6 +52,7 @@ pub mod prelude {
         DurableHandle, DurableOpenOptions, NtlmCredentials, ResilientHandle,
     };
     #[cfg(feature = "kerberos")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "kerberos")))]
     pub use smolder_core::prelude::{
         KerberosBackendKind, KerberosCredentialSourceKind, KerberosCredentials, KerberosTarget,
     };

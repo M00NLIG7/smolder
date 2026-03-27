@@ -16,6 +16,11 @@ default-run = "smolder"
 name = "smolder_tools"
 path = "src/lib.rs"
 
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["kerberos"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [[bin]]
 name = "smolder"
 path = "src/main.rs"

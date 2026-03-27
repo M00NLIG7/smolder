@@ -17,11 +17,19 @@ use smolder_proto::smb::smb2::NegotiateResponse;
 use thiserror::Error;
 
 #[cfg(feature = "kerberos-api")]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "kerberos", feature = "kerberos-gssapi")))
+)]
 pub use kerberos::{
     KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind,
     KerberosCredentials,
 };
 #[cfg(feature = "kerberos-api")]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "kerberos", feature = "kerberos-gssapi")))
+)]
 pub use kerberos_spn::KerberosTarget;
 pub use ntlm::{NtlmAuthenticator, NtlmCredentials};
 pub use ntlm_rpc::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};

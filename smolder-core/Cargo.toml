@@ -15,6 +15,11 @@ categories = ["network-programming"]
 name = "smolder_core"
 path = "src/lib.rs"
 
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["kerberos"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [[example]]
 name = "kerberos_tree_connect"
 required-features = ["kerberos"]

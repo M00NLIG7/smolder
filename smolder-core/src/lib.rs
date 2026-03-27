@@ -3,6 +3,22 @@
 //! The published package name is `smolder-smb-core`, while the Rust library
 //! crate name remains `smolder_core`.
 //!
+//! # Feature Flags
+//!
+//! The supported cargo features are:
+//!
+//! - `kerberos`: stable public Kerberos API plus the current password-backed
+//!   backend
+//! - `kerberos-sspi`: backend-only flag for the current password-backed
+//!   Kerberos implementation
+//! - `kerberos-gssapi`: Unix ticket-cache backend using system GSS/Kerberos
+//!   libraries
+//!
+//! The default build enables none of these features and stays the most
+//! static-friendly profile. `kerberos-gssapi` is intentionally independent from
+//! `kerberos-sspi`, so enabling Unix ticket-cache support does not also pull in
+//! the SSPI backend.
+//!
 //! It owns SMB auth/session state, request dispatch, and transport logic.
 //! High-level SMB file facades, execution flows, and other operator workflows
 //! belong in the `smolder` package, not this crate.
@@ -44,6 +60,7 @@
 //!
 //! Copyright (c) 2025 M00NLIG7
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -65,6 +82,10 @@ pub mod prelude {
         NtlmSessionSecurity,
     };
     #[cfg(feature = "kerberos-api")]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "kerberos", feature = "kerberos-gssapi")))
+    )]
     pub use crate::auth::{
         KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind,
         KerberosCredentials, KerberosTarget,
