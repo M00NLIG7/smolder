@@ -66,6 +66,9 @@ Still in progress on this track:
   like ticket-cache and keytab, and end-to-end tooling integration. The scoped
   plan is in
   [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md).
+  The proposed Docker Compose topology for the first Samba AD-backed Kerberos
+  gate is in
+  [docs/testing/samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md).
 
 ## Quick Start
 

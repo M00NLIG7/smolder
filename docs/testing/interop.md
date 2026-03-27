@@ -7,6 +7,8 @@ Use it as the repeatable verification gate for protocol changes, transport
 changes, auth changes, pipe/RPC work, and tools-layer workflow changes.
 
 Detailed Samba fixture notes still live in [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md).
+The planned AD-backed Samba Kerberos fixture is documented in
+[samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md).
 The Tiny11 / Windows release-style gate is documented in
 [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
 
@@ -80,6 +82,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Windows | named-pipe open/write/read over `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Windows | RPC bind plus `OpenSCManagerW` over `svcctl` | `rpc_interop.rs` |
 | `smolder-core` | Windows | encrypted `IPC$`, named pipe, and `OpenSCManagerW` over `svcctl` | `windows_rpc_encryption.rs` |
+| `smolder-core` | Samba AD | Kerberos SMB session setup and post-auth tree connect | `kerberos_interop.rs` (planned fixture) |
 | `smolder-core` | Samba | negotiate, auth, file I/O, IOCTLs, lease-aware create, durable reconnect attempt | `samba_negotiate.rs` |
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
