@@ -1,17 +1,20 @@
-# Samba AD Kerberos Fixture Plan
+# Samba AD Kerberos Fixture
 
-This document defines the next local fixture for Smolder's Kerberos track: a
-Docker Compose topology that provides a real AD-backed SMB target for
+This document describes the local fixture Smolder now uses for its Kerberos
+track: a Docker Compose topology that provides a real AD-backed SMB target for
 [kerberos_interop.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/kerberos_interop.rs).
 
-The immediate goal is not "generic LDAP lab". The goal is narrower:
+The immediate goal is not "generic LDAP lab". The current goals are narrower:
 
 1. issue a real Kerberos service ticket for `cifs/files1.lab.example`
 2. authenticate SMB `SESSION_SETUP` with Kerberos
 3. prove Smolder can sign post-auth SMB traffic with the exported session key
+4. use the same realm to domain-join Tiny11 and prove Kerberos SMB against a
+   Windows member server
 
-This fixture should become the first reproducible Kerberos gate before we wire
-the feature into `smolder-tools`.
+This fixture is now the first reproducible Kerberos gate and the local realm
+used by the Tiny11 Windows member flow before the feature is wired into
+`smolder-tools`.
 
 ## Why A Separate Fixture
 

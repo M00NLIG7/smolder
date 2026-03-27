@@ -6,6 +6,7 @@ Use it when you need confidence beyond the Samba-backed GitHub Actions workflow,
 especially for:
 
 - NTLM / SPNEGO compatibility against Windows
+- Kerberos compatibility once Tiny11 is joined to the local Samba AD fixture
 - `IPC$` named-pipe behavior
 - `svcctl` RPC behavior
 - encrypted-share behavior on Windows
@@ -23,6 +24,9 @@ Current local fixture assumptions:
 - Encrypted share: `SMOLDERENC`
 - Global SMB encryption: `Set-SmbServerConfiguration -EncryptData $true`
 - Optional DFS namespace root: `SMOLDER_WINDOWS_DFS_ROOT`
+- Optional local Kerberos realm: `LAB.EXAMPLE` via
+  [samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md)
+  and [windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md)
 
 Ensure the NAT rule exists:
 
@@ -83,11 +87,42 @@ If you want to skip remote execution smoke commands:
 scripts/run-windows-release-gate.sh --no-remote-exec
 ```
 
+## Optional Kerberos Lane
+
+When you want to prove `smolder-core` Kerberos auth against Windows, join Tiny11
+to the local Samba AD fixture first:
+
+```bash
+scripts/join-tiny11-to-samba-ad.sh
+```
+
+Then run the Windows Kerberos core gate:
+
+```bash
+scripts/run-windows-kerberos-interop.sh
+```
+
+That wrapper drives the existing
+[kerberos_interop.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/kerberos_interop.rs)
+test with the Windows-specific defaults:
+
+- SMB transport: `127.0.0.1:445`
+- Kerberos target host: `DESKTOP-PTNJUS5.lab.example`
+- Share: `IPC$`
+- Realm: `LAB.EXAMPLE`
+- KDC: `dc1.lab.example:1088`
+
+The Windows join helper provisions an offline domain-join blob from the local
+Samba AD member server, applies it through the existing `psexec` SYSTEM path,
+reboots Tiny11, and verifies the result with `systeminfo`.
+
 ## Expected Results
 
 When the fixture is healthy:
 
 - `windows_interop`, `windows_reconnect`, `windows_encryption`, `named_pipe_interop`, `rpc_interop`, and `windows_rpc_encryption` pass
+- `scripts/run-windows-kerberos-interop.sh` passes once Tiny11 is joined to
+  `LAB.EXAMPLE`
 - `smolder-tools` Windows reconnect and encryption tests pass
 - the `ADMIN$` encryption-enforcement probe skips when the fixture is globally encrypted
 - Windows DFS runs only when `SMOLDER_WINDOWS_DFS_ROOT` is set

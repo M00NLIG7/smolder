@@ -7,10 +7,12 @@ Use it as the repeatable verification gate for protocol changes, transport
 changes, auth changes, pipe/RPC work, and tools-layer workflow changes.
 
 Detailed Samba fixture notes still live in [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md).
-The planned AD-backed Samba Kerberos fixture is documented in
+The AD-backed Samba Kerberos fixture is documented in
 [samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md).
 The Tiny11 / Windows release-style gate is documented in
 [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
+The Windows Kerberos member flow is documented in
+[windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
 
 For a single entrypoint instead of running each command manually, use
 [scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop.sh).
@@ -82,7 +84,8 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Windows | named-pipe open/write/read over `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Windows | RPC bind plus `OpenSCManagerW` over `svcctl` | `rpc_interop.rs` |
 | `smolder-core` | Windows | encrypted `IPC$`, named pipe, and `OpenSCManagerW` over `svcctl` | `windows_rpc_encryption.rs` |
-| `smolder-core` | Samba AD | Kerberos SMB session setup and post-auth tree connect | `kerberos_interop.rs` (planned fixture) |
+| `smolder-core` | Windows AD member | Kerberos SMB session setup and post-auth tree connect | `kerberos_interop.rs` via `run-windows-kerberos-interop.sh` |
+| `smolder-core` | Samba AD | Kerberos SMB session setup and post-auth tree connect | `kerberos_interop.rs` via `run-kerberos-interop.sh` |
 | `smolder-core` | Samba | negotiate, auth, file I/O, IOCTLs, lease-aware create, durable reconnect attempt | `samba_negotiate.rs` |
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
@@ -193,6 +196,13 @@ SMOLDER_WINDOWS_PASSWORD=windowsfixture \
 cargo test -p smolder-smb-core --test windows_rpc_encryption -- --nocapture
 ```
 
+Kerberos over Windows AD member SMB:
+
+```bash
+scripts/join-tiny11-to-samba-ad.sh
+scripts/run-windows-kerberos-interop.sh
+```
+
 ### Samba
 
 Baseline SMB session/file path:
@@ -216,6 +226,12 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_ENCRYPTED_SHARE=SMOLDERENC \
 cargo test -p smolder-smb-core --test samba_encryption -- --nocapture
+```
+
+Kerberos over Samba AD member SMB:
+
+```bash
+scripts/run-kerberos-interop.sh
 ```
 
 Named-pipe interop on encrypted `IPC$`:

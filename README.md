@@ -37,7 +37,7 @@ Implemented now:
 - `smolder-core`: SMB negotiate/session setup, NTLMv2/SPNEGO auth, signing,
   SMB3 encryption, named pipes, DCE/RPC transport, DFS referral handling,
   compound requests, durable/resilient reconnect primitives, and feature-gated
-  Kerberos session-setup primitives
+  Kerberos session-setup/auth primitives
 - `smolder-tools`: high-level SMB file APIs, DFS-aware path resolution,
   reconnect helpers, CLI file workflows, `smbexec`, and `psexec`
 - Live interop coverage against both Tiny11/Windows and local Samba fixtures,
@@ -46,13 +46,14 @@ Implemented now:
 Validated now:
 
 - Windows: negotiate, auth, tree connect, file I/O, durable reconnect,
-  encrypted share I/O, named pipes, RPC, DFS, `smbexec`, and `psexec`
+  encrypted share I/O, named pipes, RPC, DFS, Kerberos core auth, `smbexec`,
+  and `psexec`
 - Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
-  named pipes, and RPC bind over encrypted SMB
+  named pipes, encrypted RPC, and Kerberos core auth
 
 Still in progress on this track:
 
-- Kerberos live AD-backed interop and CLI integration
+- Kerberos CLI integration and broader credential sources like ticket cache and keytab
 - SMB1 compatibility
 - Fully automated Windows CI; the Tiny11 gate is still manual/self-hosted
 - Full Samba `selftest` parity
@@ -60,15 +61,16 @@ Still in progress on this track:
 ## Future Tracks
 
 - Kerberos in `smolder-core` is now in active implementation behind the
-  `kerberos` feature. The current slice covers mechanism-aware SPNEGO plus a
-  password-backed Kerberos authenticator that exports the SMB session key. The
-  remaining track is live Windows/Samba AD interop, broader credential sources
-  like ticket-cache and keytab, and end-to-end tooling integration. The scoped
-  plan is in
+  `kerberos` feature. The current slice covers mechanism-aware SPNEGO, a
+  password-backed Kerberos authenticator that exports the SMB session key, and
+  live Samba AD plus Windows domain-member core interop. The remaining track is
+  broader credential sources like ticket-cache and keytab plus end-to-end
+  tooling integration. The scoped plan is in
   [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md).
-  The proposed Docker Compose topology for the first Samba AD-backed Kerberos
-  gate is in
-  [docs/testing/samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md).
+  The Samba AD fixture and Windows member flow are documented in
+  [docs/testing/samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md)
+  and
+  [docs/testing/windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
 
 ## Quick Start
 
