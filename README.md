@@ -52,6 +52,14 @@ Not implemented on this track:
 - Fully automated Windows CI; the Tiny11 gate is still manual/self-hosted
 - Full Samba `selftest` parity
 
+## Future Tracks
+
+- Kerberos in `smolder-core` is the next major protocol track. The target is a
+  production-grade SMB Kerberos module with ticket-cache, password, and keytab
+  flows, plus signing/encryption integration and real Windows/Samba interop.
+  The scoped plan is in
+  [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md).
+
 ## Quick Start
 
 ```rust
