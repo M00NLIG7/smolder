@@ -11,6 +11,7 @@ mod windows_main {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::ptr;
+    use std::thread;
     use std::sync::OnceLock;
 
     use smolder_psexecsvc::{
@@ -20,10 +21,17 @@ mod windows_main {
 
     type Bool = i32;
     type Dword = u32;
+    type Word = u16;
+    type SizeT = usize;
+    type Hresult = i32;
     type Handle = *mut c_void;
+    type HpcOn = Handle;
     type ServiceStatusHandle = *mut c_void;
     type ServiceMainFn = unsafe extern "system" fn(Dword, *mut *mut u16);
     type HandlerExFn = unsafe extern "system" fn(Dword, Dword, *mut c_void, *mut c_void) -> Dword;
+    type CreatePseudoConsoleFn =
+        unsafe extern "system" fn(Coord, Handle, Handle, Dword, *mut HpcOn) -> Hresult;
+    type ClosePseudoConsoleFn = unsafe extern "system" fn(HpcOn);
 
     const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
     const NO_ERROR: Dword = 0;
@@ -41,6 +49,61 @@ mod windows_main {
     const SERVICE_STOPPED: Dword = 0x0000_0001;
     const SERVICE_RUNNING: Dword = 0x0000_0004;
     const SERVICE_CONTROL_INTERROGATE: Dword = 0x0000_0004;
+    const EXTENDED_STARTUPINFO_PRESENT: Dword = 0x0008_0000;
+    const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: SizeT = 0x0002_0016;
+    const INFINITE: Dword = 0xffff_ffff;
+    const DEFAULT_CONSOLE_COLUMNS: u16 = 120;
+    const DEFAULT_CONSOLE_ROWS: u16 = 40;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        length: Dword,
+        security_descriptor: *mut c_void,
+        inherit_handle: Bool,
+    }
+
+    #[repr(C)]
+    struct StartupInfoW {
+        cb: Dword,
+        reserved: *mut u16,
+        desktop: *mut u16,
+        title: *mut u16,
+        x: Dword,
+        y: Dword,
+        x_size: Dword,
+        y_size: Dword,
+        x_count_chars: Dword,
+        y_count_chars: Dword,
+        fill_attribute: Dword,
+        flags: Dword,
+        show_window: Word,
+        cb_reserved2: Word,
+        lp_reserved2: *mut u8,
+        std_input: Handle,
+        std_output: Handle,
+        std_error: Handle,
+    }
+
+    #[repr(C)]
+    struct StartupInfoExW {
+        startup_info: StartupInfoW,
+        attribute_list: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct ProcessInformation {
+        process: Handle,
+        thread: Handle,
+        process_id: Dword,
+        thread_id: Dword,
+    }
 
     #[repr(C)]
     struct ServiceStatus {
@@ -57,6 +120,42 @@ mod windows_main {
     struct ServiceTableEntryW {
         service_name: *mut u16,
         service_proc: Option<ServiceMainFn>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct PseudoConsoleApi {
+        create: CreatePseudoConsoleFn,
+        close: ClosePseudoConsoleFn,
+    }
+
+    struct PseudoConsoleChild {
+        process: Handle,
+        hpc: HpcOn,
+        api: PseudoConsoleApi,
+    }
+
+    impl PseudoConsoleChild {
+        fn wait(self) -> io::Result<u32> {
+            if unsafe { WaitForSingleObject(self.process, INFINITE) } == u32::MAX {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    let _ = CloseHandle(self.process);
+                    (self.api.close)(self.hpc);
+                }
+                return Err(error);
+            }
+
+            let mut exit_code = 1;
+            let exit_result = unsafe { GetExitCodeProcess(self.process, &mut exit_code) };
+            unsafe {
+                let _ = CloseHandle(self.process);
+                (self.api.close)(self.hpc);
+            }
+            if exit_result == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(exit_code)
+        }
     }
 
     #[link(name = "advapi32")]
@@ -85,8 +184,47 @@ mod windows_main {
             default_timeout: Dword,
             security_attributes: *mut c_void,
         ) -> Handle;
+        fn CreatePipe(
+            read_pipe: *mut Handle,
+            write_pipe: *mut Handle,
+            security_attributes: *const SecurityAttributes,
+            size: Dword,
+        ) -> Bool;
+        fn CloseHandle(handle: Handle) -> Bool;
         fn ConnectNamedPipe(handle: Handle, overlapped: *mut c_void) -> Bool;
+        fn CreateProcessW(
+            application_name: *const u16,
+            command_line: *mut u16,
+            process_attributes: *mut SecurityAttributes,
+            thread_attributes: *mut SecurityAttributes,
+            inherit_handles: Bool,
+            creation_flags: Dword,
+            environment: *mut c_void,
+            current_directory: *const u16,
+            startup_info: *mut StartupInfoW,
+            process_information: *mut ProcessInformation,
+        ) -> Bool;
         fn FlushFileBuffers(handle: Handle) -> Bool;
+        fn GetExitCodeProcess(process: Handle, exit_code: *mut Dword) -> Bool;
+        fn GetModuleHandleW(module_name: *const u16) -> Handle;
+        fn GetProcAddress(module: Handle, proc_name: *const u8) -> *mut c_void;
+        fn InitializeProcThreadAttributeList(
+            attribute_list: *mut c_void,
+            attribute_count: Dword,
+            flags: Dword,
+            size: *mut SizeT,
+        ) -> Bool;
+        fn UpdateProcThreadAttribute(
+            attribute_list: *mut c_void,
+            flags: Dword,
+            attribute: SizeT,
+            value: *mut c_void,
+            size: SizeT,
+            previous_value: *mut c_void,
+            return_size: *mut SizeT,
+        ) -> Bool;
+        fn DeleteProcThreadAttributeList(attribute_list: *mut c_void);
+        fn WaitForSingleObject(handle: Handle, milliseconds: Dword) -> Dword;
     }
 
     #[derive(Debug, Clone)]
@@ -274,7 +412,7 @@ mod windows_main {
         let stdin_pipe = create_named_pipe(OsStr::new(&pipes.stdin), PIPE_ACCESS_INBOUND)?;
         let stdout_pipe = create_named_pipe(OsStr::new(&pipes.stdout), PIPE_ACCESS_OUTBOUND)?;
         let stderr_pipe = create_named_pipe(OsStr::new(&pipes.stderr), PIPE_ACCESS_OUTBOUND)?;
-        let mut control_pipe = create_named_pipe(OsStr::new(&pipes.control), PIPE_ACCESS_OUTBOUND)?;
+        let control_pipe = create_named_pipe(OsStr::new(&pipes.control), PIPE_ACCESS_OUTBOUND)?;
 
         connect_named_pipe(&stdin_pipe)?;
         connect_named_pipe(&stdout_pipe)?;
@@ -282,6 +420,34 @@ mod windows_main {
         connect_named_pipe(&control_pipe)?;
         append_debug_log(debug_log_path, "interactive pipes connected");
 
+        if let Some(api) = pseudo_console_api() {
+            append_debug_log(debug_log_path, "starting interactive child with ConPTY");
+            return run_conpty_pipe_service(
+                debug_log_path,
+                args,
+                api,
+                stdin_pipe,
+                stdout_pipe,
+                stderr_pipe,
+                control_pipe,
+            );
+        }
+
+        append_debug_log(
+            debug_log_path,
+            "CreatePseudoConsole unavailable, falling back to redirected pipes",
+        );
+        run_legacy_pipe_service(debug_log_path, args, stdin_pipe, stdout_pipe, stderr_pipe, control_pipe)
+    }
+
+    fn run_legacy_pipe_service(
+        debug_log_path: Option<&Path>,
+        args: &PipeServiceArgs,
+        stdin_pipe: File,
+        stdout_pipe: File,
+        stderr_pipe: File,
+        mut control_pipe: File,
+    ) -> io::Result<u32> {
         let mut command = interactive_child_command(args);
         command
             .stdin(Stdio::from(stdin_pipe))
@@ -302,6 +468,52 @@ mod windows_main {
             &format!("interactive child exited with code={exit_code}"),
         );
         write_control_line(&mut control_pipe, &format!("EXIT {exit_code}"))?;
+        Ok(exit_code as u32)
+    }
+
+    fn run_conpty_pipe_service(
+        debug_log_path: Option<&Path>,
+        args: &PipeServiceArgs,
+        api: PseudoConsoleApi,
+        stdin_pipe: File,
+        stdout_pipe: File,
+        stderr_pipe: File,
+        mut control_pipe: File,
+    ) -> io::Result<u32> {
+        let (pty_input_read, mut pty_input_write) = create_anonymous_pipe()?;
+        let (mut pty_output_read, pty_output_write) = create_anonymous_pipe()?;
+        let hpc = create_pseudo_console(
+            api,
+            console_size(args),
+            pty_input_read.as_raw_handle() as Handle,
+            pty_output_write.as_raw_handle() as Handle,
+        )?;
+        drop(pty_input_read);
+        drop(pty_output_write);
+        drop(stderr_pipe);
+
+        let stdin_thread = thread::spawn(move || {
+            let mut stdin_pipe = stdin_pipe;
+            let _ = io::copy(&mut stdin_pipe, &mut pty_input_write);
+            let _ = pty_input_write.flush();
+        });
+        let stdout_thread = thread::spawn(move || {
+            let mut stdout_pipe = stdout_pipe;
+            let _ = io::copy(&mut pty_output_read, &mut stdout_pipe);
+            let _ = stdout_pipe.flush();
+        });
+
+        let child = spawn_pseudoconsole_child(debug_log_path, args, api, hpc)?;
+        append_debug_log(debug_log_path, "interactive ConPTY child spawned");
+        write_control_line(&mut control_pipe, "READY")?;
+        let exit_code = child.wait()?;
+        append_debug_log(
+            debug_log_path,
+            &format!("interactive ConPTY child exited with code={exit_code}"),
+        );
+        let _ = stdout_thread.join();
+        write_control_line(&mut control_pipe, &format!("EXIT {exit_code}"))?;
+        let _ = stdin_thread.join();
         Ok(exit_code as u32)
     }
 
@@ -399,14 +611,226 @@ mod windows_main {
         Ok(())
     }
 
+    fn pseudo_console_api() -> Option<PseudoConsoleApi> {
+        static API: OnceLock<Option<PseudoConsoleApi>> = OnceLock::new();
+        *API.get_or_init(|| unsafe {
+            let module_name = wide_null(OsStr::new("kernel32.dll"));
+            let module = GetModuleHandleW(module_name.as_ptr());
+            if module.is_null() {
+                return None;
+            }
+
+            let create = GetProcAddress(module, b"CreatePseudoConsole\0".as_ptr());
+            let close = GetProcAddress(module, b"ClosePseudoConsole\0".as_ptr());
+            if create.is_null() || close.is_null() {
+                return None;
+            }
+
+            Some(PseudoConsoleApi {
+                create: std::mem::transmute::<*mut c_void, CreatePseudoConsoleFn>(create),
+                close: std::mem::transmute::<*mut c_void, ClosePseudoConsoleFn>(close),
+            })
+        })
+    }
+
+    fn create_anonymous_pipe() -> io::Result<(File, File)> {
+        let security_attributes = SecurityAttributes {
+            length: std::mem::size_of::<SecurityAttributes>() as Dword,
+            security_descriptor: ptr::null_mut(),
+            inherit_handle: 0,
+        };
+        let mut read_handle = ptr::null_mut();
+        let mut write_handle = ptr::null_mut();
+        if unsafe {
+            CreatePipe(
+                &mut read_handle,
+                &mut write_handle,
+                &security_attributes,
+                PIPE_BUFFER_SIZE,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe {
+            (
+                File::from_raw_handle(read_handle),
+                File::from_raw_handle(write_handle),
+            )
+        })
+    }
+
+    fn create_pseudo_console(
+        api: PseudoConsoleApi,
+        size: Coord,
+        input: Handle,
+        output: Handle,
+    ) -> io::Result<HpcOn> {
+        let mut hpc = ptr::null_mut();
+        let hr = unsafe { (api.create)(size, input, output, 0, &mut hpc) };
+        if hr < 0 {
+            return Err(io::Error::from_raw_os_error(hr));
+        }
+        Ok(hpc)
+    }
+
+    fn spawn_pseudoconsole_child(
+        debug_log_path: Option<&Path>,
+        args: &PipeServiceArgs,
+        api: PseudoConsoleApi,
+        hpc: HpcOn,
+    ) -> io::Result<PseudoConsoleChild> {
+        let mut attribute_list_size = 0;
+        unsafe {
+            let _ = InitializeProcThreadAttributeList(
+                ptr::null_mut(),
+                1,
+                0,
+                &mut attribute_list_size,
+            );
+        }
+        let mut attribute_list = vec![0_u8; attribute_list_size];
+        if unsafe {
+            InitializeProcThreadAttributeList(
+                attribute_list.as_mut_ptr() as *mut c_void,
+                1,
+                0,
+                &mut attribute_list_size,
+            )
+        } == 0
+        {
+            unsafe { (api.close)(hpc) };
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut hpc_value = hpc;
+        if unsafe {
+            UpdateProcThreadAttribute(
+                attribute_list.as_mut_ptr() as *mut c_void,
+                0,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                (&mut hpc_value as *mut HpcOn).cast::<c_void>(),
+                std::mem::size_of::<HpcOn>(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            unsafe {
+                DeleteProcThreadAttributeList(attribute_list.as_mut_ptr() as *mut c_void);
+                (api.close)(hpc);
+            }
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut startup_info = StartupInfoExW {
+            startup_info: StartupInfoW {
+                cb: std::mem::size_of::<StartupInfoExW>() as Dword,
+                reserved: ptr::null_mut(),
+                desktop: ptr::null_mut(),
+                title: ptr::null_mut(),
+                x: 0,
+                y: 0,
+                x_size: 0,
+                y_size: 0,
+                x_count_chars: 0,
+                y_count_chars: 0,
+                fill_attribute: 0,
+                flags: 0,
+                show_window: 0,
+                cb_reserved2: 0,
+                lp_reserved2: ptr::null_mut(),
+                std_input: ptr::null_mut(),
+                std_output: ptr::null_mut(),
+                std_error: ptr::null_mut(),
+            },
+            attribute_list: attribute_list.as_mut_ptr() as *mut c_void,
+        };
+        let mut process_info = ProcessInformation {
+            process: ptr::null_mut(),
+            thread: ptr::null_mut(),
+            process_id: 0,
+            thread_id: 0,
+        };
+        let mut command_line = interactive_child_command_line(args);
+        let current_directory = args
+            .working_directory
+            .as_ref()
+            .map(|path| wide_null(path.as_os_str()));
+
+        if unsafe {
+            CreateProcessW(
+                ptr::null(),
+                command_line.as_mut_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                EXTENDED_STARTUPINFO_PRESENT,
+                ptr::null_mut(),
+                current_directory
+                    .as_ref()
+                    .map_or(ptr::null(), |value| value.as_ptr()),
+                &mut startup_info.startup_info,
+                &mut process_info,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            append_debug_log(
+                debug_log_path,
+                &format!("CreateProcessW with ConPTY failed: {error:?}"),
+            );
+            unsafe {
+                DeleteProcThreadAttributeList(attribute_list.as_mut_ptr() as *mut c_void);
+                (api.close)(hpc);
+            }
+            return Err(error);
+        }
+
+        unsafe {
+            DeleteProcThreadAttributeList(attribute_list.as_mut_ptr() as *mut c_void);
+            let _ = CloseHandle(process_info.thread);
+        }
+
+        Ok(PseudoConsoleChild {
+            process: process_info.process,
+            hpc,
+            api,
+        })
+    }
+
+    fn console_size(args: &PipeServiceArgs) -> Coord {
+        Coord {
+            x: args.columns.unwrap_or(DEFAULT_CONSOLE_COLUMNS) as i16,
+            y: args.rows.unwrap_or(DEFAULT_CONSOLE_ROWS) as i16,
+        }
+    }
+
     fn interactive_child_command(args: &PipeServiceArgs) -> Command {
         let mut command =
             Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe")));
         command.arg("/Q");
+        command.arg("/F:ON");
         if let Some(command_text) = &args.command {
             command.arg("/C").arg(command_text);
         }
         command
+    }
+
+    fn interactive_child_command_line(args: &PipeServiceArgs) -> Vec<u16> {
+        let comspec = std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe"));
+        let mut command_line = quote_windows_arg(&comspec.to_string_lossy());
+        command_line.push_str(" /Q /F:ON");
+        if let Some(command_text) = &args.command {
+            command_line.push_str(" /C ");
+            command_line.push_str(&quote_windows_arg(command_text));
+        }
+        wide_null(OsStr::new(&command_line))
+    }
+
+    fn quote_windows_arg(value: &str) -> String {
+        let escaped = value.replace('"', "\"\"");
+        format!("\"{escaped}\"")
     }
 
     fn invalid_parameter_error() -> io::Error {

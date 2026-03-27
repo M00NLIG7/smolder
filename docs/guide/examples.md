@@ -46,7 +46,9 @@ cargo build -p smolder --example interactive_psexec
 ### Interactive PsExec Example
 
 This example uses the staged `smolder-psexecsvc.exe` payload and opens a real
-interactive shell over named pipes.
+interactive shell through a Windows pseudoconsole, so `cmd.exe` and
+`powershell.exe` behave like proper console applications instead of plain
+redirected pipe processes.
 
 Required environment:
 
@@ -88,7 +90,7 @@ cross build -p smolder-psexecsvc --target aarch64-pc-windows-gnullvm --release -
 The standalone CLI flow for the same interactive path is:
 
 ```bash
-target/debug/psexec smb://127.0.0.1 \
+target/debug/smolder psexec smb://127.0.0.1 \
   --interactive \
   --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \
   --username "$SMOLDER_WINDOWS_USERNAME" \
@@ -98,7 +100,7 @@ target/debug/psexec smb://127.0.0.1 \
 To start `powershell.exe` directly instead of the default `cmd.exe` shell:
 
 ```bash
-target/debug/psexec smb://127.0.0.1 \
+target/debug/smolder psexec smb://127.0.0.1 \
   --interactive \
   --command powershell.exe \
   --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \

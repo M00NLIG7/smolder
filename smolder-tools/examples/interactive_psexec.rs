@@ -1,8 +1,10 @@
 use std::env;
 use std::error::Error;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crossterm::terminal;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -36,7 +38,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(command) if !command.trim().is_empty() => ExecRequest::command(command),
         _ => ExecRequest::command(String::new()),
     };
+    let request = match local_terminal_size() {
+        Some((columns, rows)) => request.with_terminal_size(columns, rows),
+        None => request,
+    };
     let close_on_exit_command = request.launches_default_shell();
+    let _raw_terminal = LocalTerminalMode::acquire()?;
 
     let client = RemoteExecClient::builder()
         .server(host)
@@ -142,4 +149,33 @@ fn update_exit_command_state(pending_line: &mut Vec<u8>, bytes: &[u8]) -> bool {
         }
     }
     saw_exit_command
+}
+
+struct LocalTerminalMode {
+    enabled: bool,
+}
+
+impl LocalTerminalMode {
+    fn acquire() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            return Ok(Self { enabled: false });
+        }
+        terminal::enable_raw_mode()?;
+        Ok(Self { enabled: true })
+    }
+}
+
+impl Drop for LocalTerminalMode {
+    fn drop(&mut self) {
+        if self.enabled {
+            let _ = terminal::disable_raw_mode();
+        }
+    }
+}
+
+fn local_terminal_size() -> Option<(u16, u16)> {
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    terminal::size().ok()
 }

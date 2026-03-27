@@ -75,6 +75,7 @@ pub struct ExecRequest {
     command: String,
     working_directory: Option<String>,
     timeout: Option<Duration>,
+    terminal_size: Option<(u16, u16)>,
 }
 
 impl ExecRequest {
@@ -85,6 +86,7 @@ impl ExecRequest {
             command: command.into(),
             working_directory: None,
             timeout: None,
+            terminal_size: None,
         }
     }
 
@@ -102,6 +104,13 @@ impl ExecRequest {
         self
     }
 
+    /// Sets the initial terminal size for interactive console sessions.
+    #[must_use]
+    pub fn with_terminal_size(mut self, columns: u16, rows: u16) -> Self {
+        self.terminal_size = Some((columns, rows));
+        self
+    }
+
     /// Returns true when the request launches the default interactive shell.
     #[must_use]
     pub fn launches_default_shell(&self) -> bool {
@@ -115,6 +124,10 @@ impl ExecRequest {
         } else {
             Some(command)
         }
+    }
+
+    fn terminal_size(&self) -> Option<(u16, u16)> {
+        self.terminal_size
     }
 }
 
@@ -475,6 +488,18 @@ impl RemoteExecClient {
 
         let scm_handle = scm.open_sc_manager().await?;
         let service_command = build_psexec_interactive_service_command(&request, &command_paths);
+        if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
+            eprintln!(
+                "interactive psexec service={} stdin={} stdout={} stderr={} control={} debug={} command={}",
+                command_paths.service_name,
+                command_paths.stdin_pipe_name(),
+                command_paths.stdout_pipe_name(),
+                command_paths.stderr_pipe_name(),
+                command_paths.control_pipe_name(),
+                command_paths.debug_relative,
+                service_command
+            );
+        }
         let service_handle = match scm
             .create_service(&scm_handle, &command_paths.service_name, &service_command)
             .await
@@ -1307,9 +1332,10 @@ fn build_psexec_interactive_service_command(
     command_paths: &CommandPaths,
 ) -> String {
     let mut command = format!(
-        "{} --service-name {} --pipe-prefix {}",
+        "{} --service-name {}{} --pipe-prefix {}",
         quote_windows_arg(&command_paths.service_binary_absolute),
         quote_windows_arg(&command_paths.service_name),
+        psexec_debug_log_arg(command_paths),
         quote_windows_arg(&command_paths.pipe_prefix),
     );
     if let Some(command_text) = request.command_text() {
@@ -1319,6 +1345,12 @@ fn build_psexec_interactive_service_command(
     if let Some(working_directory) = &request.working_directory {
         command.push_str(" --workdir ");
         command.push_str(&quote_windows_arg(working_directory));
+    }
+    if let Some((columns, rows)) = request.terminal_size() {
+        command.push_str(" --cols ");
+        command.push_str(&columns.to_string());
+        command.push_str(" --rows ");
+        command.push_str(&rows.to_string());
     }
     command
 }
@@ -1857,7 +1889,9 @@ mod tests {
     #[test]
     fn interactive_psexec_command_uses_pipe_prefix_and_optional_workdir() {
         let paths = CommandPaths::new("Temp", "smolder-psexecsvc.exe");
-        let request = ExecRequest::command("powershell.exe").with_working_directory(r"C:\Temp");
+        let request = ExecRequest::command("powershell.exe")
+            .with_working_directory(r"C:\Temp")
+            .with_terminal_size(132, 43);
         let command = build_psexec_interactive_service_command(&request, &paths);
         assert!(command.contains("--pipe-prefix"));
         assert!(command.contains(&paths.pipe_prefix));
@@ -1865,6 +1899,8 @@ mod tests {
         assert!(command.contains("powershell.exe"));
         assert!(command.contains("--workdir"));
         assert!(command.contains(r#""C:\Temp""#));
+        assert!(command.contains("--cols 132"));
+        assert!(command.contains("--rows 43"));
     }
 
     #[test]

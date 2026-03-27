@@ -62,6 +62,10 @@ pub struct PipeServiceArgs {
     pub command: Option<String>,
     /// Optional working directory for the child process.
     pub working_directory: Option<PathBuf>,
+    /// Optional initial console width for pseudoconsole-backed sessions.
+    pub columns: Option<u16>,
+    /// Optional initial console height for pseudoconsole-backed sessions.
+    pub rows: Option<u16>,
 }
 
 /// Parses the process command line into the SCM dispatch configuration.
@@ -158,11 +162,13 @@ pub fn parse_pipe_service_args(args: &[OsString]) -> Result<PipeServiceArgs, Str
     let mut pipe_prefix = None;
     let mut command = None;
     let mut working_directory = None;
+    let mut columns = None;
+    let mut rows = None;
     let mut index = 0;
     while index < args.len() {
         let key = args[index].to_string_lossy();
         let value = match key.as_ref() {
-            "--pipe-prefix" | "--command" | "--workdir" => {
+            "--pipe-prefix" | "--command" | "--workdir" | "--cols" | "--rows" => {
                 index += 1;
                 args.get(index)
                     .ok_or_else(|| format!("missing value for {key}"))?
@@ -175,6 +181,22 @@ pub fn parse_pipe_service_args(args: &[OsString]) -> Result<PipeServiceArgs, Str
             "--pipe-prefix" => pipe_prefix = Some(value.to_string_lossy().into_owned()),
             "--command" => command = Some(value.to_string_lossy().into_owned()),
             "--workdir" => working_directory = Some(PathBuf::from(value)),
+            "--cols" => {
+                columns = Some(
+                    value
+                        .to_string_lossy()
+                        .parse::<u16>()
+                        .map_err(|_| "invalid value for --cols".to_string())?,
+                );
+            }
+            "--rows" => {
+                rows = Some(
+                    value
+                        .to_string_lossy()
+                        .parse::<u16>()
+                        .map_err(|_| "invalid value for --rows".to_string())?,
+                );
+            }
             _ => unreachable!(),
         }
         index += 1;
@@ -184,6 +206,8 @@ pub fn parse_pipe_service_args(args: &[OsString]) -> Result<PipeServiceArgs, Str
         pipe_prefix: pipe_prefix.ok_or_else(|| "missing --pipe-prefix".to_string())?,
         command,
         working_directory,
+        columns,
+        rows,
     })
 }
 
@@ -328,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_pipe_service_args_extracts_prefix_command_and_workdir() {
+    fn parse_pipe_service_args_extracts_prefix_command_workdir_and_size() {
         let args = parse_pipe_service_args(&[
             "--pipe-prefix".into(),
             "SMOLDER-ABC".into(),
@@ -336,6 +360,10 @@ mod tests {
             "whoami".into(),
             "--workdir".into(),
             "C:\\Temp".into(),
+            "--cols".into(),
+            "132".into(),
+            "--rows".into(),
+            "43".into(),
         ])
         .expect("pipe service args should parse");
         assert_eq!(
@@ -344,6 +372,8 @@ mod tests {
                 pipe_prefix: "SMOLDER-ABC".to_string(),
                 command: Some("whoami".to_string()),
                 working_directory: Some(PathBuf::from("C:\\Temp")),
+                columns: Some(132),
+                rows: Some(43),
             }
         );
     }
@@ -373,6 +403,8 @@ mod tests {
                 pipe_prefix: "SMOLDER-ABC".to_string(),
                 command: Some("whoami".to_string()),
                 working_directory: None,
+                columns: None,
+                rows: None,
             })
         );
     }
