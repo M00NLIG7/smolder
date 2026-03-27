@@ -153,13 +153,13 @@ run_windows_remote_exec() {
   require_env SMOLDER_WINDOWS_USERNAME
   require_env SMOLDER_WINDOWS_PASSWORD
 
-  run_cmd cargo build -p smolder --bin smolder
-  run_cmd target/debug/smolder smbexec \
+  run_cmd cargo build -p smolder --bin smbexec --bin psexec
+  run_cmd target/debug/smbexec \
     "smb://${SMOLDER_WINDOWS_HOST}" \
     --command whoami \
     --username "${SMOLDER_WINDOWS_USERNAME}" \
     --password "${SMOLDER_WINDOWS_PASSWORD}"
-  run_cmd target/debug/smolder psexec \
+  run_cmd target/debug/psexec \
     "smb://${SMOLDER_WINDOWS_HOST}" \
     --command whoami \
     --username "${SMOLDER_WINDOWS_USERNAME}" \

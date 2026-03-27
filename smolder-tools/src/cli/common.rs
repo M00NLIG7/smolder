@@ -1,0 +1,485 @@
+//! Shared parsing and execution helpers for CLI binaries.
+
+use std::env;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use smolder_core::auth::NtlmCredentials;
+
+use crate::fs::{Share, SmbClient, SmbClientBuilder, SmbMetadata};
+use crate::remote_exec::{
+    ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, RemoteExecClient,
+};
+
+const ENV_USERNAME: [&str; 2] = ["SMOLDER_SMB_USERNAME", "SMOLDER_SAMBA_USERNAME"];
+const ENV_PASSWORD: [&str; 2] = ["SMOLDER_SMB_PASSWORD", "SMOLDER_SAMBA_PASSWORD"];
+const ENV_DOMAIN: [&str; 2] = ["SMOLDER_SMB_DOMAIN", "SMOLDER_SAMBA_DOMAIN"];
+const ENV_WORKSTATION: [&str; 2] = ["SMOLDER_SMB_WORKSTATION", "SMOLDER_SAMBA_WORKSTATION"];
+const ENV_PSEXEC_SERVICE_BINARY: [&str; 1] = ["SMOLDER_PSEXEC_SERVICE_BINARY"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AuthOptions {
+    pub(super) username: String,
+    pub(super) password: String,
+    pub(super) domain: Option<String>,
+    pub(super) workstation: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct AuthArgAccumulator {
+    username: Option<String>,
+    password: Option<String>,
+    domain: Option<String>,
+    workstation: Option<String>,
+}
+
+impl AuthArgAccumulator {
+    pub(super) fn parse_flag(
+        &mut self,
+        args: &[String],
+        index: &mut usize,
+        token: &str,
+    ) -> Result<bool, String> {
+        if let Some(value) = token.strip_prefix("--username=") {
+            self.username = Some(value.to_string());
+            return Ok(true);
+        }
+        if let Some(value) = token.strip_prefix("--password=") {
+            self.password = Some(value.to_string());
+            return Ok(true);
+        }
+        if let Some(value) = token.strip_prefix("--domain=") {
+            self.domain = Some(value.to_string());
+            return Ok(true);
+        }
+        if let Some(value) = token.strip_prefix("--workstation=") {
+            self.workstation = Some(value.to_string());
+            return Ok(true);
+        }
+
+        match token {
+            "--username" => {
+                self.username = Some(next_value(args, index, "--username")?);
+                Ok(true)
+            }
+            "--password" => {
+                self.password = Some(next_value(args, index, "--password")?);
+                Ok(true)
+            }
+            "--domain" => {
+                self.domain = Some(next_value(args, index, "--domain")?);
+                Ok(true)
+            }
+            "--workstation" => {
+                self.workstation = Some(next_value(args, index, "--workstation")?);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    pub(super) fn resolve(self, usage: &str) -> Result<AuthOptions, String> {
+        let username = self
+            .username
+            .or_else(|| env_value(&ENV_USERNAME))
+            .ok_or_else(|| missing_env_error("username", &ENV_USERNAME, usage))?;
+        let password = self
+            .password
+            .or_else(|| env_value(&ENV_PASSWORD))
+            .ok_or_else(|| missing_env_error("password", &ENV_PASSWORD, usage))?;
+
+        Ok(AuthOptions {
+            username,
+            password,
+            domain: self.domain.or_else(|| env_value(&ENV_DOMAIN)),
+            workstation: self.workstation.or_else(|| env_value(&ENV_WORKSTATION)),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RemoteLocation {
+    pub(super) host: String,
+    pub(super) port: u16,
+    pub(super) share: String,
+    pub(super) path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExecTarget {
+    pub(super) host: String,
+    pub(super) port: u16,
+}
+
+fn share_builder(options: &AuthOptions, remote: &RemoteLocation) -> SmbClientBuilder {
+    let mut credentials = NtlmCredentials::new(&options.username, &options.password);
+    if let Some(domain) = &options.domain {
+        credentials = credentials.with_domain(domain.as_str());
+    }
+    if let Some(workstation) = &options.workstation {
+        credentials = credentials.with_workstation(workstation.as_str());
+    }
+
+    SmbClient::builder()
+        .server(remote.host.as_str())
+        .port(remote.port)
+        .credentials(credentials)
+}
+
+pub(super) async fn connect_share_path(
+    options: &AuthOptions,
+    remote: &RemoteLocation,
+) -> Result<(Share, String), String> {
+    share_builder(options, remote)
+        .connect_share_path(remote_unc(remote))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub(super) async fn connect_share_move_paths(
+    options: &AuthOptions,
+    source: &RemoteLocation,
+    destination: &RemoteLocation,
+) -> Result<(Share, String, String), String> {
+    let builder = share_builder(options, source);
+    let (source_share, source_path) = builder
+        .clone()
+        .connect_share_path(remote_unc(source))
+        .await
+        .map_err(|error| error.to_string())?;
+    let source_server = source_share.server().to_string();
+    let source_share_name = source_share.name().to_string();
+    drop(source_share);
+
+    let (share, destination_path) = builder
+        .connect_share_path(remote_unc(destination))
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !share.server().eq_ignore_ascii_case(&source_server)
+        || !share.name().eq_ignore_ascii_case(&source_share_name)
+    {
+        return Err(
+            "mv requires both SMB URLs to resolve to the same backend server and share"
+                .to_string(),
+        );
+    }
+
+    Ok((share, source_path, destination_path))
+}
+
+pub(super) async fn connect_remote_exec(
+    options: &AuthOptions,
+    target: &ExecTarget,
+    mode: ExecMode,
+    service_binary: Option<&Path>,
+) -> Result<RemoteExecClient, String> {
+    let mut credentials = NtlmCredentials::new(&options.username, &options.password);
+    if let Some(domain) = &options.domain {
+        credentials = credentials.with_domain(domain.as_str());
+    }
+    if let Some(workstation) = &options.workstation {
+        credentials = credentials.with_workstation(workstation.as_str());
+    }
+
+    let mut builder = RemoteExecClient::builder()
+        .server(target.host.as_str())
+        .port(target.port)
+        .credentials(credentials)
+        .mode(mode);
+    if let Some(service_binary) = service_binary {
+        builder = builder.psexec_service_binary(service_binary.to_path_buf());
+    }
+
+    builder.connect().await.map_err(|error| error.to_string())
+}
+
+pub(super) fn next_value(
+    args: &[String],
+    index: &mut usize,
+    flag: &str,
+) -> Result<String, String> {
+    *index += 1;
+    args.get(*index)
+        .cloned()
+        .ok_or_else(|| format!("missing value for {flag}"))
+}
+
+pub(super) fn psexec_service_binary_from_env() -> Option<PathBuf> {
+    env_value(&ENV_PSEXEC_SERVICE_BINARY).map(PathBuf::from)
+}
+
+fn env_value(keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+fn missing_env_error(field: &str, keys: &[&str], usage: &str) -> String {
+    format!(
+        "missing {field}; pass --{field} or set one of: {}\n\n{usage}",
+        keys.join(", ")
+    )
+}
+
+pub(super) fn parse_remote_location(input: &str) -> Result<RemoteLocation, String> {
+    parse_remote_location_with_options(input, false)
+}
+
+pub(super) fn parse_exec_target(input: &str) -> Result<ExecTarget, String> {
+    let authority = input
+        .strip_prefix("smb://")
+        .ok_or_else(|| "remote targets must start with smb://".to_string())?;
+    if authority.contains('/') {
+        return Err(
+            "remote exec targets must use smb://host[:port] without a share path".to_string(),
+        );
+    }
+
+    let (host, port) = parse_host_port(authority)?;
+    Ok(ExecTarget { host, port })
+}
+
+pub(super) fn parse_remote_location_with_options(
+    input: &str,
+    allow_empty_path: bool,
+) -> Result<RemoteLocation, String> {
+    let remainder = input
+        .strip_prefix("smb://")
+        .ok_or_else(|| "remote paths must start with smb://".to_string())?;
+    let (authority, path) = remainder
+        .split_once('/')
+        .ok_or_else(|| "remote paths must include a share name".to_string())?;
+
+    let (host, port) = parse_host_port(authority)?;
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let share = segments
+        .next()
+        .ok_or_else(|| "remote paths must include a share name".to_string())?;
+    let file_path = segments.collect::<Vec<_>>().join("/");
+    if file_path.is_empty() && !allow_empty_path {
+        return Err("remote paths must include a file path after the share".to_string());
+    }
+
+    Ok(RemoteLocation {
+        host,
+        port,
+        share: share.to_string(),
+        path: file_path,
+    })
+}
+
+fn parse_host_port(authority: &str) -> Result<(String, u16), String> {
+    if authority.is_empty() {
+        return Err("remote paths must include a host".to_string());
+    }
+
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.contains(':') {
+            return Err("IPv6 SMB URLs are not supported yet".to_string());
+        }
+
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| "SMB URL port must be a valid u16".to_string())?;
+        return Ok((host.to_string(), port));
+    }
+
+    Ok((authority.to_string(), 445))
+}
+
+pub(super) fn parse_duration(input: &str) -> Result<Duration, String> {
+    if let Some(milliseconds) = input.strip_suffix("ms") {
+        return milliseconds
+            .parse::<u64>()
+            .map(Duration::from_millis)
+            .map_err(|_| "timeout milliseconds must be a whole number, e.g. 500ms".to_string());
+    }
+    if let Some(seconds) = input.strip_suffix('s') {
+        return seconds
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|_| "timeout must be a whole number of seconds, e.g. 30s".to_string());
+    }
+
+    Err("timeout must end with `s` or `ms`".to_string())
+}
+
+pub(super) fn remote_unc(remote: &RemoteLocation) -> String {
+    if remote.path.is_empty() {
+        format!(r"\\{}\{}", remote.host, remote.share)
+    } else {
+        let path = remote.path.replace('/', r"\");
+        format!(r"\\{}\{}\{}", remote.host, remote.share, path)
+    }
+}
+
+pub(super) fn ensure_same_share(
+    source: &RemoteLocation,
+    destination: &RemoteLocation,
+) -> Result<(), String> {
+    if source.host != destination.host
+        || source.port != destination.port
+        || source.share != destination.share
+    {
+        return Err("mv requires both SMB URLs to use the same host, port, and share".to_string());
+    }
+    Ok(())
+}
+
+pub(super) fn print_metadata(path: &str, metadata: &SmbMetadata) {
+    println!("Path: {path}");
+    println!(
+        "Type: {}",
+        if metadata.is_directory() {
+            "directory"
+        } else {
+            "file"
+        }
+    );
+    println!("Size: {}", metadata.size);
+    println!("AllocationSize: {}", metadata.allocation_size);
+    println!("Attributes: 0x{:08x}", metadata.attributes.bits());
+    println!("Created: {}", format_time(metadata.created));
+    println!("Accessed: {}", format_time(metadata.accessed));
+    println!("Written: {}", format_time(metadata.written));
+    println!("Changed: {}", format_time(metadata.changed));
+}
+
+fn format_time(value: Option<std::time::SystemTime>) -> String {
+    value
+        .map(|time| format!("{time:?}"))
+        .unwrap_or_else(|| "<none>".to_string())
+}
+
+pub(super) async fn run_interactive_exec(
+    exec: &RemoteExecClient,
+    request: ExecRequest,
+) -> Result<i32, String> {
+    let session = exec
+        .spawn(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    let (mut stdin, mut stdout, mut stderr, waiter) = session.into_parts();
+
+    let stdin_task = async { pump_local_stdin(&mut stdin).await };
+    let stdout_task = async { pump_remote_output(&mut stdout, tokio::io::stdout()).await };
+    let stderr_task = async { pump_remote_output(&mut stderr, tokio::io::stderr()).await };
+    let wait_task = async { waiter.wait().await.map_err(|error| error.to_string()) };
+
+    let (stdin_result, stdout_result, stderr_result, exit_result) =
+        tokio::join!(stdin_task, stdout_task, stderr_task, wait_task);
+    stdin_result?;
+    stdout_result?;
+    stderr_result?;
+    exit_result
+}
+
+async fn pump_local_stdin(stdin: &mut InteractiveStdin) -> Result<(), String> {
+    let mut local_stdin = tokio::io::stdin();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = local_stdin
+            .read(&mut buffer)
+            .await
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            return stdin.close().await.map_err(|error| error.to_string());
+        }
+        stdin
+            .write_all(&buffer[..count])
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+}
+
+async fn pump_remote_output<W>(reader: &mut InteractiveReader, mut writer: W) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(chunk) = reader
+        .read_chunk()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        writer
+            .write_all(&chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        writer.flush().await.map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{
+        parse_duration, parse_exec_target, parse_remote_location,
+        parse_remote_location_with_options, remote_unc, ExecTarget, RemoteLocation,
+    };
+
+    #[test]
+    fn parse_remote_location_rejects_missing_file_path() {
+        let error = parse_remote_location("smb://server/share")
+            .expect_err("share-only URLs should be rejected");
+        assert!(error.contains("file path"));
+    }
+
+    #[test]
+    fn parse_remote_location_with_options_accepts_empty_path() {
+        let location = parse_remote_location_with_options("smb://server/share", true)
+            .expect("share root should be accepted");
+        assert_eq!(location.path, "");
+    }
+
+    #[test]
+    fn parse_exec_target_rejects_share_paths() {
+        let error = parse_exec_target("smb://server/share").expect_err("share path should fail");
+        assert!(error.contains("without a share path"));
+    }
+
+    #[test]
+    fn parse_exec_target_accepts_target_only_url() {
+        assert_eq!(
+            parse_exec_target("smb://server:1445").expect("target should parse"),
+            ExecTarget {
+                host: "server".to_string(),
+                port: 1445,
+            }
+        );
+    }
+
+    #[test]
+    fn remote_unc_formats_nested_and_share_root_paths() {
+        let nested = RemoteLocation {
+            host: "server".to_string(),
+            port: 445,
+            share: "share".to_string(),
+            path: "docs/file.txt".to_string(),
+        };
+        assert_eq!(remote_unc(&nested), r"\\server\share\docs\file.txt");
+
+        let root = RemoteLocation {
+            host: "server".to_string(),
+            port: 445,
+            share: "share".to_string(),
+            path: String::new(),
+        };
+        assert_eq!(remote_unc(&root), r"\\server\share");
+    }
+
+    #[test]
+    fn parse_duration_accepts_seconds_and_milliseconds() {
+        assert_eq!(
+            parse_duration("30s").expect("seconds should parse"),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_duration("500ms").expect("milliseconds should parse"),
+            Duration::from_millis(500)
+        );
+    }
+}

@@ -12,7 +12,7 @@
 //! - a higher-level SMB client builder and share/file API
 //! - DFS-aware path handling and reconnect helpers
 //! - operator workflows such as `smbexec` and `psexec`
-//! - the `smolder` CLI binary
+//! - the standalone Smolder CLI binaries plus the `smolder` compatibility wrapper
 //!
 //! Lower-level protocol and transport pieces remain in the `smolder-smb-core`
 //! and `smolder-proto` packages.
@@ -27,6 +27,7 @@
 pub mod fs;
 pub mod reconnect;
 pub mod remote_exec;
+pub mod cli;
 pub mod prelude {
     //! Common types and traits
 

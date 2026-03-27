@@ -275,8 +275,8 @@ cargo test -p smolder --test windows_dfs -- --nocapture
 Remote execution smoke checks:
 
 ```bash
-target/debug/smolder smbexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture
-target/debug/smolder psexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture
+target/debug/smbexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture
+target/debug/psexec smb://127.0.0.1 --command whoami --username windowsfixture --password windowsfixture
 ```
 
 ### Samba

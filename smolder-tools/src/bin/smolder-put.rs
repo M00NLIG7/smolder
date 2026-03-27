@@ -1,13 +1,13 @@
-//! Temporary compatibility wrapper for `smolder <subcommand>`.
-//!
-//! New callers should use the standalone binaries directly. This wrapper exists
-//! only to keep older scripts working while the repo migrates.
-
 use std::env;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    match smolder_tools::cli::run_smolder(env::args().collect()).await {
+    match smolder_tools::cli::run_file_tool(
+        smolder_tools::cli::FileTool::Put,
+        env::args().collect(),
+    )
+    .await
+    {
         Ok(code) => {
             if code != 0 {
                 std::process::exit(code);

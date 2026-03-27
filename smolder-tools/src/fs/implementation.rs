@@ -991,7 +991,7 @@ where
         let opened = self
             .create_handle(
                 from.as_ref(),
-                DELETE | FILE_WRITE_ATTRIBUTES,
+                DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
                 CreateDisposition::Open,
                 CreateTarget::Any,
                 false,

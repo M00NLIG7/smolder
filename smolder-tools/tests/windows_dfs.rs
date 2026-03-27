@@ -183,9 +183,8 @@ async fn cli_mv_renames_through_live_windows_dfs_when_configured() {
         .await
         .expect("Windows DFS source path should accept writes");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder-mv"));
     command
-        .arg("mv")
         .arg(smb_url_from_dfs_root(&config, &root, &source_leaf))
         .arg(smb_url_from_dfs_root(&config, &root, &destination_leaf));
     configure_auth(&mut command, &config);

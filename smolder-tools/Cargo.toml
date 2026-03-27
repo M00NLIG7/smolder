@@ -10,6 +10,7 @@ license = "MIT"
 readme = "README.md"
 keywords = ["smb", "smb2", "rpc", "cli"]
 categories = ["command-line-utilities", "network-programming"]
+default-run = "smolder"
 
 [lib]
 name = "smolder_tools"

@@ -122,8 +122,8 @@ async fn cat_command_streams_file_when_configured() {
         .await
         .expect("should seed remote file");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
-    command.arg("cat").arg(smb_url(&config, &remote_path));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder-cat"));
+    command.arg(smb_url(&config, &remote_path));
     configure_auth(&mut command, &config);
 
     let output = command.output().expect("CLI should run");
@@ -147,11 +147,8 @@ async fn put_command_uploads_file_when_configured() {
     let payload = b"smolder cli put payload".to_vec();
     fs::write(&local_path, &payload).expect("should create upload fixture");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
-    command
-        .arg("put")
-        .arg(&local_path)
-        .arg(smb_url(&config, &remote_path));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder-put"));
+    command.arg(&local_path).arg(smb_url(&config, &remote_path));
     configure_auth(&mut command, &config);
 
     let output = command.output().expect("CLI should run");
@@ -185,11 +182,8 @@ async fn get_command_downloads_file_when_configured() {
         .await
         .expect("should seed remote file");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
-    command
-        .arg("get")
-        .arg(smb_url(&config, &remote_path))
-        .arg(&local_path);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder-get"));
+    command.arg(smb_url(&config, &remote_path)).arg(&local_path);
     configure_auth(&mut command, &config);
 
     let output = command.output().expect("CLI should run");
@@ -218,8 +212,8 @@ async fn ls_command_lists_entries_when_configured() {
         .await
         .expect("should seed remote file");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
-    command.arg("ls").arg(smb_url(&config, ""));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder-ls"));
+    command.arg(smb_url(&config, ""));
     configure_auth(&mut command, &config);
 
     let output = command.output().expect("CLI should run");
@@ -246,8 +240,8 @@ async fn stat_command_prints_metadata_when_configured() {
         .await
         .expect("should seed remote file");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
-    command.arg("stat").arg(smb_url(&config, &remote_path));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder-stat"));
+    command.arg(smb_url(&config, &remote_path));
     configure_auth(&mut command, &config);
 
     let output = command.output().expect("CLI should run");
@@ -275,10 +269,10 @@ async fn mv_command_renames_files_when_configured() {
         .write(&source, payload)
         .await
         .expect("should seed remote file");
+    drop(share);
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder-mv"));
     command
-        .arg("mv")
         .arg(smb_url(&config, &source))
         .arg(smb_url(&config, &destination));
     configure_auth(&mut command, &config);
@@ -290,6 +284,9 @@ async fn mv_command_renames_files_when_configured() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let Some((_config, mut share)) = connected_share().await else {
+        return;
+    };
     let round_trip = share
         .read(&destination)
         .await
@@ -311,9 +308,10 @@ async fn rm_command_deletes_files_when_configured() {
         .write(&remote_path, b"smolder cli rm payload")
         .await
         .expect("should seed remote file");
+    drop(share);
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder"));
-    command.arg("rm").arg(smb_url(&config, &remote_path));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smolder-rm"));
+    command.arg(smb_url(&config, &remote_path));
     configure_auth(&mut command, &config);
 
     let output = command.output().expect("CLI should run");
@@ -323,6 +321,9 @@ async fn rm_command_deletes_files_when_configured() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let Some((_config, mut share)) = connected_share().await else {
+        return;
+    };
     let listing = share.list("").await.expect("listing should succeed");
     assert!(!listing.iter().any(|entry| entry.name == remote_path));
 }

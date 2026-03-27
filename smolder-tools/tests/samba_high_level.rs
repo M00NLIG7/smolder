@@ -4,8 +4,11 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use smolder_proto::smb::smb2::LeaseState;
-use smolder_tools::prelude::{LeaseRequest, NtlmCredentials, OpenOptions, Share, SmbClient};
+use smolder_tools::prelude::{
+    LeaseRequest, NtlmCredentials, OpenOptions, Share, SmbClient, SmbDirectoryEntry,
+};
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 
 fn required_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -97,6 +100,23 @@ fn unique_name(prefix: &str) -> String {
 
 fn temp_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(unique_name(prefix))
+}
+
+async fn wait_for_listing_entry(
+    share: &mut Share,
+    name: &str,
+    present: bool,
+) -> Vec<SmbDirectoryEntry> {
+    let mut last_listing = Vec::new();
+    for _ in 0..10 {
+        let listing = share.list("").await.expect("listing should succeed");
+        if listing.iter().any(|entry| entry.name == name) == present {
+            return listing;
+        }
+        last_listing = listing;
+        sleep(Duration::from_millis(50)).await;
+    }
+    last_listing
 }
 
 #[tokio::test]
@@ -195,7 +215,7 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .await
         .expect("should create file for metadata test");
 
-    let listing = share.list("").await.expect("listing should succeed");
+    let listing = wait_for_listing_entry(&mut share, &original_path, true).await;
     assert!(listing.iter().any(|entry| entry.name == original_path));
 
     let metadata = share
@@ -209,10 +229,7 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .rename(&original_path, &renamed_path)
         .await
         .expect("rename should succeed");
-    let renamed_listing = share
-        .list("")
-        .await
-        .expect("listing should succeed after rename");
+    let renamed_listing = wait_for_listing_entry(&mut share, &renamed_path, true).await;
     assert!(!renamed_listing
         .iter()
         .any(|entry| entry.name == original_path));
@@ -224,10 +241,7 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .remove(&renamed_path)
         .await
         .expect("remove should succeed");
-    let final_listing = share
-        .list("")
-        .await
-        .expect("listing should succeed after remove");
+    let final_listing = wait_for_listing_entry(&mut share, &renamed_path, false).await;
     assert!(!final_listing.iter().any(|entry| entry.name == renamed_path));
 }
 
