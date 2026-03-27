@@ -21,6 +21,9 @@ for:
 - named-pipe RPC bind
 - Kerberos tree connect
 
+The shared examples guide, including the interactive `psexec` tools example,
+is in [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md).
+
 Published package names:
 
 - `smolder-proto`: wire-format crate

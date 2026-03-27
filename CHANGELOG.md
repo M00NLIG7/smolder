@@ -21,6 +21,8 @@ and the versioning/MSRV rules are defined in
 
 - Added a compile-only GitHub Actions benchmark smoke workflow for
   `smolder-proto` and `smolder-smb-core`.
+- Added an examples guide plus a compile-checked interactive `psexec` tools
+  example.
 
 ### Release Notes Flow
 
