@@ -7,9 +7,33 @@ live in:
 
 - [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
 - [versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
+- [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md)
 - [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md)
 - [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md)
 - [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md)
+
+## Release Notes Flow
+
+Before tagging a release:
+
+- update [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md)
+- move `Unreleased` notes into a dated version section
+- call out any support-policy or MSRV changes explicitly
+- summarize the actual validation gates that were run for that release
+
+When cutting the GitHub release:
+
+- use the matching version section from
+  [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md) as the release
+  body baseline
+- keep the release text user-facing rather than commit-by-commit
+- include any known fixture caveats only when they materially affect the
+  release scope
+
+After tagging:
+
+- recreate an empty `Unreleased` section in
+  [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md)
 
 ## Baseline Rule
 

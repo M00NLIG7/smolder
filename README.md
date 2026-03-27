@@ -28,6 +28,9 @@ Published package names:
 - `smolder`: CLI package and library package for the `smolder_tools` crate
 - `smolder-psexecsvc`: Windows service payload package
 
+Release notes and published change summaries live in
+[CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md).
+
 Boundary rule:
 
 - `smolder-core` stays library-only and protocol-focused.
