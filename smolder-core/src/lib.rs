@@ -65,7 +65,10 @@ pub mod prelude {
         NtlmSessionSecurity,
     };
     #[cfg(feature = "kerberos")]
-    pub use crate::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
+    pub use crate::auth::{
+        KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind,
+        KerberosCredentials, KerberosTarget,
+    };
     pub use crate::client::{
         Authenticated, CompoundRequest, CompoundResponse, Connected, Connection, DurableHandle,
         DurableOpenOptions, Negotiated, ResilientHandle, TreeConnected,

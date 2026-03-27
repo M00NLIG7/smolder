@@ -21,7 +21,8 @@ required-features = ["kerberos"]
 
 [features]
 default = []
-kerberos = ["dep:sspi"]
+kerberos = ["kerberos-sspi"]
+kerberos-sspi = ["dep:sspi"]
 
 [dependencies]
 aes = "0.8"

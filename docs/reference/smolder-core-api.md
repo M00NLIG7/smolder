@@ -18,6 +18,9 @@ For most users, the supported starting surface is:
 - `smolder_core::auth::{NtlmCredentials, NtlmAuthenticator}`
 - `smolder_core::auth::{KerberosCredentials, KerberosAuthenticator, KerberosTarget}`
   when the `kerberos` feature is enabled
+- `smolder_core::auth::{KerberosBackendKind, KerberosCredentialSourceKind}`
+  when you need to inspect which backend/capability path the current Kerberos
+  integration is using
 - `smolder_core::dfs::{UncPath, DfsReferral, resolve_unc_path}`
 - `smolder_core::error::CoreError`
 - `smolder_core::transport::{Transport, TokioTcpTransport}`
@@ -54,6 +57,14 @@ The current direction for `0.1.x` is:
 - keep `prelude` curated rather than exhaustive
 - avoid moving tool-specific orchestration back into `smolder-core`
 - only narrow the public surface when the existing shape is clearly wrong
+
+For Kerberos specifically:
+
+- `kerberos` is the umbrella feature consumers should enable
+- the current implementation path underneath that umbrella is `kerberos-sspi`
+- backend-specific capability expansion should happen behind the stable
+  `KerberosCredentials` / `KerberosAuthenticator` surface rather than by
+  replacing those top-level types
 
 The next follow-on work after this audit should focus on examples and docs for
 the intended entry points rather than adding more raw public types.

@@ -1,9 +1,15 @@
 //! Kerberos authentication for SMB `SESSION_SETUP`.
+//!
+//! The current implementation is backed by the `sspi` crate, but the public
+//! API is structured around backend-agnostic credentials and authenticators so
+//! additional Kerberos backends can be added without changing the main SMB
+//! authentication surface.
 
 use std::fmt;
 use std::marker::PhantomData;
 
 use smolder_proto::smb::smb2::NegotiateResponse;
+#[cfg(feature = "kerberos-sspi")]
 use sspi::{KerberosConfig, Negotiate, NegotiateConfig, Sspi, SspiImpl};
 
 use super::kerberos_spn::KerberosTarget;
@@ -12,7 +18,22 @@ use super::spnego::{
 };
 use super::{AuthError, AuthProvider, SpnegoMechanism};
 
-/// Password-backed Kerberos credentials for SMB authentication.
+/// Backend implementation used to satisfy a Kerberos SMB authentication request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KerberosBackendKind {
+    /// `sspi`-based Kerberos backend.
+    #[cfg(feature = "kerberos-sspi")]
+    Sspi,
+}
+
+/// Credential source represented by [`KerberosCredentials`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KerberosCredentialSourceKind {
+    /// Username/password-backed Kerberos credentials.
+    Password,
+}
+
+/// Kerberos credentials and backend selection for SMB authentication.
 #[derive(Clone, PartialEq, Eq)]
 pub struct KerberosCredentials {
     username: String,
@@ -20,6 +41,7 @@ pub struct KerberosCredentials {
     domain: String,
     workstation: String,
     kdc_url: Option<String>,
+    backend: KerberosBackendKind,
 }
 
 impl fmt::Debug for KerberosCredentials {
@@ -30,6 +52,8 @@ impl fmt::Debug for KerberosCredentials {
             .field("domain", &self.domain)
             .field("workstation", &self.workstation)
             .field("kdc_url", &self.kdc_url)
+            .field("backend", &self.backend)
+            .field("source_kind", &self.credential_source_kind())
             .finish()
     }
 }
@@ -37,12 +61,18 @@ impl fmt::Debug for KerberosCredentials {
 impl KerberosCredentials {
     /// Creates password-backed Kerberos credentials for an SMB account.
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self::from_password(username, password)
+    }
+
+    /// Creates password-backed Kerberos credentials for an SMB account.
+    pub fn from_password(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             username: username.into(),
             password: password.into(),
             domain: String::new(),
             workstation: "smolder".to_owned(),
             kdc_url: None,
+            backend: default_backend_kind(),
         }
     }
 
@@ -68,6 +98,18 @@ impl KerberosCredentials {
     pub fn with_kdc_url(mut self, kdc_url: impl Into<String>) -> Self {
         self.kdc_url = Some(kdc_url.into());
         self
+    }
+
+    /// Returns the backend implementation selected for this credential set.
+    #[must_use]
+    pub fn backend_kind(&self) -> KerberosBackendKind {
+        self.backend
+    }
+
+    /// Returns the credential source carried by this credential set.
+    #[must_use]
+    pub fn credential_source_kind(&self) -> KerberosCredentialSourceKind {
+        KerberosCredentialSourceKind::Password
     }
 
     fn username(&self) -> Result<sspi::Username, AuthError> {
@@ -99,45 +141,85 @@ impl KerberosCredentials {
     }
 }
 
-/// Kerberos `AuthProvider` backed by password-based credentials.
+fn default_backend_kind() -> KerberosBackendKind {
+    #[cfg(feature = "kerberos-sspi")]
+    {
+        KerberosBackendKind::Sspi
+    }
+}
+
+enum KerberosAuthenticatorInner {
+    #[cfg(feature = "kerberos-sspi")]
+    Sspi(KerberosAuthEngine<SspiNegotiateKerberosBackend>),
+}
+
+/// Kerberos `AuthProvider` selected from the configured backend and credential source.
 pub struct KerberosAuthenticator {
-    inner: KerberosAuthEngine<SspiNegotiateKerberosBackend>,
+    inner: KerberosAuthenticatorInner,
 }
 
 impl KerberosAuthenticator {
     /// Creates a Kerberos authenticator using the provided credentials and SMB target.
     pub fn new(credentials: KerberosCredentials, target: KerberosTarget) -> Self {
-        Self {
-            inner: KerberosAuthEngine::new(credentials, target),
-        }
+        let inner = match credentials.backend_kind() {
+            #[cfg(feature = "kerberos-sspi")]
+            KerberosBackendKind::Sspi => {
+                KerberosAuthenticatorInner::Sspi(KerberosAuthEngine::new(credentials, target))
+            }
+        };
+        Self { inner }
     }
 
     /// Returns the SMB Kerberos target for this exchange.
     pub fn target(&self) -> &KerberosTarget {
-        &self.inner.target
+        match &self.inner {
+            #[cfg(feature = "kerberos-sspi")]
+            KerberosAuthenticatorInner::Sspi(inner) => &inner.target,
+        }
     }
 
     /// Returns the credentials used for this exchange.
     pub fn credentials(&self) -> &KerberosCredentials {
-        &self.inner.credentials
+        match &self.inner {
+            #[cfg(feature = "kerberos-sspi")]
+            KerberosAuthenticatorInner::Sspi(inner) => &inner.credentials,
+        }
+    }
+
+    /// Returns the backend implementation selected for this exchange.
+    #[must_use]
+    pub fn backend_kind(&self) -> KerberosBackendKind {
+        self.credentials().backend_kind()
     }
 }
 
 impl AuthProvider for KerberosAuthenticator {
     fn initial_token(&mut self, negotiate: &NegotiateResponse) -> Result<Vec<u8>, AuthError> {
-        self.inner.initial_token(negotiate)
+        match &mut self.inner {
+            #[cfg(feature = "kerberos-sspi")]
+            KerberosAuthenticatorInner::Sspi(inner) => inner.initial_token(negotiate),
+        }
     }
 
     fn next_token(&mut self, incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
-        self.inner.next_token(incoming)
+        match &mut self.inner {
+            #[cfg(feature = "kerberos-sspi")]
+            KerberosAuthenticatorInner::Sspi(inner) => inner.next_token(incoming),
+        }
     }
 
     fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
-        self.inner.finish(incoming)
+        match &mut self.inner {
+            #[cfg(feature = "kerberos-sspi")]
+            KerberosAuthenticatorInner::Sspi(inner) => inner.finish(incoming),
+        }
     }
 
     fn session_key(&self) -> Option<&[u8]> {
-        self.inner.session_key()
+        match &self.inner {
+            #[cfg(feature = "kerberos-sspi")]
+            KerberosAuthenticatorInner::Sspi(inner) => inner.session_key(),
+        }
     }
 }
 
@@ -354,13 +436,16 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
     }
 }
 
+#[cfg(feature = "kerberos-sspi")]
 struct SspiNegotiateKerberosBackend;
 
+#[cfg(feature = "kerberos-sspi")]
 struct SspiKerberosContext {
     negotiate: Negotiate,
     credentials_handle: <Negotiate as SspiImpl>::CredentialsHandle,
 }
 
+#[cfg(feature = "kerberos-sspi")]
 impl SspiKerberosContext {
     fn new(credentials: &KerberosCredentials) -> Result<Self, AuthError> {
         let kerberos_config = if let Some(kdc_url) = credentials.kdc_url() {
@@ -450,6 +535,7 @@ impl SspiKerberosContext {
     }
 }
 
+#[cfg(feature = "kerberos-sspi")]
 impl KerberosBackend for SspiNegotiateKerberosBackend {
     const SPNEGO_WRAPPED: bool = true;
 
@@ -507,6 +593,7 @@ impl KerberosBackend for SspiNegotiateKerberosBackend {
 
 }
 
+#[cfg(feature = "kerberos-sspi")]
 fn client_request_flags() -> sspi::ClientRequestFlags {
     sspi::ClientRequestFlags::MUTUAL_AUTH
         | sspi::ClientRequestFlags::INTEGRITY
@@ -611,6 +698,17 @@ mod tests {
     }
 
     #[test]
+    fn password_credentials_default_to_sspi_backend() {
+        let credentials = test_credentials();
+
+        assert_eq!(credentials.backend_kind(), KerberosBackendKind::Sspi);
+        assert_eq!(
+            credentials.credential_source_kind(),
+            KerberosCredentialSourceKind::Password
+        );
+    }
+
+    #[test]
     fn initial_token_advertises_kerberos_mechanism() {
         let target =
             KerberosTarget::for_smb_host("fileserver.example.com").with_realm("EXAMPLE.COM");
@@ -671,5 +769,14 @@ mod tests {
             .expect_err("UPN plus domain should fail");
 
         assert!(matches!(error, AuthError::InvalidState(_)));
+    }
+
+    #[test]
+    fn authenticator_reports_selected_backend() {
+        let target =
+            KerberosTarget::for_smb_host("fileserver.example.com").with_realm("EXAMPLE.COM");
+        let auth = KerberosAuthenticator::new(test_credentials(), target);
+
+        assert_eq!(auth.backend_kind(), KerberosBackendKind::Sspi);
     }
 }

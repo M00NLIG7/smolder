@@ -44,5 +44,7 @@ pub mod prelude {
         DurableHandle, DurableOpenOptions, NtlmCredentials, ResilientHandle,
     };
     #[cfg(feature = "kerberos")]
-    pub use smolder_core::prelude::{KerberosCredentials, KerberosTarget};
+    pub use smolder_core::prelude::{
+        KerberosBackendKind, KerberosCredentialSourceKind, KerberosCredentials, KerberosTarget,
+    };
 }

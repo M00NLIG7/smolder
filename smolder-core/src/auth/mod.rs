@@ -13,7 +13,10 @@ use smolder_proto::smb::smb2::NegotiateResponse;
 use thiserror::Error;
 
 #[cfg(feature = "kerberos")]
-pub use kerberos::{KerberosAuthenticator, KerberosCredentials};
+pub use kerberos::{
+    KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind,
+    KerberosCredentials,
+};
 #[cfg(feature = "kerberos")]
 pub use kerberos_spn::KerberosTarget;
 pub use ntlm::{NtlmAuthenticator, NtlmCredentials};
