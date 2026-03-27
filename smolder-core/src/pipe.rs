@@ -372,10 +372,18 @@ where
 
         let file_id = self.file_id;
         let fragment_size = self.fragment_size;
-        let response = self
+        let response = match self
             .connection_mut()
             .read(&ReadRequest::for_file(file_id, 0, fragment_size))
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if is_named_pipe_broken_read(&error) => {
+                self.eof = true;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         if response.data.is_empty() {
             self.eof = true;
             return Ok(None);
@@ -538,12 +546,22 @@ fn core_error_to_io(error: CoreError) -> io::Error {
 fn handle_named_pipe_flush_error(error: CoreError) -> Result<(), CoreError> {
     match error {
         CoreError::UnexpectedStatus { command, status }
-            if command == Command::Flush && status == NtStatus::NOT_IMPLEMENTED.to_u32() =>
+            if command == Command::Flush
+                && (status == NtStatus::NOT_IMPLEMENTED.to_u32()
+                    || status == NtStatus::PIPE_BROKEN.to_u32()) =>
         {
             Ok(())
         }
         other => Err(other),
     }
+}
+
+fn is_named_pipe_broken_read(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::UnexpectedStatus { command, status }
+            if *command == Command::Read && *status == NtStatus::PIPE_BROKEN.to_u32()
+    )
 }
 
 impl<T> AsyncRead for NamedPipe<T>
@@ -602,6 +620,13 @@ where
                             None
                         } else {
                             Some(response.data)
+                        }
+                    })
+                    .or_else(|error| {
+                        if is_named_pipe_broken_read(&error) {
+                            Ok(None)
+                        } else {
+                            Err(error)
                         }
                     });
                 (connection, result)
@@ -1293,6 +1318,140 @@ mod tests {
         let write = outbound_write(&writes[4]);
 
         assert_eq!(write.data, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn named_pipe_async_flush_ignores_broken_pipe_status() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::NORMAL,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_attributes: FileAttributes::NORMAL,
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Write,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                WriteResponse { count: 11 }.encode(),
+            ),
+            response_frame(
+                Command::Flush,
+                NtStatus::PIPE_BROKEN.to_u32(),
+                5,
+                11,
+                7,
+                FlushResponse.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                6,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let connection = build_tree_connection(reads).await;
+        let mut pipe = NamedPipe::open(connection, "svcctl", PipeAccess::WriteOnly)
+            .await
+            .expect("pipe open should succeed");
+        AsyncWriteExt::write_all(&mut pipe, b"hello world")
+            .await
+            .expect("async write should succeed");
+        AsyncWriteExt::flush(&mut pipe)
+            .await
+            .expect("flush should ignore broken-pipe status on named pipes");
+
+        let connection = pipe.close().await.expect("pipe close should succeed");
+        let writes = connection.into_transport().writes;
+        let write = outbound_write(&writes[4]);
+
+        assert_eq!(write.data, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn named_pipe_read_chunk_treats_broken_pipe_as_eof() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::NORMAL,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let close_response = CloseResponse {
+            flags: 0,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_attributes: FileAttributes::NORMAL,
+        };
+
+        let reads = vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Read,
+                NtStatus::PIPE_BROKEN.to_u32(),
+                4,
+                11,
+                7,
+                Vec::new(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                close_response.encode(),
+            ),
+        ];
+
+        let connection = build_tree_connection(reads).await;
+        let mut pipe = NamedPipe::open(connection, "svcctl", PipeAccess::ReadOnly)
+            .await
+            .expect("pipe open should succeed");
+
+        let chunk = pipe
+            .read_chunk()
+            .await
+            .expect("broken pipe status should map to eof");
+        assert_eq!(chunk, None);
+
+        pipe.close().await.expect("pipe close should succeed");
     }
 
     async fn build_tree_connection(

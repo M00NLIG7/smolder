@@ -102,6 +102,12 @@ impl ExecRequest {
         self
     }
 
+    /// Returns true when the request launches the default interactive shell.
+    #[must_use]
+    pub fn launches_default_shell(&self) -> bool {
+        self.command_text().is_none()
+    }
+
     fn command_text(&self) -> Option<&str> {
         let command = self.command.trim();
         if command.is_empty() {
@@ -450,16 +456,11 @@ impl RemoteExecClient {
                 "interactive sessions require psexec mode",
             ));
         }
-        if self.psexec_service_binary.is_some() {
-            return Err(CoreError::Unsupported(
-                "interactive psexec with the staged service payload is not supported yet",
-            ));
-        }
         let service_binary =
             self.psexec_service_binary
                 .as_deref()
                 .ok_or(CoreError::Unsupported(
-                    "interactive psexec is not supported yet",
+                    "interactive psexec currently requires a staged --service-binary payload",
                 ))?;
         let timeout_budget = request.timeout.unwrap_or(self.timeout);
         let command_paths =

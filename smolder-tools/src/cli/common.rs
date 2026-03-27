@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 #[cfg(feature = "kerberos")]
 use smolder_core::auth::{KerberosCredentials, KerberosTarget};
@@ -33,6 +35,7 @@ const ENV_KERBEROS_TARGET_PRINCIPAL: [&str; 1] = ["SMOLDER_KERBEROS_TARGET_PRINC
 const ENV_KERBEROS_REALM: [&str; 1] = ["SMOLDER_KERBEROS_REALM"];
 const ENV_KERBEROS_KDC_URL: [&str; 1] = ["SMOLDER_KERBEROS_KDC_URL"];
 const ENV_PSEXEC_SERVICE_BINARY: [&str; 1] = ["SMOLDER_PSEXEC_SERVICE_BINARY"];
+const INTERACTIVE_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AuthMode {
@@ -571,28 +574,59 @@ pub(super) async fn run_interactive_exec(
     exec: &RemoteExecClient,
     request: ExecRequest,
 ) -> Result<i32, String> {
+    let close_on_exit_command = request.launches_default_shell();
     let session = exec
         .spawn(request)
         .await
         .map_err(|error| error.to_string())?;
     let (mut stdin, mut stdout, mut stderr, waiter) = session.into_parts();
 
-    let stdin_task = async { pump_local_stdin(&mut stdin).await };
-    let stdout_task = async { pump_remote_output(&mut stdout, tokio::io::stdout()).await };
-    let stderr_task = async { pump_remote_output(&mut stderr, tokio::io::stderr()).await };
-    let wait_task = async { waiter.wait().await.map_err(|error| error.to_string()) };
+    let stdin_task =
+        tokio::spawn(async move { pump_local_stdin(&mut stdin, close_on_exit_command).await });
+    let stdout_task =
+        tokio::spawn(async move { pump_remote_output(&mut stdout, tokio::io::stdout()).await });
+    let stderr_task =
+        tokio::spawn(async move { pump_remote_output(&mut stderr, tokio::io::stderr()).await });
 
-    let (stdin_result, stdout_result, stderr_result, exit_result) =
-        tokio::join!(stdin_task, stdout_task, stderr_task, wait_task);
-    stdin_result?;
-    stdout_result?;
-    stderr_result?;
-    exit_result
+    let exit_code = waiter.wait().await.map_err(|error| error.to_string())?;
+    stdin_task.abort();
+
+    match stdin_task.await {
+        Ok(result) => result?,
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => return Err(error.to_string()),
+    }
+
+    wait_for_interactive_output_task(stdout_task).await?;
+    wait_for_interactive_output_task(stderr_task).await?;
+
+    Ok(exit_code)
 }
 
-async fn pump_local_stdin(stdin: &mut InteractiveStdin) -> Result<(), String> {
+async fn wait_for_interactive_output_task(
+    mut task: JoinHandle<Result<(), String>>,
+) -> Result<(), String> {
+    match timeout(INTERACTIVE_OUTPUT_DRAIN_TIMEOUT, &mut task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => {
+            task.abort();
+            match task.await {
+                Ok(result) => result,
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+    }
+}
+
+async fn pump_local_stdin(
+    stdin: &mut InteractiveStdin,
+    close_on_exit_command: bool,
+) -> Result<(), String> {
     let mut local_stdin = tokio::io::stdin();
     let mut buffer = [0_u8; 8192];
+    let mut pending_line = Vec::new();
     loop {
         let count = local_stdin
             .read(&mut buffer)
@@ -601,11 +635,31 @@ async fn pump_local_stdin(stdin: &mut InteractiveStdin) -> Result<(), String> {
         if count == 0 {
             return stdin.close().await.map_err(|error| error.to_string());
         }
+        let saw_exit_command = close_on_exit_command
+            && update_exit_command_state(&mut pending_line, &buffer[..count]);
         stdin
             .write_all(&buffer[..count])
             .await
             .map_err(|error| error.to_string())?;
+        if saw_exit_command {
+            return stdin.close().await.map_err(|error| error.to_string());
+        }
     }
+}
+
+fn update_exit_command_state(pending_line: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    let mut saw_exit_command = false;
+    for &byte in bytes {
+        pending_line.push(byte);
+        if byte == b'\n' {
+            let line = String::from_utf8_lossy(pending_line);
+            if line.trim() == "exit" {
+                saw_exit_command = true;
+            }
+            pending_line.clear();
+        }
+    }
+    saw_exit_command
 }
 
 async fn pump_remote_output<W>(reader: &mut InteractiveReader, mut writer: W) -> Result<(), String>

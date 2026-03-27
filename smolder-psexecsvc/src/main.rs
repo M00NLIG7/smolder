@@ -3,27 +3,40 @@
 #[cfg(windows)]
 mod windows_main {
     use std::ffi::{c_void, OsStr, OsString};
+    use std::fs::File;
     use std::fs::OpenOptions;
-    use std::io;
+    use std::io::{self, Write};
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::ptr;
     use std::sync::OnceLock;
 
     use smolder_psexecsvc::{
-        parse_launch_config, parse_payload_request, run_service_once, PayloadRequest,
+        parse_launch_config, parse_payload_request, run_service_once, PayloadRequest, PipeNames,
+        PipeServiceArgs,
     };
 
     type Bool = i32;
     type Dword = u32;
+    type Handle = *mut c_void;
     type ServiceStatusHandle = *mut c_void;
     type ServiceMainFn = unsafe extern "system" fn(Dword, *mut *mut u16);
     type HandlerExFn = unsafe extern "system" fn(Dword, Dword, *mut c_void, *mut c_void) -> Dword;
 
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
     const NO_ERROR: Dword = 0;
     const ERROR_CALL_NOT_IMPLEMENTED: Dword = 120;
     const ERROR_INVALID_PARAMETER: Dword = 87;
-    const ERROR_NOT_SUPPORTED: Dword = 50;
+    const ERROR_PIPE_CONNECTED: i32 = 535;
+    const PIPE_ACCESS_INBOUND: Dword = 0x0000_0001;
+    const PIPE_ACCESS_OUTBOUND: Dword = 0x0000_0002;
+    const PIPE_TYPE_BYTE: Dword = 0x0000_0000;
+    const PIPE_READMODE_BYTE: Dword = 0x0000_0000;
+    const PIPE_WAIT: Dword = 0x0000_0000;
+    const PIPE_INSTANCE_COUNT: Dword = 1;
+    const PIPE_BUFFER_SIZE: Dword = 8192;
     const SERVICE_WIN32_OWN_PROCESS: Dword = 0x0000_0010;
     const SERVICE_STOPPED: Dword = 0x0000_0001;
     const SERVICE_RUNNING: Dword = 0x0000_0004;
@@ -58,6 +71,22 @@ mod windows_main {
             service_status: *const ServiceStatus,
         ) -> Bool;
         fn StartServiceCtrlDispatcherW(service_table: *const ServiceTableEntryW) -> Bool;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateNamedPipeW(
+            name: *const u16,
+            open_mode: Dword,
+            pipe_mode: Dword,
+            max_instances: Dword,
+            out_buffer_size: Dword,
+            in_buffer_size: Dword,
+            default_timeout: Dword,
+            security_attributes: *mut c_void,
+        ) -> Handle;
+        fn ConnectNamedPipe(handle: Handle, overlapped: *mut c_void) -> Bool;
+        fn FlushFileBuffers(handle: Handle) -> Bool;
     }
 
     #[derive(Debug, Clone)]
@@ -206,9 +235,21 @@ mod windows_main {
                     error_code(&error)
                 }
             },
-            Ok(PayloadRequest::Pipe(_)) => {
-                append_debug_log(debug_log_path, "pipe mode is not supported");
-                ERROR_NOT_SUPPORTED
+            Ok(PayloadRequest::Pipe(args)) => match run_pipe_service(debug_log_path, &args) {
+                Ok(exit_code) => {
+                    append_debug_log(
+                        debug_log_path,
+                        &format!("run_pipe_service exit={exit_code}"),
+                    );
+                    exit_code
+                }
+                Err(error) => {
+                    append_debug_log(
+                        debug_log_path,
+                        &format!("run_pipe_service failed: {error:?}"),
+                    );
+                    error_code(&error)
+                }
             }
             Err(error) => {
                 append_debug_log(
@@ -218,6 +259,50 @@ mod windows_main {
                 ERROR_INVALID_PARAMETER
             }
         }
+    }
+
+    fn run_pipe_service(
+        debug_log_path: Option<&Path>,
+        args: &PipeServiceArgs,
+    ) -> io::Result<u32> {
+        let pipes = PipeNames::new(&args.pipe_prefix);
+        append_debug_log(
+            debug_log_path,
+            &format!("creating pipe set for prefix={}", args.pipe_prefix),
+        );
+
+        let stdin_pipe = create_named_pipe(OsStr::new(&pipes.stdin), PIPE_ACCESS_INBOUND)?;
+        let stdout_pipe = create_named_pipe(OsStr::new(&pipes.stdout), PIPE_ACCESS_OUTBOUND)?;
+        let stderr_pipe = create_named_pipe(OsStr::new(&pipes.stderr), PIPE_ACCESS_OUTBOUND)?;
+        let mut control_pipe = create_named_pipe(OsStr::new(&pipes.control), PIPE_ACCESS_OUTBOUND)?;
+
+        connect_named_pipe(&stdin_pipe)?;
+        connect_named_pipe(&stdout_pipe)?;
+        connect_named_pipe(&stderr_pipe)?;
+        connect_named_pipe(&control_pipe)?;
+        append_debug_log(debug_log_path, "interactive pipes connected");
+
+        let mut command = interactive_child_command(args);
+        command
+            .stdin(Stdio::from(stdin_pipe))
+            .stdout(Stdio::from(stdout_pipe))
+            .stderr(Stdio::from(stderr_pipe));
+        if let Some(working_directory) = &args.working_directory {
+            command.current_dir(working_directory);
+        }
+
+        let mut child = command.spawn()?;
+        append_debug_log(debug_log_path, "interactive child spawned");
+        write_control_line(&mut control_pipe, "READY")?;
+
+        let status = child.wait()?;
+        let exit_code = status.code().unwrap_or(1);
+        append_debug_log(
+            debug_log_path,
+            &format!("interactive child exited with code={exit_code}"),
+        );
+        write_control_line(&mut control_pipe, &format!("EXIT {exit_code}"))?;
+        Ok(exit_code as u32)
     }
 
     unsafe extern "system" fn service_control_handler(
@@ -271,6 +356,57 @@ mod windows_main {
 
     fn wide_null(value: &OsStr) -> Vec<u16> {
         value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn create_named_pipe(name: &OsStr, open_mode: Dword) -> io::Result<File> {
+        let name = wide_null(name);
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                open_mode,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_INSTANCE_COUNT,
+                PIPE_BUFFER_SIZE,
+                PIPE_BUFFER_SIZE,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    fn connect_named_pipe(pipe: &File) -> io::Result<()> {
+        if unsafe { ConnectNamedPipe(pipe.as_raw_handle() as Handle, ptr::null_mut()) } == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_PIPE_CONNECTED) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn write_control_line(control_pipe: &mut File, line: &str) -> io::Result<()> {
+        control_pipe.write_all(line.as_bytes())?;
+        control_pipe.write_all(b"\n")?;
+        control_pipe.flush()?;
+        if unsafe { FlushFileBuffers(control_pipe.as_raw_handle() as Handle) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn interactive_child_command(args: &PipeServiceArgs) -> Command {
+        let mut command =
+            Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe")));
+        command.arg("/Q");
+        if let Some(command_text) = &args.command {
+            command.arg("/C").arg(command_text);
+        }
+        command
     }
 
     fn invalid_parameter_error() -> io::Error {
