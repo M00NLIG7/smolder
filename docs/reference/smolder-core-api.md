@@ -61,7 +61,9 @@ The current direction for `0.1.x` is:
 For Kerberos specifically:
 
 - `kerberos` is the umbrella feature consumers should enable
-- the current implementation path underneath that umbrella is `kerberos-sspi`
+- `kerberos-sspi` remains the default password-backed backend
+- `kerberos-gssapi` adds a Unix ticket-cache backend without changing the
+  top-level `KerberosCredentials` / `KerberosAuthenticator` API
 - backend-specific capability expansion should happen behind the stable
   `KerberosCredentials` / `KerberosAuthenticator` surface rather than by
   replacing those top-level types

@@ -6,3 +6,6 @@ members = [
     "smolder-proto",
     "smolder-tools",
 ]
+
+[patch.crates-io]
+kenobi-unix = { path = "vendor/kenobi-unix" }

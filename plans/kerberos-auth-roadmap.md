@@ -152,11 +152,13 @@ Current status note:
 
 - the current implementation behind `kerberos` is `sspi`-backed and
   password-oriented
+- `kerberos-gssapi` now adds a Unix ticket-cache backend behind the same
+  public `KerberosCredentials` / `KerberosAuthenticator` surface
 - the vendored `sspi` `0.19.2` path used by Smolder requires outbound auth data
   and does not expose a clean ticket-cache/keytab flow through the current
   integration shape
-- that means ticket-cache and keytab support should be treated as a backend
-  expansion milestone, not a small extension to `KerberosCredentials`
+- that means keytab support should still be treated as a backend/credential
+  store expansion milestone, not a small extension to `KerberosCredentials`
 
 ### Client Integration
 

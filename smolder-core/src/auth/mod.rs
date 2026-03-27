@@ -2,6 +2,8 @@
 
 #[cfg(feature = "kerberos")]
 mod kerberos;
+#[cfg(all(unix, feature = "kerberos-gssapi"))]
+mod kerberos_gssapi;
 #[cfg(feature = "kerberos-sspi")]
 mod kerberos_sspi;
 #[cfg(feature = "kerberos")]

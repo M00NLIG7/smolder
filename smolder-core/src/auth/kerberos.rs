@@ -10,6 +10,8 @@ use std::marker::PhantomData;
 
 use smolder_proto::smb::smb2::NegotiateResponse;
 
+#[cfg(all(unix, feature = "kerberos-gssapi"))]
+use super::kerberos_gssapi::GssapiTicketCacheKerberosBackend;
 #[cfg(feature = "kerberos-sspi")]
 use super::kerberos_sspi::SspiNegotiateKerberosBackend;
 use super::kerberos_spn::KerberosTarget;
@@ -21,6 +23,9 @@ use super::{AuthError, AuthProvider, SpnegoMechanism};
 /// Backend implementation used to satisfy a Kerberos SMB authentication request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KerberosBackendKind {
+    /// Unix GSSAPI-backed Kerberos backend using the local ticket cache.
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    Gssapi,
     /// `sspi`-based Kerberos backend.
     #[cfg(feature = "kerberos-sspi")]
     Sspi,
@@ -31,6 +36,9 @@ pub enum KerberosBackendKind {
 pub enum KerberosCredentialSourceKind {
     /// Username/password-backed Kerberos credentials.
     Password,
+    /// Ticket-cache-backed Kerberos credentials.
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    TicketCache,
 }
 
 /// Kerberos credentials and backend selection for SMB authentication.
@@ -42,6 +50,7 @@ pub struct KerberosCredentials {
     workstation: String,
     kdc_url: Option<String>,
     backend: KerberosBackendKind,
+    source_kind: KerberosCredentialSourceKind,
 }
 
 impl fmt::Debug for KerberosCredentials {
@@ -53,7 +62,7 @@ impl fmt::Debug for KerberosCredentials {
             .field("workstation", &self.workstation)
             .field("kdc_url", &self.kdc_url)
             .field("backend", &self.backend)
-            .field("source_kind", &self.credential_source_kind())
+            .field("source_kind", &self.source_kind)
             .finish()
     }
 }
@@ -73,7 +82,34 @@ impl KerberosCredentials {
             workstation: "smolder".to_owned(),
             kdc_url: None,
             backend: default_backend_kind(),
+            source_kind: KerberosCredentialSourceKind::Password,
         }
+    }
+
+    /// Creates Kerberos credentials that use the default Unix ticket cache.
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    pub fn from_default_ticket_cache() -> Self {
+        Self {
+            username: String::new(),
+            password: String::new(),
+            domain: String::new(),
+            workstation: "smolder".to_owned(),
+            kdc_url: None,
+            backend: KerberosBackendKind::Gssapi,
+            source_kind: KerberosCredentialSourceKind::TicketCache,
+        }
+    }
+
+    /// Creates Kerberos credentials that use a specific principal from the Unix ticket cache.
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    pub fn from_ticket_cache(username: impl Into<String>) -> Self {
+        Self::from_default_ticket_cache().with_username(username)
+    }
+
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    fn with_username(mut self, username: impl Into<String>) -> Self {
+        self.username = username.into();
+        self
     }
 
     /// Sets the Kerberos domain used to build the client principal.
@@ -109,7 +145,28 @@ impl KerberosCredentials {
     /// Returns the credential source carried by this credential set.
     #[must_use]
     pub fn credential_source_kind(&self) -> KerberosCredentialSourceKind {
-        KerberosCredentialSourceKind::Password
+        self.source_kind
+    }
+
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    pub(super) fn initiator_principal(&self) -> Result<Option<String>, AuthError> {
+        let username = self.username.trim();
+        let domain = self.domain.trim();
+        if username.is_empty() {
+            return Ok(None);
+        }
+
+        if !domain.is_empty() && (username.contains('@') || username.contains('\\')) {
+            return Err(AuthError::InvalidState(
+                "kerberos username/domain combination must be a bare account name, UPN, or down-level logon name",
+            ));
+        }
+
+        if username.contains('@') || username.contains('\\') || domain.is_empty() {
+            Ok(Some(self.username.clone()))
+        } else {
+            Ok(Some(format!("{}@{}", self.username, self.domain)))
+        }
     }
 
     fn username(&self) -> Result<sspi::Username, AuthError> {
@@ -149,6 +206,8 @@ fn default_backend_kind() -> KerberosBackendKind {
 }
 
 enum KerberosAuthenticatorInner {
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    Gssapi(KerberosAuthEngine<GssapiTicketCacheKerberosBackend>),
     #[cfg(feature = "kerberos-sspi")]
     Sspi(KerberosAuthEngine<SspiNegotiateKerberosBackend>),
 }
@@ -162,6 +221,10 @@ impl KerberosAuthenticator {
     /// Creates a Kerberos authenticator using the provided credentials and SMB target.
     pub fn new(credentials: KerberosCredentials, target: KerberosTarget) -> Self {
         let inner = match credentials.backend_kind() {
+            #[cfg(all(unix, feature = "kerberos-gssapi"))]
+            KerberosBackendKind::Gssapi => {
+                KerberosAuthenticatorInner::Gssapi(KerberosAuthEngine::new(credentials, target))
+            }
             #[cfg(feature = "kerberos-sspi")]
             KerberosBackendKind::Sspi => {
                 KerberosAuthenticatorInner::Sspi(KerberosAuthEngine::new(credentials, target))
@@ -173,6 +236,8 @@ impl KerberosAuthenticator {
     /// Returns the SMB Kerberos target for this exchange.
     pub fn target(&self) -> &KerberosTarget {
         match &self.inner {
+            #[cfg(all(unix, feature = "kerberos-gssapi"))]
+            KerberosAuthenticatorInner::Gssapi(inner) => &inner.target,
             #[cfg(feature = "kerberos-sspi")]
             KerberosAuthenticatorInner::Sspi(inner) => &inner.target,
         }
@@ -181,6 +246,8 @@ impl KerberosAuthenticator {
     /// Returns the credentials used for this exchange.
     pub fn credentials(&self) -> &KerberosCredentials {
         match &self.inner {
+            #[cfg(all(unix, feature = "kerberos-gssapi"))]
+            KerberosAuthenticatorInner::Gssapi(inner) => &inner.credentials,
             #[cfg(feature = "kerberos-sspi")]
             KerberosAuthenticatorInner::Sspi(inner) => &inner.credentials,
         }
@@ -196,6 +263,8 @@ impl KerberosAuthenticator {
 impl AuthProvider for KerberosAuthenticator {
     fn initial_token(&mut self, negotiate: &NegotiateResponse) -> Result<Vec<u8>, AuthError> {
         match &mut self.inner {
+            #[cfg(all(unix, feature = "kerberos-gssapi"))]
+            KerberosAuthenticatorInner::Gssapi(inner) => inner.initial_token(negotiate),
             #[cfg(feature = "kerberos-sspi")]
             KerberosAuthenticatorInner::Sspi(inner) => inner.initial_token(negotiate),
         }
@@ -203,6 +272,8 @@ impl AuthProvider for KerberosAuthenticator {
 
     fn next_token(&mut self, incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
         match &mut self.inner {
+            #[cfg(all(unix, feature = "kerberos-gssapi"))]
+            KerberosAuthenticatorInner::Gssapi(inner) => inner.next_token(incoming),
             #[cfg(feature = "kerberos-sspi")]
             KerberosAuthenticatorInner::Sspi(inner) => inner.next_token(incoming),
         }
@@ -210,6 +281,8 @@ impl AuthProvider for KerberosAuthenticator {
 
     fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
         match &mut self.inner {
+            #[cfg(all(unix, feature = "kerberos-gssapi"))]
+            KerberosAuthenticatorInner::Gssapi(inner) => inner.finish(incoming),
             #[cfg(feature = "kerberos-sspi")]
             KerberosAuthenticatorInner::Sspi(inner) => inner.finish(incoming),
         }
@@ -217,6 +290,8 @@ impl AuthProvider for KerberosAuthenticator {
 
     fn session_key(&self) -> Option<&[u8]> {
         match &self.inner {
+            #[cfg(all(unix, feature = "kerberos-gssapi"))]
+            KerberosAuthenticatorInner::Gssapi(inner) => inner.session_key(),
             #[cfg(feature = "kerberos-sspi")]
             KerberosAuthenticatorInner::Sspi(inner) => inner.session_key(),
         }
@@ -541,6 +616,37 @@ mod tests {
         assert_eq!(
             credentials.credential_source_kind(),
             KerberosCredentialSourceKind::Password
+        );
+    }
+
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    #[test]
+    fn ticket_cache_credentials_select_gssapi_backend() {
+        let credentials = KerberosCredentials::from_ticket_cache("alice").with_domain("EXAMPLE.COM");
+
+        assert_eq!(credentials.backend_kind(), KerberosBackendKind::Gssapi);
+        assert_eq!(
+            credentials.credential_source_kind(),
+            KerberosCredentialSourceKind::TicketCache
+        );
+        assert_eq!(
+            credentials
+                .initiator_principal()
+                .expect("principal should derive"),
+            Some("alice@EXAMPLE.COM".to_owned())
+        );
+    }
+
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    #[test]
+    fn default_ticket_cache_credentials_use_default_principal() {
+        let credentials = KerberosCredentials::from_default_ticket_cache();
+
+        assert_eq!(
+            credentials
+                .initiator_principal()
+                .expect("default cache should allow an unspecified principal"),
+            None
         );
     }
 

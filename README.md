@@ -61,7 +61,7 @@ Validated now:
 
 Still in progress on this track:
 
-- Broader Kerberos credential sources like ticket cache and keytab
+- Broader Kerberos credential sources like keytab-based acquisition
 - SMB1 compatibility
 - Fully automated Windows CI; the Tiny11 gate is still manual/self-hosted
 - Full Samba `selftest` parity
@@ -70,13 +70,11 @@ Still in progress on this track:
 
 - Kerberos in `smolder-core` is now in active implementation behind the
   `kerberos` feature. The current slice covers mechanism-aware SPNEGO, a
-  password-backed Kerberos authenticator that exports the SMB session key, and
-  live Samba AD plus Windows domain-member interop in both core and
-  Kerberos-enabled tools workflows, including `smbexec` and `psexec`. The
-  remaining track is broader credential sources like ticket-cache and keytab.
-  The current backend is still `sspi`-based and password-oriented, so those
-  sources will require an additional backend/capability layer rather than a
-  small builder tweak.
+  password-backed Kerberos authenticator that exports the SMB session key,
+  plus a Unix ticket-cache backend behind `kerberos-gssapi`, and live Samba AD
+  plus Windows domain-member interop in both core and Kerberos-enabled tools
+  workflows, including `smbexec` and `psexec`. The remaining credential-source
+  gap is keytab-based acquisition.
   The scoped plan is in
   [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md).
   The Samba AD fixture and Windows member flow are documented in

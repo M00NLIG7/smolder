@@ -1,0 +1,15 @@
+[package]
+name = "kenobi-unix"
+version = "0.2.0"
+description = "Negotiate/Kerberos client library built on libgssapi-sys"
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+kenobi-core = { version = "0.2", path = "../kenobi-core" }
+libgssapi-sys = "0.3.3"
+
+[features]
+native-tls = ["kenobi-core/native-tls"]
