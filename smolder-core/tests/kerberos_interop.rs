@@ -35,6 +35,8 @@ fn negotiate_request() -> NegotiateRequest {
 struct KerberosConfig {
     host: String,
     port: u16,
+    target_host: String,
+    target_principal: Option<String>,
     username: String,
     password: String,
     share: String,
@@ -51,6 +53,9 @@ impl KerberosConfig {
             port: required_env("SMOLDER_KERBEROS_PORT")
                 .and_then(|value| value.parse::<u16>().ok())
                 .unwrap_or(445),
+            target_host: required_env("SMOLDER_KERBEROS_TARGET_HOST")
+                .or_else(|| required_env("SMOLDER_KERBEROS_HOST"))?,
+            target_principal: required_env("SMOLDER_KERBEROS_TARGET_PRINCIPAL"),
             username: required_env("SMOLDER_KERBEROS_USERNAME")?,
             password: required_env("SMOLDER_KERBEROS_PASSWORD")?,
             share: required_env("SMOLDER_KERBEROS_SHARE").unwrap_or_else(|| "IPC$".to_owned()),
@@ -91,8 +96,10 @@ async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
         credentials = credentials.with_kdc_url(kdc_url);
     }
 
-    let mut target = KerberosTarget::for_smb_host(config.host.clone());
-    if let Some(realm) = config.realm {
+    let mut target = KerberosTarget::for_smb_host(config.target_host.clone());
+    if let Some(principal) = config.target_principal {
+        target = target.with_principal(principal);
+    } else if let Some(realm) = config.realm {
         target = target.with_realm(realm);
     }
 
@@ -106,7 +113,7 @@ async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
         "Kerberos auth should export an SMB session key"
     );
 
-    let unc = format!(r"\\{}\{}", config.host, config.share);
+    let unc = format!(r"\\{}\{}", config.target_host, config.share);
     let connection = connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
         .await

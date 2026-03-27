@@ -20,6 +20,8 @@
 //! - `SMOLDER_KERBEROS_WORKSTATION`
 //! - `SMOLDER_KERBEROS_REALM`
 //! - `SMOLDER_KERBEROS_KDC_URL`
+//! - `SMOLDER_KERBEROS_TARGET_HOST`
+//! - `SMOLDER_KERBEROS_TARGET_PRINCIPAL`
 
 use smolder_core::prelude::{
     Connection, KerberosAuthenticator, KerberosCredentials, KerberosTarget, TokioTcpTransport,
@@ -68,6 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(445);
     let share = optional_env("SMOLDER_KERBEROS_SHARE").unwrap_or_else(|| "IPC$".to_owned());
+    let target_host =
+        optional_env("SMOLDER_KERBEROS_TARGET_HOST").unwrap_or_else(|| host.clone());
     let username = required_env("SMOLDER_KERBEROS_USERNAME")?;
     let password = required_env("SMOLDER_KERBEROS_PASSWORD")?;
 
@@ -82,8 +86,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         credentials = credentials.with_kdc_url(kdc_url);
     }
 
-    let mut target = KerberosTarget::for_smb_host(host.clone());
-    if let Some(realm) = optional_env("SMOLDER_KERBEROS_REALM") {
+    let mut target = KerberosTarget::for_smb_host(target_host.clone());
+    if let Some(principal) = optional_env("SMOLDER_KERBEROS_TARGET_PRINCIPAL") {
+        target = target.with_principal(principal);
+    } else if let Some(realm) = optional_env("SMOLDER_KERBEROS_REALM") {
         target = target.with_realm(realm);
     }
 
@@ -94,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut auth = KerberosAuthenticator::new(credentials, target);
     let connection = connection.authenticate(&mut auth).await?;
 
-    let unc = format!(r"\\{}\{}", host, share);
+    let unc = format!(r"\\{}\{}", target_host, share);
     let connection = connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
         .await?;

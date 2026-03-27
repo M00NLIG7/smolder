@@ -1,0 +1,59 @@
+services:
+  dc1:
+    build:
+      context: ./dc
+    container_name: smolder-samba-ad-dc
+    hostname: dc1
+    domainname: lab.example
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      REALM: LAB.EXAMPLE
+      DOMAIN: LAB
+      ADMIN_PASSWORD: Passw0rd!
+      TEST_USER: smolder
+      TEST_PASSWORD: Passw0rd!
+    networks:
+      adnet:
+        ipv4_address: 10.42.0.10
+        aliases:
+          - dc1.lab.example
+    ports:
+      - "1088:88/tcp"
+      - "1088:88/udp"
+      - "1464:464/tcp"
+      - "1464:464/udp"
+
+  files1:
+    build:
+      context: ./member
+    container_name: smolder-samba-ad-member
+    hostname: files1
+    domainname: lab.example
+    depends_on:
+      - dc1
+    environment:
+      REALM: LAB.EXAMPLE
+      DOMAIN: LAB
+      ADMIN_PASSWORD: Passw0rd!
+      DC_FQDN: dc1.lab.example
+      TEST_SHARE: share
+      TEST_USER: smolder
+    networks:
+      adnet:
+        ipv4_address: 10.42.0.20
+        aliases:
+          - files1.lab.example
+    dns:
+      - 10.42.0.10
+    ports:
+      - "2445:445"
+    volumes:
+      - ./member/share:/srv/share
+
+networks:
+  adnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.42.0.0/24

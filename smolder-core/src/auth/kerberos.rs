@@ -4,7 +4,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use smolder_proto::smb::smb2::NegotiateResponse;
-use sspi::{Sspi, SspiImpl};
+use sspi::{KerberosConfig, Negotiate, NegotiateConfig, Sspi, SspiImpl};
 
 use super::kerberos_spn::KerberosTarget;
 use super::spnego::{
@@ -101,7 +101,7 @@ impl KerberosCredentials {
 
 /// Kerberos `AuthProvider` backed by password-based credentials.
 pub struct KerberosAuthenticator {
-    inner: KerberosAuthEngine<SspiKerberosBackend>,
+    inner: KerberosAuthEngine<SspiNegotiateKerberosBackend>,
 }
 
 impl KerberosAuthenticator {
@@ -154,6 +154,8 @@ enum KerberosStep<P, C> {
 }
 
 trait KerberosBackend {
+    const SPNEGO_WRAPPED: bool;
+
     type Pending;
     type Context;
 
@@ -167,6 +169,10 @@ trait KerberosBackend {
         incoming: &[u8],
         target: &KerberosTarget,
     ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError>;
+
+    fn interim_session_key(_pending: &Self::Pending) -> Result<Option<Vec<u8>>, AuthError> {
+        Ok(None)
+    }
 
     fn session_key(context: &Self::Context) -> Result<Vec<u8>, AuthError>;
 }
@@ -201,11 +207,16 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
 
         match B::initiate(&self.credentials, &self.target)? {
             KerberosStep::Continue { pending, token } => {
+                self.session_key = B::interim_session_key(&pending)?;
                 self.state = KerberosState::Pending(pending);
-                Ok(encode_neg_token_init(
-                    &[SpnegoMechanism::KerberosV5],
-                    Some(&token),
-                ))
+                if B::SPNEGO_WRAPPED {
+                    Ok(token)
+                } else {
+                    Ok(encode_neg_token_init(
+                        &[SpnegoMechanism::KerberosV5],
+                        Some(&token),
+                    ))
+                }
             }
             KerberosStep::Finished { context, token } => {
                 let token = token.ok_or(AuthError::InvalidState(
@@ -213,10 +224,14 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                 ))?;
                 self.session_key = Some(B::session_key(&context)?);
                 self.state = KerberosState::Established(context);
-                Ok(encode_neg_token_init(
-                    &[SpnegoMechanism::KerberosV5],
-                    Some(&token),
-                ))
+                if B::SPNEGO_WRAPPED {
+                    Ok(token)
+                } else {
+                    Ok(encode_neg_token_init(
+                        &[SpnegoMechanism::KerberosV5],
+                        Some(&token),
+                    ))
+                }
             }
         }
     }
@@ -243,18 +258,36 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
             }
         };
 
-        let server_token = extract_mech_token(incoming)?;
+        let server_token = if B::SPNEGO_WRAPPED {
+            incoming.to_vec()
+        } else {
+            match extract_mech_token(incoming) {
+                Ok(token) => token,
+                Err(AuthError::InvalidToken("SPNEGO response token missing"))
+                | Err(AuthError::InvalidToken("SPNEGO mech token missing")) => Vec::new(),
+                Err(error) => return Err(error),
+            }
+        };
         match B::step(pending, &server_token, &self.target)? {
             KerberosStep::Continue { pending, token } => {
+                self.session_key = B::interim_session_key(&pending)?;
                 self.state = KerberosState::Pending(pending);
-                Ok(encode_neg_token_resp(None, Some(&token), None))
+                if B::SPNEGO_WRAPPED {
+                    Ok(token)
+                } else {
+                    Ok(encode_neg_token_resp(None, Some(&token), None))
+                }
             }
             KerberosStep::Finished { context, token } => {
                 self.session_key = Some(B::session_key(&context)?);
                 self.state = KerberosState::Established(context);
-                Ok(token
-                    .map(|token| encode_neg_token_resp(None, Some(&token), None))
-                    .unwrap_or_default())
+                if B::SPNEGO_WRAPPED {
+                    Ok(token.unwrap_or_default())
+                } else {
+                    Ok(token
+                        .map(|token| encode_neg_token_resp(None, Some(&token), None))
+                        .unwrap_or_default())
+                }
             }
         }
     }
@@ -275,7 +308,11 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                     ));
                 }
 
-                let server_token = extract_mech_token(incoming)?;
+                let server_token = if B::SPNEGO_WRAPPED {
+                    incoming.to_vec()
+                } else {
+                    extract_mech_token(incoming)?
+                };
                 match B::step(pending, &server_token, &self.target)? {
                     KerberosStep::Finished { context, token: None } => {
                         self.session_key = Some(B::session_key(&context)?);
@@ -295,12 +332,14 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                     return Ok(());
                 }
 
-                let parsed = parse_neg_token_resp(incoming)?;
-                if parsed.response_token.is_some() {
-                    self.state = KerberosState::Established(context);
-                    return Err(AuthError::InvalidToken(
-                        "unexpected kerberos response token after context establishment",
-                    ));
+                if !B::SPNEGO_WRAPPED {
+                    let parsed = parse_neg_token_resp(incoming)?;
+                    if parsed.response_token.is_some() {
+                        self.state = KerberosState::Established(context);
+                        return Err(AuthError::InvalidToken(
+                            "unexpected kerberos response token after context establishment",
+                        ));
+                    }
                 }
 
                 self.state = KerberosState::Established(context);
@@ -315,38 +354,66 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
     }
 }
 
-struct SspiKerberosBackend;
+struct SspiNegotiateKerberosBackend;
 
 struct SspiKerberosContext {
-    kerberos: sspi::Kerberos,
-    credentials_handle: Option<sspi::CredentialsBuffers>,
+    negotiate: Negotiate,
+    credentials_handle: <Negotiate as SspiImpl>::CredentialsHandle,
 }
 
 impl SspiKerberosContext {
     fn new(credentials: &KerberosCredentials) -> Result<Self, AuthError> {
-        let config = if let Some(kdc_url) = credentials.kdc_url() {
-            sspi::KerberosConfig::new(kdc_url, credentials.client_computer_name().to_owned())
+        let kerberos_config = if let Some(kdc_url) = credentials.kdc_url() {
+            KerberosConfig::new(kdc_url, credentials.client_computer_name().to_owned())
         } else {
-            sspi::KerberosConfig {
+            KerberosConfig {
                 kdc_url: None,
                 client_computer_name: credentials.client_computer_name().to_owned(),
             }
         };
-        let mut kerberos = sspi::Kerberos::new_client_from_config(config)
+        let mut negotiate = Negotiate::new_client(NegotiateConfig::new(
+            Box::new(kerberos_config),
+            Some("kerberos,!ntlm,!pku2u".to_owned()),
+            credentials.client_computer_name().to_owned(),
+        ))
             .map_err(|error| AuthError::Backend(error.to_string()))?;
         let auth_data = sspi::Credentials::from(credentials.auth_identity()?);
-        let credentials_handle = kerberos
+        let credentials_handle = negotiate
             .acquire_credentials_handle()
             .with_credential_use(sspi::CredentialUse::Outbound)
             .with_auth_data(&auth_data)
-            .execute(&mut kerberos)
+            .execute(&mut negotiate)
             .map_err(|error| AuthError::Backend(error.to_string()))?
             .credentials_handle;
 
         Ok(Self {
-            kerberos,
+            negotiate,
             credentials_handle,
         })
+    }
+
+    fn target_name(target: &KerberosTarget) -> Result<String, AuthError> {
+        if let Some(principal) = target.explicit_principal() {
+            if principal.trim().is_empty() {
+                return Err(AuthError::InvalidState(
+                    "kerberos principal override must not be empty",
+                ));
+            }
+            return Ok(principal.to_owned());
+        }
+
+        if target.service().trim().is_empty() {
+            return Err(AuthError::InvalidState(
+                "kerberos service component must not be empty",
+            ));
+        }
+        if target.host().trim().is_empty() {
+            return Err(AuthError::InvalidState(
+                "kerberos target host must not be empty",
+            ));
+        }
+
+        Ok(format!("{}/{}", target.service(), target.host()))
     }
 
     fn step(
@@ -354,29 +421,25 @@ impl SspiKerberosContext {
         target: &KerberosTarget,
         incoming: Option<&[u8]>,
     ) -> Result<(sspi::SecurityStatus, Vec<u8>), AuthError> {
-        let target_name = target.service_principal_name()?;
+        let target_name = Self::target_name(target)?;
         let mut output = [sspi::SecurityBuffer::new(Vec::new(), sspi::BufferType::Token)];
-        let mut input = incoming.map(|token| {
-            [sspi::SecurityBuffer::new(
-                token.to_vec(),
-                sspi::BufferType::Token,
-            )]
-        });
+        let mut input = [sspi::SecurityBuffer::new(
+            incoming.unwrap_or_default().to_vec(),
+            sspi::BufferType::Token,
+        )];
 
         let mut builder = self
-            .kerberos
+            .negotiate
             .initialize_security_context()
             .with_credentials_handle(&mut self.credentials_handle)
             .with_context_requirements(client_request_flags())
             .with_target_data_representation(sspi::DataRepresentation::Native)
             .with_target_name(&target_name)
+            .with_input(&mut input)
             .with_output(&mut output);
-        if let Some(ref mut input) = input {
-            builder = builder.with_input(input);
-        }
 
         let result = self
-            .kerberos
+            .negotiate
             .initialize_security_context_impl(&mut builder)
             .map_err(|error| AuthError::Backend(error.to_string()))?
             .resolve_with_default_network_client()
@@ -387,7 +450,9 @@ impl SspiKerberosContext {
     }
 }
 
-impl KerberosBackend for SspiKerberosBackend {
+impl KerberosBackend for SspiNegotiateKerberosBackend {
+    const SPNEGO_WRAPPED: bool = true;
+
     type Pending = SspiKerberosContext;
     type Context = SspiKerberosContext;
 
@@ -398,15 +463,16 @@ impl KerberosBackend for SspiKerberosBackend {
         let mut context = SspiKerberosContext::new(credentials)?;
         let (status, token) = context.step(target, None)?;
         match status {
-            sspi::SecurityStatus::ContinueNeeded => {
-                Ok(KerberosStep::Continue { pending: context, token })
-            }
+            sspi::SecurityStatus::ContinueNeeded => Ok(KerberosStep::Continue {
+                pending: context,
+                token,
+            }),
             sspi::SecurityStatus::Ok => Ok(KerberosStep::Finished {
                 context,
                 token: Some(token),
             }),
             status => Err(AuthError::Backend(format!(
-                "kerberos backend returned unexpected initial status {status:?}",
+                "kerberos negotiate backend returned unexpected initial status {status:?}",
             ))),
         }
     }
@@ -433,18 +499,18 @@ impl KerberosBackend for SspiKerberosBackend {
 
     fn session_key(context: &Self::Context) -> Result<Vec<u8>, AuthError> {
         let keys = context
-            .kerberos
+            .negotiate
             .query_context_session_key()
             .map_err(|error| AuthError::Backend(error.to_string()))?;
         Ok(keys.session_key.as_ref().to_vec())
     }
+
 }
 
 fn client_request_flags() -> sspi::ClientRequestFlags {
     sspi::ClientRequestFlags::MUTUAL_AUTH
         | sspi::ClientRequestFlags::INTEGRITY
         | sspi::ClientRequestFlags::FRAGMENT_TO_FIT
-        | sspi::ClientRequestFlags::USE_SESSION_KEY
 }
 
 #[cfg(test)]
@@ -466,6 +532,8 @@ mod tests {
     struct MockContext;
 
     impl KerberosBackend for MockBackend {
+        const SPNEGO_WRAPPED: bool = false;
+
         type Pending = MockPending;
         type Context = MockContext;
 

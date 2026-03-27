@@ -663,20 +663,17 @@ where
 
             session_id = header.session_id;
             if success {
-                let session_key = auth_provider.session_key().map(ToOwned::to_owned);
+                let raw_response_session_key = auth_provider.session_key().map(ToOwned::to_owned);
+                let response_session_key =
+                    derive_smb_session_key(raw_response_session_key.as_deref());
                 let signing_required = session_signing_required(
                     client_signing_mode,
                     self.state.response.security_mode,
                     response.session_flags,
                 );
-                let signing = derive_signing_state(
+                let response_signing = derive_signing_state(
                     self.state.response.dialect_revision,
-                    session_key.as_deref(),
-                    preauth_integrity.as_ref(),
-                )?;
-                let encryption = derive_encryption_state(
-                    &self.state.response,
-                    session_key.as_deref(),
+                    response_session_key.as_deref(),
                     preauth_integrity.as_ref(),
                 )?;
                 verify_final_session_setup_response(
@@ -684,9 +681,21 @@ where
                     &header,
                     &transaction.response_packet,
                     signing_required,
-                    signing.as_deref(),
+                    response_signing.as_deref(),
                 )?;
                 auth_provider.finish(&response.security_buffer)?;
+                let raw_session_key = auth_provider.session_key().map(ToOwned::to_owned);
+                let session_key = derive_smb_session_key(raw_session_key.as_deref());
+                let signing = derive_signing_state(
+                    self.state.response.dialect_revision,
+                    session_key.as_deref(),
+                    preauth_integrity.as_ref(),
+                )?;
+                let encryption = derive_encryption_state(
+                    &self.state.response,
+                    raw_session_key.as_deref(),
+                    preauth_integrity.as_ref(),
+                )?;
                 let Connection {
                     transport,
                     next_message_id,
@@ -2075,6 +2084,15 @@ fn derive_signing_state(
     Ok(Some(Arc::new(signing)))
 }
 
+fn derive_smb_session_key(session_key: Option<&[u8]>) -> Option<Vec<u8>> {
+    let session_key = session_key?;
+    let mut smb_session_key = session_key[..session_key.len().min(16)].to_vec();
+    if smb_session_key.len() < 16 {
+        smb_session_key.resize(16, 0);
+    }
+    Some(smb_session_key)
+}
+
 fn derive_encryption_state(
     negotiated: &NegotiateResponse,
     session_key: Option<&[u8]>,
@@ -2086,11 +2104,16 @@ fn derive_encryption_state(
     let Some(cipher) = negotiated_cipher(negotiated)? else {
         return Ok(None);
     };
+    let key_material = match cipher {
+        CipherId::Aes256Ccm | CipherId::Aes256Gcm => session_key.to_vec(),
+        _ => derive_smb_session_key(Some(session_key))
+            .ok_or(CoreError::InvalidInput("missing SMB session key"))?,
+    };
 
     let keys = derive_encryption_keys(
         negotiated.dialect_revision,
         cipher,
-        session_key,
+        &key_material,
         None,
         preauth_integrity.map(|state| state.hash_value.as_slice()),
     )?;
@@ -2508,6 +2531,20 @@ mod tests {
         )
         .expect("SMB 3.0.2 encryption keys should derive");
         Arc::new(EncryptionState::new(Dialect::Smb302, keys))
+    }
+
+    #[test]
+    fn smb_session_key_uses_first_16_bytes_and_zero_pads_short_keys() {
+        let full_key: Vec<u8> = (0u8..32).collect();
+        assert_eq!(
+            super::derive_smb_session_key(Some(&full_key)),
+            Some((0u8..16).collect())
+        );
+
+        assert_eq!(
+            super::derive_smb_session_key(Some(&[0x41, 0x42, 0x43])),
+            Some(vec![0x41, 0x42, 0x43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        );
     }
 
     fn peer_encryption_state(state: &EncryptionState) -> EncryptionState {
