@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-kerberos = ["dep:cross-krb5"]
+kerberos = ["dep:sspi"]
 
 [dependencies]
 aes = "0.8"
@@ -27,13 +27,13 @@ bitflags = "2"
 bytes = "1"
 ccm = "0.5"
 cmac = "0.7"
-cross-krb5 = { version = "0.4.2", optional = true, default-features = false }
 hmac = "0.12"
 md-5 = "0.10"
 md4 = "0.10"
 rand = "0.8"
 sha2 = "0.10"
 smolder-proto = { path = "../smolder-proto", version = "0.1.0" }
+sspi = { version = "0.19.2", optional = true, features = ["network_client"] }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = "0.1"

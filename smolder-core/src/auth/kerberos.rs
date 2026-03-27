@@ -1,8 +1,10 @@
 //! Kerberos authentication for SMB `SESSION_SETUP`.
 
+use std::fmt;
 use std::marker::PhantomData;
 
 use smolder_proto::smb::smb2::NegotiateResponse;
+use sspi::{Sspi, SspiImpl};
 
 use super::kerberos_spn::KerberosTarget;
 use super::spnego::{
@@ -10,50 +12,104 @@ use super::spnego::{
 };
 use super::{AuthError, AuthProvider, SpnegoMechanism};
 
-/// Selects an existing Kerberos client credential from the local ticket cache.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Password-backed Kerberos credentials for SMB authentication.
+#[derive(Clone, PartialEq, Eq)]
 pub struct KerberosCredentials {
-    principal: Option<String>,
+    username: String,
+    password: String,
+    domain: String,
+    workstation: String,
+    kdc_url: Option<String>,
+}
+
+impl fmt::Debug for KerberosCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KerberosCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("domain", &self.domain)
+            .field("workstation", &self.workstation)
+            .field("kdc_url", &self.kdc_url)
+            .finish()
+    }
 }
 
 impl KerberosCredentials {
-    /// Uses the default client principal from the active Kerberos ticket cache.
-    pub fn from_ticket_cache() -> Self {
-        Self::default()
+    /// Creates password-backed Kerberos credentials for an SMB account.
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            username: username.into(),
+            password: password.into(),
+            domain: String::new(),
+            workstation: "smolder".to_owned(),
+            kdc_url: None,
+        }
     }
 
-    /// Uses a specific client principal from the active Kerberos ticket cache.
+    /// Sets the Kerberos domain used to build the client principal.
     #[must_use]
-    pub fn with_principal(mut self, principal: impl Into<String>) -> Self {
-        self.principal = Some(principal.into());
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = domain.into();
         self
     }
 
-    fn principal(&self) -> Option<&str> {
-        self.principal.as_deref()
+    /// Sets the workstation name sent to the Kerberos backend.
+    #[must_use]
+    pub fn with_workstation(mut self, workstation: impl Into<String>) -> Self {
+        self.workstation = workstation.into();
+        self
+    }
+
+    /// Overrides the KDC URL used for the Kerberos exchange.
+    ///
+    /// The value may be a bare `host:port`, `tcp://host:port`, `udp://host:port`,
+    /// or an HTTP(S) KDC proxy URL understood by `sspi`.
+    #[must_use]
+    pub fn with_kdc_url(mut self, kdc_url: impl Into<String>) -> Self {
+        self.kdc_url = Some(kdc_url.into());
+        self
+    }
+
+    fn username(&self) -> Result<sspi::Username, AuthError> {
+        let domain = (!self.domain.is_empty()).then_some(self.domain.as_str());
+        sspi::Username::new(&self.username, domain).map_err(|_| {
+            AuthError::InvalidState(
+                "kerberos username/domain combination must be a bare account name, UPN, or down-level logon name",
+            )
+        })
+    }
+
+    fn auth_identity(&self) -> Result<sspi::AuthIdentity, AuthError> {
+        Ok(sspi::AuthIdentity {
+            username: self.username()?,
+            password: self.password.clone().into(),
+        })
+    }
+
+    fn client_computer_name(&self) -> &str {
+        if self.workstation.is_empty() {
+            "smolder"
+        } else {
+            self.workstation.as_str()
+        }
+    }
+
+    fn kdc_url(&self) -> Option<&str> {
+        self.kdc_url.as_deref()
     }
 }
 
-/// Kerberos `AuthProvider` backed by the local Kerberos ticket cache.
-///
-/// This milestone only drives the SMB `SESSION_SETUP` token exchange. Exported
-/// session-key handling for SMB signing and encryption follows in a later
-/// milestone, so `session_key()` currently returns `None`.
+/// Kerberos `AuthProvider` backed by password-based credentials.
 pub struct KerberosAuthenticator {
-    inner: KerberosAuthEngine<CrossKrb5Backend>,
+    inner: KerberosAuthEngine<SspiKerberosBackend>,
 }
 
 impl KerberosAuthenticator {
-    /// Creates a Kerberos authenticator using the provided ticket-cache inputs.
+    /// Creates a Kerberos authenticator using the provided credentials and SMB target.
     pub fn new(credentials: KerberosCredentials, target: KerberosTarget) -> Self {
         Self {
             inner: KerberosAuthEngine::new(credentials, target),
         }
-    }
-
-    /// Creates a Kerberos authenticator using the default ticket cache.
-    pub fn from_ticket_cache(target: KerberosTarget) -> Self {
-        Self::new(KerberosCredentials::from_ticket_cache(), target)
     }
 
     /// Returns the SMB Kerberos target for this exchange.
@@ -61,7 +117,7 @@ impl KerberosAuthenticator {
         &self.inner.target
     }
 
-    /// Returns the cache-selection inputs for this exchange.
+    /// Returns the credentials used for this exchange.
     pub fn credentials(&self) -> &KerberosCredentials {
         &self.inner.credentials
     }
@@ -78,6 +134,10 @@ impl AuthProvider for KerberosAuthenticator {
 
     fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
         self.inner.finish(incoming)
+    }
+
+    fn session_key(&self) -> Option<&[u8]> {
+        self.inner.session_key()
     }
 }
 
@@ -100,18 +160,22 @@ trait KerberosBackend {
     fn initiate(
         credentials: &KerberosCredentials,
         target: &KerberosTarget,
-    ) -> Result<(Self::Pending, Vec<u8>), AuthError>;
+    ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError>;
 
     fn step(
         pending: Self::Pending,
         incoming: &[u8],
+        target: &KerberosTarget,
     ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError>;
+
+    fn session_key(context: &Self::Context) -> Result<Vec<u8>, AuthError>;
 }
 
 struct KerberosAuthEngine<B: KerberosBackend> {
     credentials: KerberosCredentials,
     target: KerberosTarget,
     state: KerberosState<B::Pending, B::Context>,
+    session_key: Option<Vec<u8>>,
     _backend: PhantomData<B>,
 }
 
@@ -121,6 +185,7 @@ impl<B: KerberosBackend> KerberosAuthEngine<B> {
             credentials,
             target,
             state: KerberosState::Initial,
+            session_key: None,
             _backend: PhantomData,
         }
     }
@@ -134,12 +199,26 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
             ));
         }
 
-        let (pending, token) = B::initiate(&self.credentials, &self.target)?;
-        self.state = KerberosState::Pending(pending);
-        Ok(encode_neg_token_init(
-            &[SpnegoMechanism::KerberosV5],
-            Some(&token),
-        ))
+        match B::initiate(&self.credentials, &self.target)? {
+            KerberosStep::Continue { pending, token } => {
+                self.state = KerberosState::Pending(pending);
+                Ok(encode_neg_token_init(
+                    &[SpnegoMechanism::KerberosV5],
+                    Some(&token),
+                ))
+            }
+            KerberosStep::Finished { context, token } => {
+                let token = token.ok_or(AuthError::InvalidState(
+                    "kerberos backend finished without an initial token",
+                ))?;
+                self.session_key = Some(B::session_key(&context)?);
+                self.state = KerberosState::Established(context);
+                Ok(encode_neg_token_init(
+                    &[SpnegoMechanism::KerberosV5],
+                    Some(&token),
+                ))
+            }
+        }
     }
 
     fn next_token(&mut self, incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
@@ -165,12 +244,13 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
         };
 
         let server_token = extract_mech_token(incoming)?;
-        match B::step(pending, &server_token)? {
+        match B::step(pending, &server_token, &self.target)? {
             KerberosStep::Continue { pending, token } => {
                 self.state = KerberosState::Pending(pending);
                 Ok(encode_neg_token_resp(None, Some(&token), None))
             }
             KerberosStep::Finished { context, token } => {
+                self.session_key = Some(B::session_key(&context)?);
                 self.state = KerberosState::Established(context);
                 Ok(token
                     .map(|token| encode_neg_token_resp(None, Some(&token), None))
@@ -196,8 +276,11 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                 }
 
                 let server_token = extract_mech_token(incoming)?;
-                match B::step(pending, &server_token)? {
-                    KerberosStep::Finished { token: None, .. } => Ok(()),
+                match B::step(pending, &server_token, &self.target)? {
+                    KerberosStep::Finished { context, token: None } => {
+                        self.session_key = Some(B::session_key(&context)?);
+                        Ok(())
+                    }
                     KerberosStep::Finished { token: Some(_), .. } => Err(AuthError::InvalidState(
                         "kerberos finish produced an unexpected client continuation token",
                     )),
@@ -208,6 +291,7 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
             }
             KerberosState::Established(context) => {
                 if incoming.is_empty() {
+                    self.state = KerberosState::Established(context);
                     return Ok(());
                 }
 
@@ -218,52 +302,149 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                         "unexpected kerberos response token after context establishment",
                     ));
                 }
+
+                self.state = KerberosState::Established(context);
                 Ok(())
             }
             KerberosState::Complete => Ok(()),
         }
     }
+
+    fn session_key(&self) -> Option<&[u8]> {
+        self.session_key.as_deref()
+    }
 }
 
-struct CrossKrb5Backend;
+struct SspiKerberosBackend;
 
-impl KerberosBackend for CrossKrb5Backend {
-    type Pending = cross_krb5::PendingClientCtx;
-    type Context = cross_krb5::ClientCtx;
+struct SspiKerberosContext {
+    kerberos: sspi::Kerberos,
+    credentials_handle: Option<sspi::CredentialsBuffers>,
+}
+
+impl SspiKerberosContext {
+    fn new(credentials: &KerberosCredentials) -> Result<Self, AuthError> {
+        let config = if let Some(kdc_url) = credentials.kdc_url() {
+            sspi::KerberosConfig::new(kdc_url, credentials.client_computer_name().to_owned())
+        } else {
+            sspi::KerberosConfig {
+                kdc_url: None,
+                client_computer_name: credentials.client_computer_name().to_owned(),
+            }
+        };
+        let mut kerberos = sspi::Kerberos::new_client_from_config(config)
+            .map_err(|error| AuthError::Backend(error.to_string()))?;
+        let auth_data = sspi::Credentials::from(credentials.auth_identity()?);
+        let credentials_handle = kerberos
+            .acquire_credentials_handle()
+            .with_credential_use(sspi::CredentialUse::Outbound)
+            .with_auth_data(&auth_data)
+            .execute(&mut kerberos)
+            .map_err(|error| AuthError::Backend(error.to_string()))?
+            .credentials_handle;
+
+        Ok(Self {
+            kerberos,
+            credentials_handle,
+        })
+    }
+
+    fn step(
+        &mut self,
+        target: &KerberosTarget,
+        incoming: Option<&[u8]>,
+    ) -> Result<(sspi::SecurityStatus, Vec<u8>), AuthError> {
+        let target_name = target.service_principal_name()?;
+        let mut output = [sspi::SecurityBuffer::new(Vec::new(), sspi::BufferType::Token)];
+        let mut input = incoming.map(|token| {
+            [sspi::SecurityBuffer::new(
+                token.to_vec(),
+                sspi::BufferType::Token,
+            )]
+        });
+
+        let mut builder = self
+            .kerberos
+            .initialize_security_context()
+            .with_credentials_handle(&mut self.credentials_handle)
+            .with_context_requirements(client_request_flags())
+            .with_target_data_representation(sspi::DataRepresentation::Native)
+            .with_target_name(&target_name)
+            .with_output(&mut output);
+        if let Some(ref mut input) = input {
+            builder = builder.with_input(input);
+        }
+
+        let result = self
+            .kerberos
+            .initialize_security_context_impl(&mut builder)
+            .map_err(|error| AuthError::Backend(error.to_string()))?
+            .resolve_with_default_network_client()
+            .map_err(|error| AuthError::Backend(error.to_string()))?;
+        let token = output[0].buffer.clone();
+
+        Ok((result.status, token))
+    }
+}
+
+impl KerberosBackend for SspiKerberosBackend {
+    type Pending = SspiKerberosContext;
+    type Context = SspiKerberosContext;
 
     fn initiate(
         credentials: &KerberosCredentials,
         target: &KerberosTarget,
-    ) -> Result<(Self::Pending, Vec<u8>), AuthError> {
-        let spn = target.service_principal_name()?;
-        let (pending, token) = cross_krb5::ClientCtx::new(
-            cross_krb5::InitiateFlags::empty(),
-            credentials.principal(),
-            &spn,
-            None,
-        )
-        .map_err(|error| AuthError::Backend(error.to_string()))?;
-        Ok((pending, token.as_ref().to_vec()))
+    ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError> {
+        let mut context = SspiKerberosContext::new(credentials)?;
+        let (status, token) = context.step(target, None)?;
+        match status {
+            sspi::SecurityStatus::ContinueNeeded => {
+                Ok(KerberosStep::Continue { pending: context, token })
+            }
+            sspi::SecurityStatus::Ok => Ok(KerberosStep::Finished {
+                context,
+                token: Some(token),
+            }),
+            status => Err(AuthError::Backend(format!(
+                "kerberos backend returned unexpected initial status {status:?}",
+            ))),
+        }
     }
 
     fn step(
-        pending: Self::Pending,
+        mut pending: Self::Pending,
         incoming: &[u8],
+        target: &KerberosTarget,
     ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError> {
-        match pending
-            .step(incoming)
-            .map_err(|error| AuthError::Backend(error.to_string()))?
-        {
-            cross_krb5::Step::Continue((pending, token)) => Ok(KerberosStep::Continue {
-                pending,
-                token: token.as_ref().to_vec(),
+        let (status, token) = pending.step(target, Some(incoming))?;
+        match status {
+            sspi::SecurityStatus::ContinueNeeded => {
+                Ok(KerberosStep::Continue { pending, token })
+            }
+            sspi::SecurityStatus::Ok => Ok(KerberosStep::Finished {
+                context: pending,
+                token: (!token.is_empty()).then_some(token),
             }),
-            cross_krb5::Step::Finished((context, token)) => Ok(KerberosStep::Finished {
-                context,
-                token: token.map(|token| token.as_ref().to_vec()),
-            }),
+            status => Err(AuthError::Backend(format!(
+                "kerberos backend returned unexpected continuation status {status:?}",
+            ))),
         }
     }
+
+    fn session_key(context: &Self::Context) -> Result<Vec<u8>, AuthError> {
+        let keys = context
+            .kerberos
+            .query_context_session_key()
+            .map_err(|error| AuthError::Backend(error.to_string()))?;
+        Ok(keys.session_key.as_ref().to_vec())
+    }
+}
+
+fn client_request_flags() -> sspi::ClientRequestFlags {
+    sspi::ClientRequestFlags::MUTUAL_AUTH
+        | sspi::ClientRequestFlags::INTEGRITY
+        | sspi::ClientRequestFlags::FRAGMENT_TO_FIT
+        | sspi::ClientRequestFlags::USE_SESSION_KEY
 }
 
 #[cfg(test)]
@@ -291,18 +472,29 @@ mod tests {
         fn initiate(
             credentials: &KerberosCredentials,
             target: &KerberosTarget,
-        ) -> Result<(Self::Pending, Vec<u8>), AuthError> {
-            assert_eq!(credentials.principal(), Some("alice@EXAMPLE.COM"));
+        ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError> {
+            assert_eq!(credentials.username, "alice");
+            assert_eq!(credentials.domain, "EXAMPLE.COM");
+            assert_eq!(credentials.client_computer_name(), "WORKSTATION1");
+            assert_eq!(credentials.kdc_url(), Some("tcp://dc01.example.com:88"));
+            assert_eq!(
+                credentials.username().expect("username should parse").inner(),
+                "EXAMPLE.COM\\alice"
+            );
             assert_eq!(
                 target.service_principal_name().expect("SPN should derive"),
                 "cifs/fileserver.example.com@EXAMPLE.COM"
             );
-            Ok((MockPending::AwaitingChallenge, b"ap-req".to_vec()))
+            Ok(KerberosStep::Continue {
+                pending: MockPending::AwaitingChallenge,
+                token: b"ap-req".to_vec(),
+            })
         }
 
         fn step(
             pending: Self::Pending,
             incoming: &[u8],
+            _target: &KerberosTarget,
         ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError> {
             match pending {
                 MockPending::AwaitingChallenge => {
@@ -320,6 +512,10 @@ mod tests {
                     })
                 }
             }
+        }
+
+        fn session_key(_context: &Self::Context) -> Result<Vec<u8>, AuthError> {
+            Ok(b"0123456789abcdef".to_vec())
         }
     }
 
@@ -339,13 +535,18 @@ mod tests {
         }
     }
 
+    fn test_credentials() -> KerberosCredentials {
+        KerberosCredentials::new("alice", "password")
+            .with_domain("EXAMPLE.COM")
+            .with_workstation("WORKSTATION1")
+            .with_kdc_url("tcp://dc01.example.com:88")
+    }
+
     #[test]
     fn initial_token_advertises_kerberos_mechanism() {
-        let credentials =
-            KerberosCredentials::from_ticket_cache().with_principal("alice@EXAMPLE.COM");
         let target =
             KerberosTarget::for_smb_host("fileserver.example.com").with_realm("EXAMPLE.COM");
-        let mut auth = KerberosAuthEngine::<MockBackend>::new(credentials, target);
+        let mut auth = KerberosAuthEngine::<MockBackend>::new(test_credentials(), target);
 
         let token = auth
             .initial_token(&negotiate_response())
@@ -361,11 +562,9 @@ mod tests {
 
     #[test]
     fn next_token_wraps_backend_continuation() {
-        let credentials =
-            KerberosCredentials::from_ticket_cache().with_principal("alice@EXAMPLE.COM");
         let target =
             KerberosTarget::for_smb_host("fileserver.example.com").with_realm("EXAMPLE.COM");
-        let mut auth = KerberosAuthEngine::<MockBackend>::new(credentials, target);
+        let mut auth = KerberosAuthEngine::<MockBackend>::new(test_credentials(), target);
 
         auth.initial_token(&negotiate_response())
             .expect("initial token should build");
@@ -382,11 +581,9 @@ mod tests {
 
     #[test]
     fn finish_consumes_final_kerberos_response_token() {
-        let credentials =
-            KerberosCredentials::from_ticket_cache().with_principal("alice@EXAMPLE.COM");
         let target =
             KerberosTarget::for_smb_host("fileserver.example.com").with_realm("EXAMPLE.COM");
-        let mut auth = KerberosAuthEngine::<MockBackend>::new(credentials, target);
+        let mut auth = KerberosAuthEngine::<MockBackend>::new(test_credentials(), target);
 
         auth.initial_token(&negotiate_response())
             .expect("initial token should build");
@@ -395,5 +592,16 @@ mod tests {
 
         auth.finish(&encode_neg_token_resp(None, Some(b"ap-rep"), None))
             .expect("finish should consume the final token");
+        assert_eq!(auth.session_key(), Some(&b"0123456789abcdef"[..]));
+    }
+
+    #[test]
+    fn rejects_mixed_username_formats() {
+        let error = KerberosCredentials::new("alice@example.com", "password")
+            .with_domain("EXAMPLE")
+            .username()
+            .expect_err("UPN plus domain should fail");
+
+        assert!(matches!(error, AuthError::InvalidState(_)));
     }
 }

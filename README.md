@@ -10,6 +10,10 @@ Smolder is organized as a small workspace:
 - `smolder-core`: reusable SMB/RPC primitives, transport logic, and auth/session state.
 - `smolder-tools`: CLI commands and higher-level integrations such as SMB file workflows and remote execution.
 
+The `smolder` package now builds standalone operator binaries such as
+`smbexec`, `psexec`, `smolder-cat`, and `smolder-mv`. The `smolder`
+executable remains as a compatibility wrapper around those shared code paths.
+
 Published package names:
 
 - `smolder-proto`: wire-format crate
@@ -32,7 +36,8 @@ Implemented now:
   headers
 - `smolder-core`: SMB negotiate/session setup, NTLMv2/SPNEGO auth, signing,
   SMB3 encryption, named pipes, DCE/RPC transport, DFS referral handling,
-  compound requests, and durable/resilient reconnect primitives
+  compound requests, durable/resilient reconnect primitives, and feature-gated
+  Kerberos session-setup primitives
 - `smolder-tools`: high-level SMB file APIs, DFS-aware path resolution,
   reconnect helpers, CLI file workflows, `smbexec`, and `psexec`
 - Live interop coverage against both Tiny11/Windows and local Samba fixtures,
@@ -45,19 +50,21 @@ Validated now:
 - Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
   named pipes, and RPC bind over encrypted SMB
 
-Not implemented on this track:
+Still in progress on this track:
 
-- Kerberos
+- Kerberos live AD-backed interop and CLI integration
 - SMB1 compatibility
 - Fully automated Windows CI; the Tiny11 gate is still manual/self-hosted
 - Full Samba `selftest` parity
 
 ## Future Tracks
 
-- Kerberos in `smolder-core` is the next major protocol track. The target is a
-  production-grade SMB Kerberos module with ticket-cache, password, and keytab
-  flows, plus signing/encryption integration and real Windows/Samba interop.
-  The scoped plan is in
+- Kerberos in `smolder-core` is now in active implementation behind the
+  `kerberos` feature. The current slice covers mechanism-aware SPNEGO plus a
+  password-backed Kerberos authenticator that exports the SMB session key. The
+  remaining track is live Windows/Samba AD interop, broader credential sources
+  like ticket-cache and keytab, and end-to-end tooling integration. The scoped
+  plan is in
   [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md).
 
 ## Quick Start

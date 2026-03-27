@@ -45,8 +45,8 @@ Kerberos belongs in `smolder-core`.
 3. Exported session key handling suitable for SMB signing and encryption
 4. SMB target SPN construction for `cifs/<hostname>` with override support
 5. Credential inputs expected for SMB clients:
-   - existing ticket cache
    - password-based acquisition
+   - existing ticket cache
    - keytab-based acquisition
 6. DFS-aware host/SPN handling when referrals cross hosts
 7. Interop against:
@@ -187,44 +187,45 @@ Exit criteria:
 ### Milestone 2
 
 Commit title:
-`feat(auth): add Kerberos ticket-cache SMB session setup`
+`feat(auth): add password-backed Kerberos SMB session setup`
 
 Target files:
 
 - `smolder-core/src/auth/kerberos.rs`
-- `smolder-core/src/auth/kerberos_cache.rs`
 - `smolder-core/src/auth/kerberos_spn.rs`
 - [smolder-core/src/auth/mod.rs](/Users/cmagana/Projects/smolder/smolder-core/src/auth/mod.rs)
 
 Tasks:
 
-- Add a Kerberos authenticator that can use an existing ticket cache
+- Add a Kerberos authenticator that can acquire tickets from username/password
 - Implement SPN derivation for `cifs/<hostname>`
+- Export the Kerberos session key through `AuthProvider::session_key()`
 - Allow caller override for SPN / realm / hostname canonicalization
 - Produce SPNEGO-wrapped Kerberos tokens for SMB `SESSION_SETUP`
 
 Exit criteria:
 
-- `kinit` or equivalent cache-based auth can complete SMB `SESSION_SETUP`
-- Windows AD-backed SMB and Samba AD both accept the Kerberos path
+- password-backed Kerberos can complete signed SMB `SESSION_SETUP`
+- the authenticator exports a session key suitable for SMB signing/encryption
 
 ### Milestone 3
 
 Commit title:
-`feat(auth): derive SMB signing and sealing from Kerberos session keys`
+`test(auth): validate Kerberos signing and live SMB interop`
 
 Target files:
 
 - [smolder-core/src/client.rs](/Users/cmagana/Projects/smolder/smolder-core/src/client.rs)
 - [smolder-core/src/crypto.rs](/Users/cmagana/Projects/smolder/smolder-core/src/crypto.rs)
 - Kerberos auth module files
+- Windows and Samba interop tests
 
 Tasks:
 
 - Validate AP-REP / final token handling
-- export the session key from the Kerberos mechanism
 - reuse the existing SMB signing/encryption machinery with Kerberos-established keys
 - add regression tests ensuring post-auth requests are signed/sealed correctly
+- add Windows AD-backed and Samba AD-backed live interop coverage
 
 Exit criteria:
 
@@ -234,24 +235,25 @@ Exit criteria:
 ### Milestone 4
 
 Commit title:
-`feat(auth): add password and keytab Kerberos providers`
+`feat(auth): add ticket-cache and keytab Kerberos providers`
 
 Target files:
 
+- `smolder-core/src/auth/kerberos_cache.rs`
 - `smolder-core/src/auth/kerberos_kdc.rs`
 - `smolder-core/src/auth/kerberos.rs`
 - `smolder-tools/src/main.rs` if CLI wiring is added in the same slice
 
 Tasks:
 
-- Add password-based ticket acquisition
+- Add ticket-cache-backed Kerberos acquisition
 - Add keytab-based ticket acquisition
 - Expose the right builder inputs in library code first
 - Wire CLI flags only after the core flow is stable
 
 Exit criteria:
 
-- callers do not need an external `kinit` step to use Kerberos
+- callers can use an existing `kinit` cache without re-entering a password
 - keytab auth works for service-style automation
 
 ### Milestone 5
