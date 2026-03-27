@@ -24,6 +24,7 @@ for:
 The shared examples guide, including the high-level file roundtrip and
 interactive `psexec` tools examples, is in
 [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md).
+That guide also includes the feature-gated high-level Kerberos tools example.
 The task-oriented cookbook is in
 [docs/guide/cookbook.md](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md).
 That guide now documents the stable interactive remote-exec path as direct

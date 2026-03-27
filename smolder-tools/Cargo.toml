@@ -22,6 +22,11 @@ no-default-features = true
 features = ["kerberos"]
 rustdoc-args = ["--cfg", "docsrs"]
 
+[[example]]
+name = "kerberos_share_list"
+path = "examples/kerberos_share_list.rs"
+required-features = ["kerberos"]
+
 [[bin]]
 name = "smolder"
 path = "src/main.rs"

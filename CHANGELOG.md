@@ -25,6 +25,8 @@ and the versioning/MSRV rules are defined in
   example.
 - Added a compile-checked high-level SMB file roundtrip example for the
   published `smolder` tools crate.
+- Added a feature-gated Kerberos high-level share-listing example for the
+  published `smolder` tools crate.
 
 ### Fixed
 

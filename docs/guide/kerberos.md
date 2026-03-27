@@ -50,8 +50,10 @@ println!("kerberos session={} tree={}", connection.session_id().0, connection.tr
 # }
 ```
 
-For the compile-checked example, see
-[kerberos_tree_connect.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/kerberos_tree_connect.rs).
+For the compile-checked examples, see:
+
+- [kerberos_tree_connect.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/kerberos_tree_connect.rs)
+- [kerberos_share_list.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/kerberos_share_list.rs)
 
 ## Practical Rules
 

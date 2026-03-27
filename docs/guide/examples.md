@@ -40,6 +40,7 @@ cargo build -p smolder-smb-core --features kerberos --example kerberos_tree_conn
 
 - [file_roundtrip.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/file_roundtrip.rs)
 - [interactive_psexec.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/interactive_psexec.rs)
+- [kerberos_share_list.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/kerberos_share_list.rs) with `--features kerberos`
 
 Build them with:
 
@@ -83,6 +84,44 @@ Run it:
 
 ```bash
 cargo run -p smolder --example file_roundtrip
+```
+
+### Kerberos Share Listing Example
+
+This feature-gated example shows the high-level Kerberos builder path for
+`smolder`:
+
+- [`KerberosCredentials`](/Users/cmagana/Projects/smolder/smolder-core/src/auth/kerberos.rs)
+- [`KerberosTarget`](/Users/cmagana/Projects/smolder/smolder-core/src/auth/kerberos_spn.rs)
+- [`SmbClientBuilder::kerberos`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
+
+Build it explicitly:
+
+```bash
+cargo build -p smolder --features kerberos --example kerberos_share_list
+```
+
+Required environment:
+
+```bash
+export SMOLDER_KERBEROS_HOST=files1.lab.example
+export SMOLDER_KERBEROS_USERNAME='alice@LAB.EXAMPLE'
+export SMOLDER_KERBEROS_PASSWORD='<password>'
+```
+
+Optional:
+
+```bash
+export SMOLDER_KERBEROS_SHARE=share
+export SMOLDER_KERBEROS_TARGET_HOST=files1.lab.example
+export SMOLDER_KERBEROS_REALM=LAB.EXAMPLE
+export SMOLDER_KERBEROS_KDC_URL=tcp://dc1.lab.example:88
+```
+
+Run it:
+
+```bash
+cargo run -p smolder --features kerberos --example kerberos_share_list
 ```
 
 ### Interactive PsExec Example
