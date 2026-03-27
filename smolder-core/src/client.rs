@@ -1,4 +1,10 @@
 //! Typestate SMB client built on top of wire-level packet codecs.
+//!
+//! Most consumers should start with [`Connection`] and the typestate markers,
+//! then layer [`crate::pipe::NamedPipe`] or [`crate::rpc::PipeRpcClient`] on
+//! top when they need `IPC$` or DCE/RPC behavior. The preauth and signing
+//! state types exposed by this module are internal session machinery and are
+//! not the intended starting point for new integrations.
 
 use aes::Aes128;
 use cmac::Cmac;
@@ -100,6 +106,7 @@ pub struct TreeConnected {
 
 /// SMB 3.1.1 preauthentication transcript state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct PreauthIntegrityState {
     /// Negotiated preauthentication hash algorithm.
     pub hash_algorithm: PreauthIntegrityHashId,
@@ -136,6 +143,7 @@ enum SigningAlgorithm {
 
 /// Derived signing state for an authenticated SMB session.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct SigningState {
     algorithm: SigningAlgorithm,
     key: Vec<u8>,

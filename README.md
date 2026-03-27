@@ -48,13 +48,13 @@ Validated now:
 
 - Windows: negotiate, auth, tree connect, file I/O, durable reconnect,
   encrypted share I/O, named pipes, RPC, DFS, Kerberos core auth, Kerberos file
-  CLI workflows, `smbexec`, and `psexec`
+  CLI workflows, Kerberos `smbexec`, Kerberos `psexec`, `smbexec`, and `psexec`
 - Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
   named pipes, encrypted RPC, and Kerberos core auth
 
 Still in progress on this track:
 
-- Kerberos remote-exec integration plus broader credential sources like ticket cache and keytab
+- Broader Kerberos credential sources like ticket cache and keytab
 - SMB1 compatibility
 - Fully automated Windows CI; the Tiny11 gate is still manual/self-hosted
 - Full Samba `selftest` parity
@@ -64,14 +64,19 @@ Still in progress on this track:
 - Kerberos in `smolder-core` is now in active implementation behind the
   `kerberos` feature. The current slice covers mechanism-aware SPNEGO, a
   password-backed Kerberos authenticator that exports the SMB session key, and
-  live Samba AD plus Windows domain-member core interop. The remaining track is
-  broader credential sources like ticket-cache and keytab plus end-to-end
-  tooling integration. The scoped plan is in
+  live Samba AD plus Windows domain-member interop in both core and
+  Kerberos-enabled tools workflows, including `smbexec` and `psexec`. The
+  remaining track is broader credential sources like ticket-cache and keytab.
+  The scoped plan is in
   [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md).
   The Samba AD fixture and Windows member flow are documented in
   [docs/testing/samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md)
   and
   [docs/testing/windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
+
+- `smolder-core` is moving into an API-stability and docs phase. The current
+  public-surface notes are in
+  [docs/reference/smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
 
 ## Quick Start
 

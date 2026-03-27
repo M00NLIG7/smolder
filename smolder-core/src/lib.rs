@@ -25,6 +25,23 @@
 //! share/file API or operator-facing workflows such as `smbexec` and `psexec`,
 //! use the `smolder` package instead.
 //!
+//! # Public API Tiers
+//!
+//! The intended entry points for most consumers are:
+//!
+//! - [`client::Connection`] plus its typestate markers for negotiate, session,
+//!   tree, and file operations
+//! - [`pipe::SmbSessionConfig`], [`pipe::connect_tree`], and
+//!   [`pipe::NamedPipe`] for `IPC$` and named-pipe transport
+//! - [`rpc::PipeRpcClient`] for reusable DCE/RPC over SMB named pipes
+//! - [`auth`] credential/authenticator types and [`error::CoreError`]
+//! - [`transport::Transport`] when embedding the client over a custom transport
+//!
+//! Lower-level signing, preauth, and raw crypto helpers remain available for
+//! expert users, but they are not the recommended starting surface. The repo's
+//! API audit notes are in
+//! [docs/reference/smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
+//!
 //! Copyright (c) 2025 M00NLIG7
 
 #![forbid(unsafe_code)]
@@ -38,7 +55,10 @@ pub mod error;
 pub mod pipe;
 pub mod rpc;
 pub mod prelude {
-    //! Common types and traits
+    //! Curated imports for the intended `smolder_core` entry points.
+    //!
+    //! Prefer this module when you want the supported high-level primitives
+    //! without pulling in every expert-only module directly.
 
     pub use crate::auth::{
         AuthProvider, NtlmAuthenticator, NtlmCredentials, NtlmRpcPacketIntegrity,
