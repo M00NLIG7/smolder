@@ -1,11 +1,18 @@
-//! Minimal SPNEGO token encoding and decoding for NTLM over SMB.
+//! Minimal SPNEGO token encoding and decoding for SMB authentication.
 
-use super::AuthError;
+use super::{AuthError, SpnegoMechanism};
 
 const SPNEGO_OID: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
 const NTLM_OID: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a];
+const KERBEROS_V5_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
 pub(crate) const NEG_STATE_ACCEPT_COMPLETE: u8 = 0;
 pub(crate) const NEG_STATE_REJECT: u8 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NegTokenInit {
+    pub(crate) mech_types: Vec<SpnegoMechanism>,
+    pub(crate) mech_token: Option<Vec<u8>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NegTokenResp {
@@ -14,15 +21,15 @@ pub(crate) struct NegTokenResp {
     pub(crate) mech_list_mic: Option<Vec<u8>>,
 }
 
-pub(crate) fn encode_neg_token_init_ntlm(mech_token: &[u8]) -> Vec<u8> {
-    let mech_types = ntlm_mech_types();
-    let neg_token_init = encode_sequence(
-        &[
-            encode_explicit(0, &mech_types),
-            encode_explicit(2, &encode_tlv(0x04, mech_token)),
-        ]
-        .concat(),
-    );
+pub(crate) fn encode_neg_token_init(
+    mech_types: &[SpnegoMechanism],
+    mech_token: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut fields = vec![encode_explicit(0, &encode_mech_type_list(mech_types))];
+    if let Some(mech_token) = mech_token {
+        fields.push(encode_explicit(2, &encode_tlv(0x04, mech_token)));
+    }
+    let neg_token_init = encode_sequence(&fields.concat());
 
     encode_tlv(
         0x60,
@@ -34,8 +41,12 @@ pub(crate) fn encode_neg_token_init_ntlm(mech_token: &[u8]) -> Vec<u8> {
     )
 }
 
-pub(crate) fn ntlm_mech_types() -> Vec<u8> {
-    encode_sequence(&encode_tlv(0x06, NTLM_OID))
+pub(crate) fn encode_mech_type_list(mech_types: &[SpnegoMechanism]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for mechanism in mech_types {
+        encoded.extend_from_slice(&encode_tlv(0x06, mechanism_oid(*mechanism)));
+    }
+    encode_sequence(&encoded)
 }
 
 pub(crate) fn encode_neg_token_resp_ntlm(response_token: &[u8]) -> Vec<u8> {
@@ -63,61 +74,62 @@ pub(crate) fn encode_neg_token_resp(
 }
 
 pub(crate) fn extract_mech_token(token: &[u8]) -> Result<Vec<u8>, AuthError> {
-    let token = if token.first() == Some(&0x60) {
-        let (tag, content, rest) = read_tlv(token)?;
-        if tag != 0x60 || !rest.is_empty() {
-            return Err(AuthError::InvalidToken(
-                "invalid SPNEGO initial context token",
-            ));
-        }
-
-        let (oid_tag, oid, inner) = read_tlv(content)?;
-        if oid_tag != 0x06 || oid != SPNEGO_OID {
-            return Err(AuthError::InvalidToken("unexpected SPNEGO mechanism oid"));
-        }
-        inner
-    } else {
-        token
-    };
-
-    let (choice_tag, choice_content, rest) = read_tlv(token)?;
-    if !rest.is_empty() {
-        return Err(AuthError::InvalidToken("trailing SPNEGO data"));
+    let token = unwrap_initial_context_token(token)?;
+    let (choice_tag, _, _) = read_choice(token)?;
+    match choice_tag {
+        0xa0 => parse_neg_token_init(token)?
+            .mech_token
+            .ok_or(AuthError::InvalidToken("SPNEGO mech token missing")),
+        0xa1 => parse_neg_token_resp(token)?
+            .response_token
+            .ok_or(AuthError::InvalidToken("SPNEGO response token missing")),
+        _ => Err(AuthError::InvalidToken("unexpected SPNEGO choice tag")),
     }
-    if choice_tag != 0xa0 && choice_tag != 0xa1 {
-        return Err(AuthError::InvalidToken("unexpected SPNEGO choice tag"));
+}
+
+pub(crate) fn parse_neg_token_init(token: &[u8]) -> Result<NegTokenInit, AuthError> {
+    let token = unwrap_initial_context_token(token)?;
+    let (choice_tag, seq_content, _) = read_choice(token)?;
+    if choice_tag != 0xa0 {
+        return Err(AuthError::InvalidToken("expected negTokenInit"));
     }
 
-    let (seq_tag, seq_content, seq_rest) = read_tlv(choice_content)?;
-    if seq_tag != 0x30 || !seq_rest.is_empty() {
-        return Err(AuthError::InvalidToken("invalid SPNEGO sequence"));
-    }
-
+    let mut mech_types = None;
+    let mut mech_token = None;
     let mut fields = seq_content;
     while !fields.is_empty() {
         let (tag, content, rest) = read_tlv(fields)?;
-        if tag == 0xa2 {
-            let (octet_tag, octets, octet_rest) = read_tlv(content)?;
-            if octet_tag != 0x04 || !octet_rest.is_empty() {
-                return Err(AuthError::InvalidToken("invalid SPNEGO mech token field"));
+        match tag {
+            0xa0 => {
+                let (seq_tag, seq, seq_rest) = read_tlv(content)?;
+                if seq_tag != 0x30 || !seq_rest.is_empty() {
+                    return Err(AuthError::InvalidToken("invalid mechTypes field"));
+                }
+                mech_types = Some(parse_mech_type_list(seq)?);
             }
-            return Ok(octets.to_vec());
+            0xa2 => {
+                let (octet_tag, octets, octet_rest) = read_tlv(content)?;
+                if octet_tag != 0x04 || !octet_rest.is_empty() {
+                    return Err(AuthError::InvalidToken("invalid SPNEGO mech token field"));
+                }
+                mech_token = Some(octets.to_vec());
+            }
+            _ => {}
         }
         fields = rest;
     }
 
-    Err(AuthError::InvalidToken("SPNEGO response token missing"))
+    Ok(NegTokenInit {
+        mech_types: mech_types.ok_or(AuthError::InvalidToken("SPNEGO mech types missing"))?,
+        mech_token,
+    })
 }
 
 pub(crate) fn parse_neg_token_resp(token: &[u8]) -> Result<NegTokenResp, AuthError> {
-    let (choice_tag, choice_content, rest) = read_tlv(token)?;
-    if choice_tag != 0xa1 || !rest.is_empty() {
+    let token = unwrap_initial_context_token(token)?;
+    let (choice_tag, seq_content, _) = read_choice(token)?;
+    if choice_tag != 0xa1 {
         return Err(AuthError::InvalidToken("expected negTokenResp"));
-    }
-
-    let (seq_tag, seq_content, seq_rest) = read_tlv(choice_content)?;
-    if seq_tag != 0x30 || !seq_rest.is_empty() {
-        return Err(AuthError::InvalidToken("invalid negTokenResp sequence"));
     }
 
     let mut neg_state = None;
@@ -158,6 +170,73 @@ pub(crate) fn parse_neg_token_resp(token: &[u8]) -> Result<NegTokenResp, AuthErr
         response_token,
         mech_list_mic,
     })
+}
+
+fn mechanism_oid(mechanism: SpnegoMechanism) -> &'static [u8] {
+    match mechanism {
+        SpnegoMechanism::Ntlm => NTLM_OID,
+        SpnegoMechanism::KerberosV5 => KERBEROS_V5_OID,
+    }
+}
+
+fn parse_mech_type_list(input: &[u8]) -> Result<Vec<SpnegoMechanism>, AuthError> {
+    let mut mechanisms = Vec::new();
+    let mut fields = input;
+    while !fields.is_empty() {
+        let (tag, oid, rest) = read_tlv(fields)?;
+        if tag != 0x06 {
+            return Err(AuthError::InvalidToken("invalid SPNEGO mechanism list"));
+        }
+        mechanisms.push(parse_mechanism_oid(oid)?);
+        fields = rest;
+    }
+
+    if mechanisms.is_empty() {
+        return Err(AuthError::InvalidToken("SPNEGO mech types missing"));
+    }
+
+    Ok(mechanisms)
+}
+
+fn parse_mechanism_oid(oid: &[u8]) -> Result<SpnegoMechanism, AuthError> {
+    match oid {
+        NTLM_OID => Ok(SpnegoMechanism::Ntlm),
+        KERBEROS_V5_OID => Ok(SpnegoMechanism::KerberosV5),
+        _ => Err(AuthError::InvalidToken("unsupported SPNEGO mechanism oid")),
+    }
+}
+
+fn unwrap_initial_context_token(token: &[u8]) -> Result<&[u8], AuthError> {
+    if token.first() != Some(&0x60) {
+        return Ok(token);
+    }
+
+    let (tag, content, rest) = read_tlv(token)?;
+    if tag != 0x60 || !rest.is_empty() {
+        return Err(AuthError::InvalidToken(
+            "invalid SPNEGO initial context token",
+        ));
+    }
+
+    let (oid_tag, oid, inner) = read_tlv(content)?;
+    if oid_tag != 0x06 || oid != SPNEGO_OID {
+        return Err(AuthError::InvalidToken("unexpected SPNEGO mechanism oid"));
+    }
+    Ok(inner)
+}
+
+fn read_choice(input: &[u8]) -> Result<(u8, &[u8], &[u8]), AuthError> {
+    let (choice_tag, choice_content, rest) = read_tlv(input)?;
+    if !rest.is_empty() {
+        return Err(AuthError::InvalidToken("trailing SPNEGO data"));
+    }
+
+    let (seq_tag, seq_content, seq_rest) = read_tlv(choice_content)?;
+    if seq_tag != 0x30 || !seq_rest.is_empty() {
+        return Err(AuthError::InvalidToken("invalid SPNEGO sequence"));
+    }
+
+    Ok((choice_tag, seq_content, rest))
 }
 
 fn encode_sequence(content: &[u8]) -> Vec<u8> {
@@ -230,16 +309,44 @@ fn read_length(input: &[u8]) -> Result<(usize, &[u8]), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_neg_token_init_ntlm, encode_neg_token_resp, encode_neg_token_resp_ntlm,
-        extract_mech_token, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE,
+        encode_mech_type_list, encode_neg_token_init, encode_neg_token_resp,
+        encode_neg_token_resp_ntlm, extract_mech_token, parse_neg_token_init, parse_neg_token_resp,
+        NEG_STATE_ACCEPT_COMPLETE,
     };
+    use crate::auth::SpnegoMechanism;
 
     #[test]
     fn initial_token_roundtrips_mech_token() {
-        let token = encode_neg_token_init_ntlm(b"NTLMSSP\0demo");
+        let token = encode_neg_token_init(&[SpnegoMechanism::Ntlm], Some(b"NTLMSSP\0demo"));
         let extracted = extract_mech_token(&token).expect("token should parse");
 
         assert_eq!(extracted, b"NTLMSSP\0demo");
+    }
+
+    #[test]
+    fn initial_token_roundtrips_multiple_mechanisms() {
+        let token = encode_neg_token_init(
+            &[SpnegoMechanism::KerberosV5, SpnegoMechanism::Ntlm],
+            Some(b"mech"),
+        );
+
+        let parsed = parse_neg_token_init(&token).expect("token should parse");
+        assert_eq!(
+            parsed.mech_types,
+            vec![SpnegoMechanism::KerberosV5, SpnegoMechanism::Ntlm]
+        );
+        assert_eq!(parsed.mech_token, Some(b"mech".to_vec()));
+    }
+
+    #[test]
+    fn mechanism_list_encodes_ntlm_oid() {
+        assert_eq!(
+            encode_mech_type_list(&[SpnegoMechanism::Ntlm]),
+            vec![
+                0x30, 0x0c, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02,
+                0x0a,
+            ]
+        );
     }
 
     #[test]

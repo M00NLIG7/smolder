@@ -12,6 +12,15 @@ pub use ntlm::{NtlmAuthenticator, NtlmCredentials};
 pub use ntlm_rpc::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};
 pub(crate) use ntlm_rpc_bind::NtlmRpcBindHandshake;
 
+/// SPNEGO mechanism identifiers supported by Smolder authentication helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpnegoMechanism {
+    /// Microsoft NTLM.
+    Ntlm,
+    /// Kerberos V5.
+    KerberosV5,
+}
+
 /// Authentication errors returned while processing GSS/NTLM tokens.
 #[derive(Debug, Error)]
 pub enum AuthError {

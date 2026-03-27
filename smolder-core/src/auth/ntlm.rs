@@ -12,11 +12,11 @@ use smolder_proto::smb::smb2::utf16le;
 use smolder_proto::smb::smb2::NegotiateResponse;
 
 use super::spnego::{
-    encode_neg_token_init_ntlm, encode_neg_token_resp, encode_neg_token_resp_ntlm,
-    extract_mech_token, ntlm_mech_types, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE,
+    encode_mech_type_list, encode_neg_token_init, encode_neg_token_resp, encode_neg_token_resp_ntlm,
+    extract_mech_token, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE,
     NEG_STATE_REJECT,
 };
-use super::{AuthError, AuthProvider};
+use super::{AuthError, AuthProvider, SpnegoMechanism};
 
 const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
 const NTLM_MESSAGE_NEGOTIATE: u32 = 1;
@@ -203,6 +203,10 @@ impl NtlmAuthenticator {
             | NegotiateFlags::KEY_EXCH
             | NegotiateFlags::_56
     }
+
+    fn spnego_mechanisms(&self) -> [SpnegoMechanism; 1] {
+        [SpnegoMechanism::Ntlm]
+    }
 }
 
 impl AuthProvider for NtlmAuthenticator {
@@ -228,7 +232,10 @@ impl AuthProvider for NtlmAuthenticator {
         self.state = NtlmState::WaitingForChallenge {
             negotiate_message: negotiate_message.clone(),
         };
-        Ok(encode_neg_token_init_ntlm(&negotiate_message))
+        Ok(encode_neg_token_init(
+            &self.spnego_mechanisms(),
+            Some(&negotiate_message),
+        ))
     }
 
     fn next_token(&mut self, incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
@@ -627,7 +634,11 @@ fn encrypt_random_session_key(
 }
 
 fn mech_list_mic(exported_session_key: [u8; 16], flags: NegotiateFlags) -> [u8; 16] {
-    ntlm_message_signature(exported_session_key, flags, &ntlm_mech_types())
+    ntlm_message_signature(
+        exported_session_key,
+        flags,
+        &encode_mech_type_list(&[SpnegoMechanism::Ntlm]),
+    )
 }
 
 fn ntlm_message_signature(
@@ -967,7 +978,7 @@ mod tests {
     use smolder_proto::smb::smb2::{Dialect, GlobalCapabilities, NegotiateResponse, SigningMode};
 
     use super::super::spnego::{
-        encode_neg_token_resp_ntlm, extract_mech_token, parse_neg_token_resp,
+        encode_neg_token_resp_ntlm, extract_mech_token, parse_neg_token_init, parse_neg_token_resp,
         NEG_STATE_ACCEPT_COMPLETE,
     };
     use super::{
@@ -975,6 +986,7 @@ mod tests {
         AuthProvider, AuthenticateMessage, AvId, AvPair, ChallengeMessage, NegotiateFlags,
         NegotiateMessage, NtlmAuthenticator, NtlmCredentials,
     };
+    use crate::auth::SpnegoMechanism;
 
     #[test]
     fn nt_hash_matches_known_password_vector() {
@@ -1053,6 +1065,8 @@ mod tests {
         let initial = auth
             .initial_token(&negotiate)
             .expect("initial token should build");
+        let init = parse_neg_token_init(&initial).expect("SPNEGO token should parse");
+        assert_eq!(init.mech_types, vec![SpnegoMechanism::Ntlm]);
         let negotiate = extract_mech_token(&initial).expect("should extract NTLM token");
         assert_eq!(
             hex_bytes(&negotiate),
