@@ -2,6 +2,9 @@
 
 This guide is the practical entry point for Smolder examples.
 
+For task-oriented usage notes beyond the shipped example files, use the
+[cookbook](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md).
+
 It focuses on examples that are:
 
 - compile-checked in the workspace

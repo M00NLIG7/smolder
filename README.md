@@ -23,6 +23,8 @@ for:
 
 The shared examples guide, including the interactive `psexec` tools example,
 is in [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md).
+The task-oriented cookbook is in
+[docs/guide/cookbook.md](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md).
 That guide now documents the stable interactive remote-exec path as direct
 `cmd.exe` or direct `powershell.exe` startup through the staged payload, not as
 a full nested-shell terminal emulator.

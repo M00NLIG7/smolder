@@ -35,6 +35,8 @@ and the versioning/MSRV rules are defined in
 - Tightened the examples guide and top-level README so the interactive
   `psexec` example is documented as a stable direct-shell workflow, not a fully
   polished nested-shell terminal emulator.
+- Added a cookbook set for core sessions, named pipes/RPC, Kerberos, tools
+  file workflows, and remote-exec usage.
 
 ### Release Notes Flow
 
