@@ -17,7 +17,7 @@ use smolder_proto::smb::smb2::{
 };
 use smolder_proto::smb::status::NtStatus;
 
-#[cfg(feature = "kerberos")]
+#[cfg(feature = "kerberos-api")]
 use crate::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
 use crate::client::{Connection, TreeConnected};
@@ -47,7 +47,7 @@ pub struct SmbSessionConfig {
 #[derive(Debug, Clone)]
 enum SessionAuth {
     Ntlm(NtlmCredentials),
-    #[cfg(feature = "kerberos")]
+    #[cfg(feature = "kerberos-api")]
     Kerberos {
         credentials: KerberosCredentials,
         target: KerberosTarget,
@@ -72,7 +72,7 @@ impl SmbSessionConfig {
     }
 
     /// Creates a new Kerberos-authenticated session configuration with SMB2/3 defaults.
-    #[cfg(feature = "kerberos")]
+    #[cfg(feature = "kerberos-api")]
     #[must_use]
     pub fn kerberos(
         server: impl Into<String>,
@@ -740,7 +740,7 @@ pub async fn connect_tree(
             let mut auth = NtlmAuthenticator::new(credentials);
             connection.authenticate(&mut auth).await?
         }
-        #[cfg(feature = "kerberos")]
+        #[cfg(feature = "kerberos-api")]
         SessionAuth::Kerberos {
             credentials,
             target,
@@ -809,7 +809,7 @@ mod tests {
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[cfg(feature = "kerberos")]
+    #[cfg(feature = "kerberos-api")]
     use crate::auth::{KerberosCredentials, KerberosTarget};
     use crate::auth::NtlmCredentials;
     use crate::client::{Connection, TreeConnected};
@@ -854,12 +854,25 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "kerberos")]
+    #[cfg(feature = "kerberos-api")]
+    fn test_kerberos_credentials() -> KerberosCredentials {
+        #[cfg(feature = "kerberos-sspi")]
+        {
+            return KerberosCredentials::new("user@LAB.EXAMPLE", "pass");
+        }
+
+        #[cfg(all(not(feature = "kerberos-sspi"), unix, feature = "kerberos-gssapi"))]
+        {
+            KerberosCredentials::from_ticket_cache("user@LAB.EXAMPLE")
+        }
+    }
+
+    #[cfg(feature = "kerberos-api")]
     #[test]
     fn kerberos_smb_session_config_stores_kerberos_auth() {
         let config = SmbSessionConfig::kerberos(
             "server",
-            KerberosCredentials::new("user@LAB.EXAMPLE", "pass"),
+            test_kerberos_credentials(),
             KerberosTarget::for_smb_host("server.lab.example"),
         );
 

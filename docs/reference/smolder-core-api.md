@@ -64,6 +64,8 @@ For Kerberos specifically:
 - `kerberos-sspi` remains the default password-backed backend
 - `kerberos-gssapi` adds a Unix ticket-cache backend without changing the
   top-level `KerberosCredentials` / `KerberosAuthenticator` API
+- `kerberos-gssapi` is independent of `kerberos-sspi`, so Unix GSS/Kerberos
+  libraries are only pulled in when that backend is requested explicitly
 - backend-specific capability expansion should happen behind the stable
   `KerberosCredentials` / `KerberosAuthenticator` surface rather than by
   replacing those top-level types

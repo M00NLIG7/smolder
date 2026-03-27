@@ -64,7 +64,7 @@ pub mod prelude {
         AuthProvider, NtlmAuthenticator, NtlmCredentials, NtlmRpcPacketIntegrity,
         NtlmSessionSecurity,
     };
-    #[cfg(feature = "kerberos")]
+    #[cfg(feature = "kerberos-api")]
     pub use crate::auth::{
         KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind,
         KerberosCredentials, KerberosTarget,

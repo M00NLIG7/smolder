@@ -154,6 +154,8 @@ Current status note:
   password-oriented
 - `kerberos-gssapi` now adds a Unix ticket-cache backend behind the same
   public `KerberosCredentials` / `KerberosAuthenticator` surface
+- `kerberos-gssapi` is now feature-independent from `kerberos-sspi`, so the
+  default and `kerberos` builds stay free of Unix GSS/Kerberos native linkage
 - the vendored `sspi` `0.19.2` path used by Smolder requires outbound auth data
   and does not expose a clean ticket-cache/keytab flow through the current
   integration shape

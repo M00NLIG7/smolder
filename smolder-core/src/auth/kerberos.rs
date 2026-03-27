@@ -69,11 +69,13 @@ impl fmt::Debug for KerberosCredentials {
 
 impl KerberosCredentials {
     /// Creates password-backed Kerberos credentials for an SMB account.
+    #[cfg(feature = "kerberos-sspi")]
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self::from_password(username, password)
     }
 
     /// Creates password-backed Kerberos credentials for an SMB account.
+    #[cfg(feature = "kerberos-sspi")]
     pub fn from_password(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -169,6 +171,7 @@ impl KerberosCredentials {
         }
     }
 
+    #[cfg(feature = "kerberos-sspi")]
     fn username(&self) -> Result<sspi::Username, AuthError> {
         let domain = (!self.domain.is_empty()).then_some(self.domain.as_str());
         sspi::Username::new(&self.username, domain).map_err(|_| {
@@ -178,6 +181,7 @@ impl KerberosCredentials {
         })
     }
 
+    #[cfg(feature = "kerberos-sspi")]
     pub(super) fn auth_identity(&self) -> Result<sspi::AuthIdentity, AuthError> {
         Ok(sspi::AuthIdentity {
             username: self.username()?,
@@ -198,11 +202,9 @@ impl KerberosCredentials {
     }
 }
 
+#[cfg(feature = "kerberos-sspi")]
 fn default_backend_kind() -> KerberosBackendKind {
-    #[cfg(feature = "kerberos-sspi")]
-    {
-        KerberosBackendKind::Sspi
-    }
+    KerberosBackendKind::Sspi
 }
 
 enum KerberosAuthenticatorInner {
@@ -543,6 +545,7 @@ mod tests {
             assert_eq!(credentials.domain, "EXAMPLE.COM");
             assert_eq!(credentials.client_computer_name(), "WORKSTATION1");
             assert_eq!(credentials.kdc_url(), Some("tcp://dc01.example.com:88"));
+            #[cfg(feature = "kerberos-sspi")]
             assert_eq!(
                 credentials.username().expect("username should parse").inner(),
                 "EXAMPLE.COM\\alice"
@@ -601,6 +604,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "kerberos-sspi")]
     fn test_credentials() -> KerberosCredentials {
         KerberosCredentials::new("alice", "password")
             .with_domain("EXAMPLE.COM")
@@ -608,6 +612,15 @@ mod tests {
             .with_kdc_url("tcp://dc01.example.com:88")
     }
 
+    #[cfg(all(not(feature = "kerberos-sspi"), unix, feature = "kerberos-gssapi"))]
+    fn test_credentials() -> KerberosCredentials {
+        KerberosCredentials::from_ticket_cache("alice")
+            .with_domain("EXAMPLE.COM")
+            .with_workstation("WORKSTATION1")
+            .with_kdc_url("tcp://dc01.example.com:88")
+    }
+
+    #[cfg(feature = "kerberos-sspi")]
     #[test]
     fn password_credentials_default_to_sspi_backend() {
         let credentials = test_credentials();
@@ -703,6 +716,7 @@ mod tests {
         assert_eq!(auth.session_key(), Some(&b"0123456789abcdef"[..]));
     }
 
+    #[cfg(feature = "kerberos-sspi")]
     #[test]
     fn rejects_mixed_username_formats() {
         let error = KerberosCredentials::new("alice@example.com", "password")
@@ -717,8 +731,10 @@ mod tests {
     fn authenticator_reports_selected_backend() {
         let target =
             KerberosTarget::for_smb_host("fileserver.example.com").with_realm("EXAMPLE.COM");
-        let auth = KerberosAuthenticator::new(test_credentials(), target);
+        let credentials = test_credentials();
+        let expected = credentials.backend_kind();
+        let auth = KerberosAuthenticator::new(credentials, target);
 
-        assert_eq!(auth.backend_kind(), KerberosBackendKind::Sspi);
+        assert_eq!(auth.backend_kind(), expected);
     }
 }

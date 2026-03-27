@@ -81,6 +81,9 @@ Still in progress on this track:
   [docs/testing/samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md)
   and
   [docs/testing/windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
+  The default build remains static-friendlier because `kerberos-gssapi`
+  no longer drags in Unix GSS/Kerberos libraries unless it is explicitly
+  enabled.
 
 - `smolder-core` is moving into an API-stability and docs phase. The current
   public-surface notes are in

@@ -21,9 +21,10 @@ required-features = ["kerberos"]
 
 [features]
 default = []
-kerberos = ["kerberos-sspi"]
-kerberos-sspi = ["dep:sspi"]
-kerberos-gssapi = ["kerberos", "dep:kenobi-unix"]
+kerberos = ["kerberos-api", "kerberos-sspi"]
+kerberos-api = []
+kerberos-sspi = ["kerberos-api", "dep:sspi"]
+kerberos-gssapi = ["kerberos-api", "dep:kenobi-unix"]
 
 [dependencies]
 aes = "0.8"

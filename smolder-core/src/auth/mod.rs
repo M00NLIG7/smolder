@@ -1,12 +1,12 @@
 //! Authentication providers and protocol helpers.
 
-#[cfg(feature = "kerberos")]
+#[cfg(feature = "kerberos-api")]
 mod kerberos;
 #[cfg(all(unix, feature = "kerberos-gssapi"))]
 mod kerberos_gssapi;
 #[cfg(feature = "kerberos-sspi")]
 mod kerberos_sspi;
-#[cfg(feature = "kerberos")]
+#[cfg(feature = "kerberos-api")]
 mod kerberos_spn;
 mod ntlm;
 mod ntlm_rpc;
@@ -16,16 +16,25 @@ mod spnego;
 use smolder_proto::smb::smb2::NegotiateResponse;
 use thiserror::Error;
 
-#[cfg(feature = "kerberos")]
+#[cfg(feature = "kerberos-api")]
 pub use kerberos::{
     KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind,
     KerberosCredentials,
 };
-#[cfg(feature = "kerberos")]
+#[cfg(feature = "kerberos-api")]
 pub use kerberos_spn::KerberosTarget;
 pub use ntlm::{NtlmAuthenticator, NtlmCredentials};
 pub use ntlm_rpc::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};
 pub(crate) use ntlm_rpc_bind::NtlmRpcBindHandshake;
+
+#[cfg(all(
+    feature = "kerberos-api",
+    not(feature = "kerberos-sspi"),
+    not(all(unix, feature = "kerberos-gssapi"))
+))]
+compile_error!(
+    "kerberos-api requires either kerberos-sspi or kerberos-gssapi on Unix"
+);
 
 /// SPNEGO mechanism identifiers supported by Smolder authentication helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
