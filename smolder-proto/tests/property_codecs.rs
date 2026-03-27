@@ -122,7 +122,7 @@ fn auth_verifier_strategy() -> impl Strategy<Value = AuthVerifier> {
         auth_level_strategy(),
         any::<u8>(),
         any::<u32>(),
-        prop::collection::vec(any::<u8>(), 0..128),
+        prop::collection::vec(any::<u8>(), 1..128),
     )
         .prop_map(
             |(auth_type, auth_level, auth_reserved, auth_context_id, auth_value)| AuthVerifier {

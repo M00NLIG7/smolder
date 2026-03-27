@@ -1011,7 +1011,7 @@ fn decode_create_contexts(buffer: &[u8]) -> Result<Vec<CreateContext>, ProtocolE
         } else {
             next as usize
         };
-        if entry_len > cursor.len() || entry_len < 16 || !entry_len.is_multiple_of(8) {
+        if entry_len > cursor.len() || entry_len < 16 || entry_len % 8 != 0 {
             return Err(ProtocolError::InvalidField {
                 field: "next",
                 reason: "create context extends past buffer",

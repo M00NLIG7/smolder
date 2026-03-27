@@ -214,7 +214,7 @@ pub fn utf16le(input: &str) -> Vec<u8> {
 
 /// Decodes a UTF-16LE byte buffer without a terminating NUL.
 pub fn utf16le_string(input: &[u8]) -> Result<String, ProtocolError> {
-    if !input.len().is_multiple_of(2) {
+    if input.len() % 2 != 0 {
         return Err(ProtocolError::InvalidField {
             field: "utf16le_string",
             reason: "UTF-16LE byte length must be even",

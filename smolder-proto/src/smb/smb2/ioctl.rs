@@ -732,7 +732,7 @@ impl NetworkInterfaceInfoResponse {
             } else {
                 next as usize
             };
-            if entry_len > cursor.len() || entry_len < 152 || !entry_len.is_multiple_of(8) {
+            if entry_len > cursor.len() || entry_len < 152 || entry_len % 8 != 0 {
                 return Err(ProtocolError::InvalidField {
                     field: "next",
                     reason: "network interface entry extends past buffer",

@@ -950,7 +950,7 @@ fn split_auth_verifier<'a>(
     }
 
     let sec_trailer_offset = body.len() - auth_length - SEC_TRAILER_LEN;
-    if !sec_trailer_offset.is_multiple_of(4) {
+    if sec_trailer_offset % 4 != 0 {
         return Err(ProtocolError::InvalidField {
             field: "auth_verifier",
             reason: "security trailer is not 4-byte aligned",
