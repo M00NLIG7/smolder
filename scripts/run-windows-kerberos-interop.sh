@@ -30,6 +30,12 @@ export SMOLDER_KERBEROS_SHARE="${SMOLDER_KERBEROS_SHARE:-IPC$}"
 export SMOLDER_KERBEROS_REALM="${SMOLDER_KERBEROS_REALM:-LAB.EXAMPLE}"
 export SMOLDER_KERBEROS_TARGET_HOST="${SMOLDER_KERBEROS_TARGET_HOST:-DESKTOP-PTNJUS5.lab.example}"
 export SMOLDER_KERBEROS_KDC_URL="${SMOLDER_KERBEROS_KDC_URL:-tcp://dc1.lab.example:1088}"
+export SMOLDER_WINDOWS_USERNAME="${SMOLDER_WINDOWS_USERNAME:-windowsfixture}"
+export SMOLDER_WINDOWS_PASSWORD="${SMOLDER_WINDOWS_PASSWORD:-windowsfixture}"
+
+kerberos_netbios_domain="${SMOLDER_KERBEROS_NETBIOS_DOMAIN:-${SMOLDER_KERBEROS_REALM%%.*}}"
+kerberos_user="${SMOLDER_KERBEROS_USERNAME%%@*}"
+windows_domain_admin_member="${SMOLDER_WINDOWS_DOMAIN_ADMIN_MEMBER:-${kerberos_netbios_domain}\\${kerberos_user}}"
 
 machine_account="$(printf '%s' "${SMOLDER_KERBEROS_TARGET_HOST%%.*}" | tr '[:lower:]' '[:upper:]')$"
 
@@ -47,7 +53,7 @@ if ! docker compose -f docker/samba-ad/compose.yaml exec -T dc1 \
 fi
 
 cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --nocapture
-cargo build -p smolder --features kerberos --bin smolder-ls >/dev/null
+cargo build -p smolder --features kerberos --bin smolder-ls --bin smolder >/dev/null
 
 target_url="smb://${SMOLDER_KERBEROS_HOST}"
 if [[ "${SMOLDER_KERBEROS_PORT}" != "445" ]]; then
@@ -56,6 +62,31 @@ fi
 target_url="${target_url}/${SMOLDER_KERBEROS_SHARE}"
 
 target/debug/smolder-ls "${target_url}" \
+  --kerberos \
+  --username "${SMOLDER_KERBEROS_USERNAME}" \
+  --password "${SMOLDER_KERBEROS_PASSWORD}" \
+  --target-host "${SMOLDER_KERBEROS_TARGET_HOST}" \
+  --realm "${SMOLDER_KERBEROS_REALM}" \
+  --kdc-url "${SMOLDER_KERBEROS_KDC_URL}" >/dev/null
+
+if ! target/debug/smolder psexec "smb://${SMOLDER_KERBEROS_HOST}" \
+  --command "cmd /c net localgroup Administrators \"${windows_domain_admin_member}\" /add" \
+  --username "${SMOLDER_WINDOWS_USERNAME}" \
+  --password "${SMOLDER_WINDOWS_PASSWORD}" >/dev/null 2>&1; then
+  :
+fi
+
+target/debug/smolder smbexec "smb://${SMOLDER_KERBEROS_HOST}" \
+  --command whoami \
+  --kerberos \
+  --username "${SMOLDER_KERBEROS_USERNAME}" \
+  --password "${SMOLDER_KERBEROS_PASSWORD}" \
+  --target-host "${SMOLDER_KERBEROS_TARGET_HOST}" \
+  --realm "${SMOLDER_KERBEROS_REALM}" \
+  --kdc-url "${SMOLDER_KERBEROS_KDC_URL}" >/dev/null
+
+target/debug/smolder psexec "smb://${SMOLDER_KERBEROS_HOST}" \
+  --command whoami \
   --kerberos \
   --username "${SMOLDER_KERBEROS_USERNAME}" \
   --password "${SMOLDER_KERBEROS_PASSWORD}" \

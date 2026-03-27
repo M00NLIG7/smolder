@@ -31,10 +31,10 @@ impl RemoteExecTool {
     fn usage(self, program: &str) -> String {
         match self {
             Self::SmbExec => format!(
-                "Usage:\n  {program} smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
             Self::PsExec => format!(
-                "Usage:\n  {program} smb://host[:port] --command COMMAND [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]\n  {program} smb://host[:port] --interactive [--command COMMAND] [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} smb://host[:port] --command COMMAND [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]\n  {program} smb://host[:port] --interactive [--command COMMAND] [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
         }
     }
@@ -339,5 +339,42 @@ mod tests {
 
         assert!(options.interactive);
         assert_eq!(options.request, ExecRequest::command(String::new()));
+    }
+
+    #[cfg(feature = "kerberos")]
+    #[test]
+    fn parse_smbexec_command_accepts_kerberos_flags() {
+        let options = parse_args(
+            RemoteExecTool::SmbExec,
+            vec![
+                "smbexec".to_string(),
+                "smb://127.0.0.1".to_string(),
+                "--command".to_string(),
+                "whoami".to_string(),
+                "--kerberos".to_string(),
+                "--username".to_string(),
+                "smolder@LAB.EXAMPLE".to_string(),
+                "--password".to_string(),
+                "Passw0rd!".to_string(),
+                "--target-host".to_string(),
+                "DESKTOP-PTNJUS5.lab.example".to_string(),
+                "--realm".to_string(),
+                "LAB.EXAMPLE".to_string(),
+                "--kdc-url".to_string(),
+                "tcp://dc1.lab.example:1088".to_string(),
+            ],
+        )
+        .expect("parser should accept kerberos smbexec arguments");
+
+        assert!(matches!(options.auth.mode, crate::cli::common::AuthMode::Kerberos));
+        assert_eq!(
+            options.auth.kerberos.target_host.as_deref(),
+            Some("DESKTOP-PTNJUS5.lab.example")
+        );
+        assert_eq!(options.auth.kerberos.realm.as_deref(), Some("LAB.EXAMPLE"));
+        assert_eq!(
+            options.auth.kerberos.kdc_url.as_deref(),
+            Some("tcp://dc1.lab.example:1088")
+        );
     }
 }

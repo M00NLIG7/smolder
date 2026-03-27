@@ -310,26 +310,60 @@ pub(super) async fn connect_remote_exec(
     mode: ExecMode,
     service_binary: Option<&Path>,
 ) -> Result<RemoteExecClient, String> {
-    if matches!(options.mode, AuthMode::Kerberos) {
-        return Err(
-            "Kerberos auth is not supported for smbexec/psexec yet; use NTLM for remote execution"
-                .to_string(),
-        );
-    }
-
-    let mut credentials = NtlmCredentials::new(&options.username, &options.password);
-    if let Some(domain) = &options.domain {
-        credentials = credentials.with_domain(domain.as_str());
-    }
-    if let Some(workstation) = &options.workstation {
-        credentials = credentials.with_workstation(workstation.as_str());
-    }
-
     let mut builder = RemoteExecClient::builder()
         .server(target.host.as_str())
         .port(target.port)
-        .credentials(credentials)
         .mode(mode);
+
+    match options.mode {
+        AuthMode::Ntlm => {
+            let mut credentials = NtlmCredentials::new(&options.username, &options.password);
+            if let Some(domain) = &options.domain {
+                credentials = credentials.with_domain(domain.as_str());
+            }
+            if let Some(workstation) = &options.workstation {
+                credentials = credentials.with_workstation(workstation.as_str());
+            }
+            builder = builder.credentials(credentials);
+        }
+        AuthMode::Kerberos => {
+            #[cfg(feature = "kerberos")]
+            {
+                let mut credentials = KerberosCredentials::new(&options.username, &options.password);
+                if let Some(domain) = &options.domain {
+                    credentials = credentials.with_domain(domain.as_str());
+                }
+                if let Some(workstation) = &options.workstation {
+                    credentials = credentials.with_workstation(workstation.as_str());
+                }
+                if let Some(kdc_url) = &options.kerberos.kdc_url {
+                    credentials = credentials.with_kdc_url(kdc_url.as_str());
+                }
+
+                let target_host = options
+                    .kerberos
+                    .target_host
+                    .as_deref()
+                    .unwrap_or(target.host.as_str());
+                let mut kerberos_target = KerberosTarget::for_smb_host(target_host);
+                if let Some(principal) = &options.kerberos.target_principal {
+                    kerberos_target = kerberos_target.with_principal(principal.as_str());
+                } else if let Some(realm) = &options.kerberos.realm {
+                    kerberos_target = kerberos_target.with_realm(realm.as_str());
+                }
+
+                builder = builder.kerberos(credentials, kerberos_target);
+            }
+            #[cfg(not(feature = "kerberos"))]
+            {
+                let _ = target;
+                unreachable!(
+                    "kerberos mode should be rejected before building a remote exec client"
+                )
+            }
+        }
+    }
+
     if let Some(service_binary) = service_binary {
         builder = builder.psexec_service_binary(service_binary.to_path_buf());
     }

@@ -1,7 +1,8 @@
 # Windows Kerberos Gate
 
 This document captures the local Windows Kerberos validation lane for
-`smolder-core` and the Kerberos-enabled file CLI path in `smolder-tools`.
+`smolder-core`, the Kerberos-enabled file CLI path in `smolder-tools`, and the
+Kerberos `smbexec` smoke path.
 
 It uses:
 
@@ -52,6 +53,10 @@ That helper:
 The helper intentionally rebuilds or reprovisions the Samba AD fixture, so it is
 the right command to rerun whenever the realm state has been reset.
 
+It also ensures the default domain test user `LAB\smolder` is in Tiny11's local
+`Administrators` group so the Kerberos remote-exec lane can access `ADMIN$`,
+`IPC$`, and SCMR.
+
 ## Run The Kerberos Gate
 
 Once Tiny11 is joined, run:
@@ -67,11 +72,18 @@ machine account is still present in the KDC, and then runs:
 cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --nocapture
 ```
 
-followed by a Kerberos-enabled file CLI smoke command:
+followed by Kerberos-enabled CLI smoke commands:
 
 ```bash
 target/debug/smolder-ls smb://127.0.0.1/IPC$ --kerberos ...
+target/debug/smolder smbexec smb://127.0.0.1 --kerberos --command whoami ...
+target/debug/smolder psexec smb://127.0.0.1 --kerberos --command whoami ...
 ```
+
+Before the `smbexec` smoke, the wrapper re-applies local `Administrators`
+membership for the default domain test user using the existing local Tiny11
+admin credentials. That makes the Kerberos gate self-healing after realm resets
+or user-profile drift.
 
 with these defaults:
 
@@ -93,9 +105,8 @@ When the fixture is healthy:
 - `kerberos_interop.rs` authenticates with Kerberos and connects `IPC$`
 - `smolder-ls` can list `IPC$` over Kerberos
 
-This gate currently covers the file-workflow side of `smolder-tools`.
-`smbexec` and `psexec` remain NTLM-only until the core pipe/session config gains
-Kerberos support.
+This gate currently covers the file-workflow side of `smolder-tools` plus both
+Kerberos remote-exec modes: `smbexec` and `psexec`.
 
 If the wrapper reports that the machine account is missing, the local Samba AD
 realm was reset and Tiny11 needs to be rejoined with

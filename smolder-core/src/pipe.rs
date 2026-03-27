@@ -17,6 +17,8 @@ use smolder_proto::smb::smb2::{
 };
 use smolder_proto::smb::status::NtStatus;
 
+#[cfg(feature = "kerberos")]
+use crate::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
 use crate::client::{Connection, TreeConnected};
 use crate::error::CoreError;
@@ -35,11 +37,21 @@ const SYNCHRONIZE: u32 = 0x0010_0000;
 pub struct SmbSessionConfig {
     server: String,
     port: u16,
-    credentials: NtlmCredentials,
+    auth: SessionAuth,
     signing_mode: SigningMode,
     capabilities: GlobalCapabilities,
     dialects: Vec<Dialect>,
     client_guid: [u8; 16],
+}
+
+#[derive(Debug, Clone)]
+enum SessionAuth {
+    Ntlm(NtlmCredentials),
+    #[cfg(feature = "kerberos")]
+    Kerberos {
+        credentials: KerberosCredentials,
+        target: KerberosTarget,
+    },
 }
 
 impl SmbSessionConfig {
@@ -49,7 +61,31 @@ impl SmbSessionConfig {
         Self {
             server: server.into(),
             port: DEFAULT_PORT,
-            credentials,
+            auth: SessionAuth::Ntlm(credentials),
+            signing_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU
+                | GlobalCapabilities::LEASING
+                | GlobalCapabilities::ENCRYPTION,
+            dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+            client_guid: random(),
+        }
+    }
+
+    /// Creates a new Kerberos-authenticated session configuration with SMB2/3 defaults.
+    #[cfg(feature = "kerberos")]
+    #[must_use]
+    pub fn kerberos(
+        server: impl Into<String>,
+        credentials: KerberosCredentials,
+        target: KerberosTarget,
+    ) -> Self {
+        Self {
+            server: server.into(),
+            port: DEFAULT_PORT,
+            auth: SessionAuth::Kerberos {
+                credentials,
+                target,
+            },
             signing_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU
                 | GlobalCapabilities::LEASING
@@ -690,7 +726,6 @@ pub async fn connect_tree(
     config: &SmbSessionConfig,
     share: &str,
 ) -> Result<Connection<TokioTcpTransport, TreeConnected>, CoreError> {
-    let mut auth = NtlmAuthenticator::new(config.credentials.clone());
     let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
     let request = NegotiateRequest {
         security_mode: config.signing_mode,
@@ -700,7 +735,20 @@ pub async fn connect_tree(
         dialects: config.dialects.clone(),
     };
     let connection = Connection::new(transport).negotiate(&request).await?;
-    let connection = connection.authenticate(&mut auth).await?;
+    let connection = match config.auth.clone() {
+        SessionAuth::Ntlm(credentials) => {
+            let mut auth = NtlmAuthenticator::new(credentials);
+            connection.authenticate(&mut auth).await?
+        }
+        #[cfg(feature = "kerberos")]
+        SessionAuth::Kerberos {
+            credentials,
+            target,
+        } => {
+            let mut auth = KerberosAuthenticator::new(credentials, target);
+            connection.authenticate(&mut auth).await?
+        }
+    };
     let unc = format!(r"\\{}\{}", config.server, normalize_share_name(share)?);
     connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
@@ -761,6 +809,8 @@ mod tests {
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[cfg(feature = "kerberos")]
+    use crate::auth::{KerberosCredentials, KerberosTarget};
     use crate::auth::NtlmCredentials;
     use crate::client::{Connection, TreeConnected};
     use crate::transport::Transport;
@@ -802,6 +852,19 @@ mod tests {
             encryption.ciphers,
             vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm]
         );
+    }
+
+    #[cfg(feature = "kerberos")]
+    #[test]
+    fn kerberos_smb_session_config_stores_kerberos_auth() {
+        let config = SmbSessionConfig::kerberos(
+            "server",
+            KerberosCredentials::new("user@LAB.EXAMPLE", "pass"),
+            KerberosTarget::for_smb_host("server.lab.example"),
+        );
+
+        assert!(matches!(config.auth, super::SessionAuth::Kerberos { .. }));
+        assert!(config.capabilities.contains(GlobalCapabilities::ENCRYPTION));
     }
 
     #[async_trait]

@@ -13,8 +13,11 @@ windows_password="${SMOLDER_WINDOWS_PASSWORD:-windowsfixture}"
 guest_blob_path="${SMOLDER_WINDOWS_ODJ_GUEST_PATH:-C:\\Windows\\Temp\\tiny11-odj.txt}"
 host_blob_path="${SMOLDER_WINDOWS_ODJ_HOST_PATH:-/tmp/tiny11-odj.txt}"
 ad_domain="${SMOLDER_AD_DOMAIN:-LAB.EXAMPLE}"
+ad_netbios_domain="${SMOLDER_AD_NETBIOS_DOMAIN:-${ad_domain%%.*}}"
 ad_admin_user="${SMOLDER_AD_ADMIN_USER:-Administrator}"
 ad_admin_password="${SMOLDER_AD_ADMIN_PASSWORD:-Passw0rd!}"
+ad_test_user="${SMOLDER_AD_TEST_USER:-smolder}"
+windows_domain_admin_member="${SMOLDER_WINDOWS_DOMAIN_ADMIN_MEMBER:-${ad_netbios_domain}\\${ad_test_user}}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -134,5 +137,14 @@ if [[ "${domain_line}" != *"lab.example"* ]]; then
   exit 1
 fi
 
+if ! target/debug/psexec "smb://${windows_host}" \
+  --command "cmd /c net localgroup Administrators \"${windows_domain_admin_member}\" /add" \
+  --username "${windows_username}" \
+  --password "${windows_password}" >/dev/null 2>&1; then
+  printf 'warning: could not confirm local Administrators membership for %s during join\n' \
+    "${windows_domain_admin_member}" >&2
+fi
+
 printf 'Tiny11 offline domain join succeeded for %s.\n' "${guest_hostname}"
 printf '%s\n' "${domain_line}"
+printf 'Ensured local Administrators membership for %s.\n' "${windows_domain_admin_member}"

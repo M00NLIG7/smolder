@@ -15,6 +15,8 @@ use smolder_proto::smb::smb2::{
 };
 use smolder_proto::smb::status::NtStatus;
 
+#[cfg(feature = "kerberos")]
+use smolder_core::auth::{KerberosCredentials, KerberosTarget};
 use smolder_core::auth::NtlmCredentials;
 use smolder_core::client::{Connection, TreeConnected};
 use smolder_core::error::CoreError;
@@ -231,7 +233,7 @@ impl InteractiveWaiter {
 pub struct RemoteExecBuilder {
     server: Option<String>,
     port: u16,
-    credentials: Option<NtlmCredentials>,
+    auth: Option<SessionAuth>,
     signing_mode: SigningMode,
     capabilities: GlobalCapabilities,
     dialects: Vec<Dialect>,
@@ -246,12 +248,22 @@ pub struct RemoteExecBuilder {
     poll_interval: Duration,
 }
 
+#[derive(Debug, Clone)]
+enum SessionAuth {
+    Ntlm(NtlmCredentials),
+    #[cfg(feature = "kerberos")]
+    Kerberos {
+        credentials: KerberosCredentials,
+        target: KerberosTarget,
+    },
+}
+
 impl Default for RemoteExecBuilder {
     fn default() -> Self {
         Self {
             server: None,
             port: DEFAULT_PORT,
-            credentials: None,
+            auth: None,
             signing_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU
                 | GlobalCapabilities::LEASING
@@ -294,7 +306,18 @@ impl RemoteExecBuilder {
     /// Sets the NTLM credentials used for each execution session.
     #[must_use]
     pub fn credentials(mut self, credentials: NtlmCredentials) -> Self {
-        self.credentials = Some(credentials);
+        self.auth = Some(SessionAuth::Ntlm(credentials));
+        self
+    }
+
+    /// Sets the Kerberos credentials and SMB target used for each execution session.
+    #[cfg(feature = "kerberos")]
+    #[must_use]
+    pub fn kerberos(mut self, credentials: KerberosCredentials, target: KerberosTarget) -> Self {
+        self.auth = Some(SessionAuth::Kerberos {
+            credentials,
+            target,
+        });
         self
     }
 
@@ -359,15 +382,24 @@ impl RemoteExecBuilder {
         let server = self
             .server
             .ok_or(CoreError::InvalidInput("server must be configured"))?;
-        let credentials = self
-            .credentials
+        let auth = self
+            .auth
             .ok_or(CoreError::InvalidInput("credentials must be configured"))?;
         let admin_share = normalize_share_name(&self.admin_share)?;
         let ipc_share = normalize_share_name(&self.ipc_share)?;
         let staging_directory = normalize_share_path(&self.staging_directory)?;
 
+        let config = match auth {
+            SessionAuth::Ntlm(credentials) => SmbSessionConfig::new(server, credentials),
+            #[cfg(feature = "kerberos")]
+            SessionAuth::Kerberos {
+                credentials,
+                target,
+            } => SmbSessionConfig::kerberos(server, credentials, target),
+        };
+
         Ok(RemoteExecClient {
-            config: SmbSessionConfig::new(server, credentials)
+            config: config
                 .with_port(self.port)
                 .with_signing_mode(self.signing_mode)
                 .with_capabilities(self.capabilities)
@@ -1675,6 +1707,8 @@ mod tests {
         CommandPaths, ExecMode, ExecRequest, RemoteExecBuilder,
     };
     use smolder_core::error::CoreError;
+    #[cfg(feature = "kerberos")]
+    use smolder_core::prelude::{KerberosCredentials, KerberosTarget};
     use smolder_proto::smb::smb2::{Command as SmbCommand, GlobalCapabilities};
     use smolder_proto::smb::status::NtStatus;
 
@@ -1684,6 +1718,28 @@ mod tests {
         assert!(builder
             .capabilities
             .contains(GlobalCapabilities::ENCRYPTION));
+    }
+
+    #[test]
+    fn remote_exec_builder_stores_ntlm_credentials() {
+        let builder =
+            RemoteExecBuilder::new().credentials(smolder_core::prelude::NtlmCredentials::new(
+                "user", "pass",
+            ));
+        assert!(matches!(builder.auth, Some(super::SessionAuth::Ntlm(_))));
+    }
+
+    #[cfg(feature = "kerberos")]
+    #[test]
+    fn remote_exec_builder_stores_kerberos_auth() {
+        let builder = RemoteExecBuilder::new().kerberos(
+            KerberosCredentials::new("user@LAB.EXAMPLE", "pass"),
+            KerberosTarget::for_smb_host("server.lab.example"),
+        );
+        assert!(matches!(
+            builder.auth,
+            Some(super::SessionAuth::Kerberos { .. })
+        ));
     }
 
     #[test]
