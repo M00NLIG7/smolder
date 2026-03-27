@@ -34,16 +34,55 @@ Build the Kerberos example explicitly:
 cargo build -p smolder-smb-core --features kerberos --example kerberos_tree_connect
 ```
 
-## Tools Example
+## Tools Examples
 
-`smolder` now ships a compile-checked interactive remote-exec example:
+`smolder` now ships these compile-checked examples:
 
+- [file_roundtrip.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/file_roundtrip.rs)
 - [interactive_psexec.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/interactive_psexec.rs)
 
-Build it with:
+Build them with:
 
 ```bash
-cargo build -p smolder --example interactive_psexec
+cargo build -p smolder --examples
+```
+
+Build the high-level file workflow example explicitly:
+
+```bash
+cargo build -p smolder --example file_roundtrip
+```
+
+### File Roundtrip Example
+
+This example shows the intended high-level SMB file workflow surface:
+
+- [`SmbClientBuilder`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
+- [`Share::write`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
+- [`Share::read`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
+- [`Share::remove`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
+- [`Share::disconnect`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
+
+Required environment:
+
+```bash
+export SMOLDER_EXAMPLE_HOST=fileserver.lab.example
+export SMOLDER_EXAMPLE_USERNAME='<username>'
+export SMOLDER_EXAMPLE_PASSWORD='<password>'
+```
+
+Optional:
+
+```bash
+export SMOLDER_EXAMPLE_PORT=445
+export SMOLDER_EXAMPLE_SHARE=share
+export SMOLDER_EXAMPLE_PATH=smolder-example.txt
+```
+
+Run it:
+
+```bash
+cargo run -p smolder --example file_roundtrip
 ```
 
 ### Interactive PsExec Example

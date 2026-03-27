@@ -13,9 +13,13 @@ The intended entry points are:
 
 ## Minimal File Roundtrip
 
+The shipped compile-checked version of this flow is:
+
+- [smolder-tools/examples/file_roundtrip.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/file_roundtrip.rs)
+
 ```rust
 use smolder_tools::prelude::SmbClientBuilder;
-use smolder_core::prelude::NtlmCredentials;
+use smolder_tools::prelude::NtlmCredentials;
 
 # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 let client = SmbClientBuilder::new()

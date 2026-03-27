@@ -21,8 +21,9 @@ for:
 - named-pipe RPC bind
 - Kerberos tree connect
 
-The shared examples guide, including the interactive `psexec` tools example,
-is in [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md).
+The shared examples guide, including the high-level file roundtrip and
+interactive `psexec` tools examples, is in
+[docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md).
 The task-oriented cookbook is in
 [docs/guide/cookbook.md](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md).
 That guide now documents the stable interactive remote-exec path as direct

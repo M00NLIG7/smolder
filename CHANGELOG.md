@@ -23,6 +23,8 @@ and the versioning/MSRV rules are defined in
   `smolder-proto` and `smolder-smb-core`.
 - Added an examples guide plus a compile-checked interactive `psexec` tools
   example.
+- Added a compile-checked high-level SMB file roundtrip example for the
+  published `smolder` tools crate.
 
 ### Fixed
 
