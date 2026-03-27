@@ -2,6 +2,8 @@
 
 #[cfg(feature = "kerberos")]
 mod kerberos;
+#[cfg(feature = "kerberos-sspi")]
+mod kerberos_sspi;
 #[cfg(feature = "kerberos")]
 mod kerberos_spn;
 mod ntlm;
