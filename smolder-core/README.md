@@ -8,6 +8,13 @@ name remains `smolder_core`.
 It owns SMB auth/session state, transport logic, signing, encryption, named
 pipes, RPC transport, DFS helpers, and durable/reconnect primitives.
 
+Real-project readiness:
+
+- intended for direct library use within the documented `0.1.x` support policy
+- additive API evolution is preferred over churn
+- pre-`1.0` breaking changes are still possible, but they should be deliberate
+  and reflected in the versioning policy rather than landing silently
+
 Recommended entry points:
 
 - `smolder_core::client::Connection` for typed SMB negotiate/session/tree flow
@@ -20,6 +27,10 @@ API guidance:
 
 - repository API notes:
   <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md>
+- support policy:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md>
+- versioning policy:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md>
 
 Examples:
 

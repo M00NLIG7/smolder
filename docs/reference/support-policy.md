@@ -28,6 +28,18 @@ For the `0.1.x` line:
 - breaking changes are still possible before a `1.0`, but they should be
   deliberate, infrequent, and justified by a clearly wrong or blocking design
 
+## Readiness Statement
+
+The `0.1.x` line is intended to be usable in real projects.
+
+That does not mean "frozen forever." It means:
+
+- documented supported flows are expected to remain stable enough for
+  downstream use
+- patch releases should not casually break code that stays within this policy
+- if a supported public workflow needs to change, it should be treated as a
+  versioning-policy event rather than incidental churn
+
 ## Crate Scope
 
 ### `smolder-proto`

@@ -50,6 +50,13 @@ release-quality reason to move it.
 The project is still pre-`1.0`, but published crates should no longer behave as
 if every release is unconstrained.
 
+Practical interpretation:
+
+- being pre-`1.0` does not mean "expect random API breakage"
+- downstream users should expect small additive releases by default
+- when supported public behavior must change, the release should make that
+  obvious and give users a clear migration expectation
+
 ### Patch releases
 
 Use patch releases for:

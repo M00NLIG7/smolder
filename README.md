@@ -41,6 +41,24 @@ Published package names:
 Release notes and published change summaries live in
 [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md).
 
+## Can I Use This In A Real Project?
+
+Yes, if your usage fits the documented `0.1.x` support surface.
+
+The practical promise is:
+
+- real-project use is expected and supported for the documented SMB2/3, auth,
+  encryption, named-pipe/RPC, DFS, reconnect, and tools workflows
+- additive change is preferred over public API churn
+- deliberate breaking changes are still possible before `1.0`, but they should
+  be infrequent, documented, and shipped as minor-version changes
+
+Read these together before depending on the crates in production:
+
+- [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+- [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
+- [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md)
+
 Boundary rule:
 
 - `smolder-core` stays library-only and protocol-focused.
