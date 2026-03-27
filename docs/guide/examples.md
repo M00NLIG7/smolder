@@ -18,6 +18,7 @@ The support contract for these examples lives in
 
 `smolder-smb-core` currently ships these compile-checked examples:
 
+- [core_file_roundtrip.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/core_file_roundtrip.rs)
 - [ntlm_tree_connect.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/ntlm_tree_connect.rs)
 - [named_pipe_rpc_bind.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/named_pipe_rpc_bind.rs)
 - [kerberos_tree_connect.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/kerberos_tree_connect.rs)
@@ -32,6 +33,30 @@ Build the Kerberos example explicitly:
 
 ```bash
 cargo build -p smolder-smb-core --features kerberos --example kerberos_tree_connect
+```
+
+### Core File Roundtrip Example
+
+This is the best direct-library starting point if you want something closer to
+real project code than the smaller connection snippets. It shows:
+
+- `connect_tree`
+- `CreateRequest`
+- `WriteRequest`
+- `FlushRequest`
+- `ReadRequest`
+- `CloseRequest`
+
+Build it explicitly:
+
+```bash
+cargo build -p smolder-smb-core --example core_file_roundtrip
+```
+
+Run it:
+
+```bash
+cargo run -p smolder-smb-core --example core_file_roundtrip
 ```
 
 ## Tools Examples
