@@ -12,6 +12,8 @@ use rand::random;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
+#[cfg(feature = "kerberos")]
+use smolder_core::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
 use smolder_core::auth::{NtlmAuthenticator, NtlmCredentials};
 use smolder_core::client::{
     Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle, TreeConnected,
@@ -166,7 +168,7 @@ impl From<LeaseV2> for Lease {
 pub struct SmbClientBuilder {
     server: Option<String>,
     port: u16,
-    credentials: Option<NtlmCredentials>,
+    auth: Option<SessionAuth>,
     require_encryption: bool,
     signing_mode: SigningMode,
     capabilities: GlobalCapabilities,
@@ -175,12 +177,22 @@ pub struct SmbClientBuilder {
     transfer_chunk_size: u32,
 }
 
+#[derive(Debug, Clone)]
+enum SessionAuth {
+    Ntlm(NtlmCredentials),
+    #[cfg(feature = "kerberos")]
+    Kerberos {
+        credentials: KerberosCredentials,
+        target: KerberosTarget,
+    },
+}
+
 impl Default for SmbClientBuilder {
     fn default() -> Self {
         Self {
             server: None,
             port: DEFAULT_PORT,
-            credentials: None,
+            auth: None,
             require_encryption: false,
             signing_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU
@@ -217,7 +229,18 @@ impl SmbClientBuilder {
     /// Sets the NTLM credentials used during session setup.
     #[must_use]
     pub fn credentials(mut self, credentials: NtlmCredentials) -> Self {
-        self.credentials = Some(credentials);
+        self.auth = Some(SessionAuth::Ntlm(credentials));
+        self
+    }
+
+    /// Sets the Kerberos credentials and SMB target used during session setup.
+    #[cfg(feature = "kerberos")]
+    #[must_use]
+    pub fn kerberos(mut self, credentials: KerberosCredentials, target: KerberosTarget) -> Self {
+        self.auth = Some(SessionAuth::Kerberos {
+            credentials,
+            target,
+        });
         self
     }
 
@@ -269,8 +292,8 @@ impl SmbClientBuilder {
         let server = self
             .server
             .ok_or(CoreError::InvalidInput("server must be configured"))?;
-        let credentials = self
-            .credentials
+        let auth = self
+            .auth
             .ok_or(CoreError::InvalidInput("credentials must be configured"))?;
 
         let transport = TokioTcpTransport::connect((server.as_str(), self.port)).await?;
@@ -283,8 +306,20 @@ impl SmbClientBuilder {
         };
         let connection = Connection::new(transport).negotiate(&request).await?;
 
-        let mut auth = NtlmAuthenticator::new(credentials);
-        let connection = connection.authenticate(&mut auth).await?;
+        let connection = match auth {
+            SessionAuth::Ntlm(credentials) => {
+                let mut auth = NtlmAuthenticator::new(credentials);
+                connection.authenticate(&mut auth).await?
+            }
+            #[cfg(feature = "kerberos")]
+            SessionAuth::Kerberos {
+                credentials,
+                target,
+            } => {
+                let mut auth = KerberosAuthenticator::new(credentials, target);
+                connection.authenticate(&mut auth).await?
+            }
+        };
         Ok(SmbClient {
             server,
             connection,
@@ -2031,6 +2066,7 @@ fn should_fallback_direct_share_after_dfs_query(error: &CoreError) -> bool {
             if *command == Command::Ioctl
                 && (*status == NtStatus::PATH_NOT_COVERED.to_u32()
                     || *status == NtStatus::NOT_FOUND.to_u32()
+                    || *status == NtStatus::FS_DRIVER_REQUIRED.to_u32()
                     || *status == NtStatus::OBJECT_PATH_NOT_FOUND.to_u32()
                     || *status == NtStatus::OBJECT_NAME_NOT_FOUND.to_u32()) =>
         {
@@ -2134,6 +2170,26 @@ mod tests {
     fn smb_client_builder_can_require_encryption() {
         let builder = super::SmbClientBuilder::new().require_encryption(true);
         assert!(builder.require_encryption);
+    }
+
+    #[test]
+    fn smb_client_builder_stores_ntlm_credentials() {
+        let builder = super::SmbClientBuilder::new()
+            .credentials(smolder_core::prelude::NtlmCredentials::new("user", "pass"));
+        assert!(matches!(builder.auth, Some(super::SessionAuth::Ntlm(_))));
+    }
+
+    #[cfg(feature = "kerberos")]
+    #[test]
+    fn smb_client_builder_stores_kerberos_auth() {
+        let builder = super::SmbClientBuilder::new().kerberos(
+            smolder_core::prelude::KerberosCredentials::new("user", "pass"),
+            smolder_core::prelude::KerberosTarget::for_smb_host("files1.lab.example"),
+        );
+        assert!(matches!(
+            builder.auth,
+            Some(super::SessionAuth::Kerberos { .. })
+        ));
     }
 
     #[async_trait]
@@ -3959,6 +4015,63 @@ mod tests {
             .share_path_auto(r"\\server\share\docs\report.txt")
             .await
             .expect("not-found DFS query should fall back to direct share");
+
+        assert_eq!(share.server(), "server");
+        assert_eq!(share.name(), "share");
+        assert_eq!(relative_path, r"docs\report.txt");
+    }
+
+    #[tokio::test]
+    async fn share_path_auto_falls_back_to_direct_share_when_dfs_driver_is_unavailable() {
+        let ipc_response = TreeConnectResponse {
+            share_type: ShareType::Pipe,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let share_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let client = build_client_with_tree_response(
+            "server",
+            ipc_response,
+            vec![
+                response_frame_with_credits(
+                    Command::Ioctl,
+                    NtStatus::FS_DRIVER_REQUIRED.to_u32(),
+                    3,
+                    11,
+                    7,
+                    1,
+                    Vec::new(),
+                ),
+                response_frame(
+                    Command::TreeDisconnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    4,
+                    11,
+                    7,
+                    TreeDisconnectResponse.encode(),
+                ),
+                response_frame(
+                    Command::TreeConnect,
+                    NtStatus::SUCCESS.to_u32(),
+                    5,
+                    11,
+                    9,
+                    share_response.encode(),
+                ),
+            ],
+        )
+        .await;
+
+        let (share, relative_path) = client
+            .share_path_auto(r"\\server\share\docs\report.txt")
+            .await
+            .expect("non-DFS path should fall back when DFS driver is unavailable");
 
         assert_eq!(share.server(), "server");
         assert_eq!(share.name(), "share");

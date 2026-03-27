@@ -39,21 +39,22 @@ Implemented now:
   compound requests, durable/resilient reconnect primitives, and feature-gated
   Kerberos session-setup/auth primitives
 - `smolder-tools`: high-level SMB file APIs, DFS-aware path resolution,
-  reconnect helpers, CLI file workflows, `smbexec`, and `psexec`
+  reconnect helpers, CLI file workflows, feature-gated Kerberos file auth,
+  `smbexec`, and `psexec`
 - Live interop coverage against both Tiny11/Windows and local Samba fixtures,
   with a repeatable harness and release gates
 
 Validated now:
 
 - Windows: negotiate, auth, tree connect, file I/O, durable reconnect,
-  encrypted share I/O, named pipes, RPC, DFS, Kerberos core auth, `smbexec`,
-  and `psexec`
+  encrypted share I/O, named pipes, RPC, DFS, Kerberos core auth, Kerberos file
+  CLI workflows, `smbexec`, and `psexec`
 - Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
   named pipes, encrypted RPC, and Kerberos core auth
 
 Still in progress on this track:
 
-- Kerberos CLI integration and broader credential sources like ticket cache and keytab
+- Kerberos remote-exec integration plus broader credential sources like ticket cache and keytab
 - SMB1 compatibility
 - Fully automated Windows CI; the Tiny11 gate is still manual/self-hosted
 - Full Samba `selftest` parity

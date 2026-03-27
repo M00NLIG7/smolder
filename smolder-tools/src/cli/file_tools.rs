@@ -54,25 +54,25 @@ impl FileTool {
     fn usage(self, program: &str) -> String {
         match self {
             Self::Cat => format!(
-                "Usage:\n  {program} smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
             Self::Ls => format!(
-                "Usage:\n  {program} smb://host[:port]/share[/path] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} smb://host[:port]/share[/path] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
             Self::Stat => format!(
-                "Usage:\n  {program} smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
             Self::Get => format!(
-                "Usage:\n  {program} smb://host[:port]/share/path LOCAL_PATH [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} smb://host[:port]/share/path LOCAL_PATH [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
             Self::Put => format!(
-                "Usage:\n  {program} LOCAL_PATH smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} LOCAL_PATH smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
             Self::Remove => format!(
-                "Usage:\n  {program} smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} smb://host[:port]/share/path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
             Self::Move => format!(
-                "Usage:\n  {program} smb://host[:port]/share/path smb://host[:port]/share/new-path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME]"
+                "Usage:\n  {program} smb://host[:port]/share/path smb://host[:port]/share/new-path [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
             ),
         }
     }
@@ -306,7 +306,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{parse_args, FileTool, ParsedFileArgs};
-    use crate::cli::common::{AuthOptions, RemoteLocation};
+    use crate::cli::common::{AuthMode, AuthOptions, KerberosOptions, RemoteLocation};
 
     #[test]
     fn parse_cat_command_with_inline_credentials() {
@@ -326,10 +326,12 @@ mod tests {
             options,
             ParsedFileArgs::SingleRemote {
                 auth: AuthOptions {
+                    mode: AuthMode::Ntlm,
                     username: "smolder".to_string(),
                     password: "smolderpass".to_string(),
                     domain: Some("WORKGROUP".to_string()),
                     workstation: None,
+                    kerberos: KerberosOptions::default(),
                 },
                 remote: RemoteLocation {
                     host: "127.0.0.1".to_string(),
@@ -365,6 +367,7 @@ mod tests {
                 local,
                 remote,
             } => {
+                assert_eq!(auth.mode, AuthMode::Ntlm);
                 assert_eq!(auth.username, "user");
                 assert_eq!(auth.password, "pass");
                 assert_eq!(auth.workstation.as_deref(), Some("ws1"));
@@ -398,6 +401,7 @@ mod tests {
 
         match options {
             ParsedFileArgs::SingleRemote { auth, remote } => {
+                assert_eq!(auth.mode, AuthMode::Ntlm);
                 assert_eq!(auth.username, "user");
                 assert_eq!(auth.password, "pass");
                 assert_eq!(
@@ -434,6 +438,7 @@ mod tests {
                 source,
                 destination,
             } => {
+                assert_eq!(auth.mode, AuthMode::Ntlm);
                 assert_eq!(auth.username, "user");
                 assert_eq!(auth.password, "pass");
                 assert_eq!(
@@ -457,5 +462,60 @@ mod tests {
             }
             other => panic!("unexpected parser output: {other:?}"),
         }
+    }
+
+    #[cfg(feature = "kerberos")]
+    #[test]
+    fn parse_ls_command_with_kerberos_flags() {
+        let options = parse_args(
+            FileTool::Ls,
+            vec![
+                "smolder-ls".to_string(),
+                "smb://127.0.0.1/IPC$".to_string(),
+                "--kerberos".to_string(),
+                "--username=smolder@LAB.EXAMPLE".to_string(),
+                "--password=Passw0rd!".to_string(),
+                "--target-host=DESKTOP-PTNJUS5.lab.example".to_string(),
+                "--realm=LAB.EXAMPLE".to_string(),
+                "--kdc-url=tcp://dc1.lab.example:1088".to_string(),
+            ],
+        )
+        .expect("parser should accept kerberos ls arguments");
+
+        match options {
+            ParsedFileArgs::SingleRemote { auth, remote } => {
+                assert_eq!(auth.mode, AuthMode::Kerberos);
+                assert_eq!(auth.username, "smolder@LAB.EXAMPLE");
+                assert_eq!(
+                    auth.kerberos.target_host.as_deref(),
+                    Some("DESKTOP-PTNJUS5.lab.example")
+                );
+                assert_eq!(auth.kerberos.realm.as_deref(), Some("LAB.EXAMPLE"));
+                assert_eq!(
+                    auth.kerberos.kdc_url.as_deref(),
+                    Some("tcp://dc1.lab.example:1088")
+                );
+                assert_eq!(remote.share, "IPC$");
+            }
+            other => panic!("unexpected parser output: {other:?}"),
+        }
+    }
+
+    #[cfg(not(feature = "kerberos"))]
+    #[test]
+    fn parse_ls_command_rejects_kerberos_without_feature() {
+        let error = parse_args(
+            FileTool::Ls,
+            vec![
+                "smolder-ls".to_string(),
+                "smb://127.0.0.1/IPC$".to_string(),
+                "--kerberos".to_string(),
+                "--username=smolder@LAB.EXAMPLE".to_string(),
+                "--password=Passw0rd!".to_string(),
+            ],
+        )
+        .expect_err("non-kerberos build should reject kerberos auth");
+
+        assert!(error.contains("not compiled with kerberos support"));
     }
 }

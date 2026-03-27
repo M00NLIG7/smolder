@@ -43,4 +43,6 @@ pub mod prelude {
     pub use smolder_core::prelude::{
         DurableHandle, DurableOpenOptions, NtlmCredentials, ResilientHandle,
     };
+    #[cfg(feature = "kerberos")]
+    pub use smolder_core::prelude::{KerberosCredentials, KerberosTarget};
 }

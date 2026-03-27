@@ -1,7 +1,7 @@
 # Windows Kerberos Gate
 
 This document captures the local Windows Kerberos validation lane for
-`smolder-core`.
+`smolder-core` and the Kerberos-enabled file CLI path in `smolder-tools`.
 
 It uses:
 
@@ -67,6 +67,12 @@ machine account is still present in the KDC, and then runs:
 cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --nocapture
 ```
 
+followed by a Kerberos-enabled file CLI smoke command:
+
+```bash
+target/debug/smolder-ls smb://127.0.0.1/IPC$ --kerberos ...
+```
+
 with these defaults:
 
 - `SMOLDER_KERBEROS_HOST=127.0.0.1`
@@ -85,6 +91,11 @@ When the fixture is healthy:
 - the Tiny11 domain line reports `lab.example`
 - `scripts/run-windows-kerberos-interop.sh` passes
 - `kerberos_interop.rs` authenticates with Kerberos and connects `IPC$`
+- `smolder-ls` can list `IPC$` over Kerberos
+
+This gate currently covers the file-workflow side of `smolder-tools`.
+`smbexec` and `psexec` remain NTLM-only until the core pipe/session config gains
+Kerberos support.
 
 If the wrapper reports that the machine account is missing, the local Samba AD
 realm was reset and Tiny11 needs to be rejoined with

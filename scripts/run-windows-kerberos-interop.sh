@@ -47,3 +47,18 @@ if ! docker compose -f docker/samba-ad/compose.yaml exec -T dc1 \
 fi
 
 cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --nocapture
+cargo build -p smolder --features kerberos --bin smolder-ls >/dev/null
+
+target_url="smb://${SMOLDER_KERBEROS_HOST}"
+if [[ "${SMOLDER_KERBEROS_PORT}" != "445" ]]; then
+  target_url="${target_url}:${SMOLDER_KERBEROS_PORT}"
+fi
+target_url="${target_url}/${SMOLDER_KERBEROS_SHARE}"
+
+target/debug/smolder-ls "${target_url}" \
+  --kerberos \
+  --username "${SMOLDER_KERBEROS_USERNAME}" \
+  --password "${SMOLDER_KERBEROS_PASSWORD}" \
+  --target-host "${SMOLDER_KERBEROS_TARGET_HOST}" \
+  --realm "${SMOLDER_KERBEROS_REALM}" \
+  --kdc-url "${SMOLDER_KERBEROS_KDC_URL}" >/dev/null

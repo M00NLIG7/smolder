@@ -35,6 +35,8 @@ impl NtStatus {
     pub const INVALID_NETWORK_RESPONSE: Self = Self(0xc000_00c3);
     /// `STATUS_PIPE_NOT_AVAILABLE`
     pub const PIPE_NOT_AVAILABLE: Self = Self(0xc000_00ac);
+    /// `STATUS_FS_DRIVER_REQUIRED`
+    pub const FS_DRIVER_REQUIRED: Self = Self(0xc000_019c);
 
     /// Returns the raw `u32` status code.
     #[must_use]

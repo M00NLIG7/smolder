@@ -20,6 +20,10 @@ path = "src/lib.rs"
 name = "smolder"
 path = "src/main.rs"
 
+[features]
+default = []
+kerberos = ["smolder-core/kerberos"]
+
 [dependencies]
 bytes = "1"
 rand = "0.8"

@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[cfg(feature = "kerberos")]
+use smolder_core::auth::{KerberosCredentials, KerberosTarget};
 use smolder_core::auth::NtlmCredentials;
 
 use crate::fs::{Share, SmbClient, SmbClientBuilder, SmbMetadata};
@@ -13,26 +15,61 @@ use crate::remote_exec::{
     ExecMode, ExecRequest, InteractiveReader, InteractiveStdin, RemoteExecClient,
 };
 
+const ENV_AUTH_MODE: [&str; 2] = ["SMOLDER_SMB_AUTH", "SMOLDER_SAMBA_AUTH"];
 const ENV_USERNAME: [&str; 2] = ["SMOLDER_SMB_USERNAME", "SMOLDER_SAMBA_USERNAME"];
 const ENV_PASSWORD: [&str; 2] = ["SMOLDER_SMB_PASSWORD", "SMOLDER_SAMBA_PASSWORD"];
-const ENV_DOMAIN: [&str; 2] = ["SMOLDER_SMB_DOMAIN", "SMOLDER_SAMBA_DOMAIN"];
-const ENV_WORKSTATION: [&str; 2] = ["SMOLDER_SMB_WORKSTATION", "SMOLDER_SAMBA_WORKSTATION"];
+const ENV_DOMAIN: [&str; 3] = [
+    "SMOLDER_SMB_DOMAIN",
+    "SMOLDER_SAMBA_DOMAIN",
+    "SMOLDER_KERBEROS_DOMAIN",
+];
+const ENV_WORKSTATION: [&str; 3] = [
+    "SMOLDER_SMB_WORKSTATION",
+    "SMOLDER_SAMBA_WORKSTATION",
+    "SMOLDER_KERBEROS_WORKSTATION",
+];
+const ENV_KERBEROS_TARGET_HOST: [&str; 1] = ["SMOLDER_KERBEROS_TARGET_HOST"];
+const ENV_KERBEROS_TARGET_PRINCIPAL: [&str; 1] = ["SMOLDER_KERBEROS_TARGET_PRINCIPAL"];
+const ENV_KERBEROS_REALM: [&str; 1] = ["SMOLDER_KERBEROS_REALM"];
+const ENV_KERBEROS_KDC_URL: [&str; 1] = ["SMOLDER_KERBEROS_KDC_URL"];
 const ENV_PSEXEC_SERVICE_BINARY: [&str; 1] = ["SMOLDER_PSEXEC_SERVICE_BINARY"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AuthMode {
+    Ntlm,
+    Kerberos,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct KerberosOptions {
+    pub(super) target_host: Option<String>,
+    pub(super) target_principal: Option<String>,
+    pub(super) realm: Option<String>,
+    pub(super) kdc_url: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AuthOptions {
+    pub(super) mode: AuthMode,
     pub(super) username: String,
     pub(super) password: String,
     pub(super) domain: Option<String>,
     pub(super) workstation: Option<String>,
+    pub(super) kerberos: KerberosOptions,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct AuthArgAccumulator {
+    auth_mode: Option<String>,
+    kerberos: bool,
     username: Option<String>,
     password: Option<String>,
     domain: Option<String>,
     workstation: Option<String>,
+    target_host: Option<String>,
+    target_principal: Option<String>,
+    realm: Option<String>,
+    kdc_url: Option<String>,
 }
 
 impl AuthArgAccumulator {
@@ -42,6 +79,14 @@ impl AuthArgAccumulator {
         index: &mut usize,
         token: &str,
     ) -> Result<bool, String> {
+        if let Some(value) = token.strip_prefix("--auth=") {
+            self.auth_mode = Some(value.to_string());
+            return Ok(true);
+        }
+        if token == "--kerberos" {
+            self.kerberos = true;
+            return Ok(true);
+        }
         if let Some(value) = token.strip_prefix("--username=") {
             self.username = Some(value.to_string());
             return Ok(true);
@@ -58,8 +103,28 @@ impl AuthArgAccumulator {
             self.workstation = Some(value.to_string());
             return Ok(true);
         }
+        if let Some(value) = token.strip_prefix("--target-host=") {
+            self.target_host = Some(value.to_string());
+            return Ok(true);
+        }
+        if let Some(value) = token.strip_prefix("--principal=") {
+            self.target_principal = Some(value.to_string());
+            return Ok(true);
+        }
+        if let Some(value) = token.strip_prefix("--realm=") {
+            self.realm = Some(value.to_string());
+            return Ok(true);
+        }
+        if let Some(value) = token.strip_prefix("--kdc-url=") {
+            self.kdc_url = Some(value.to_string());
+            return Ok(true);
+        }
 
         match token {
+            "--auth" => {
+                self.auth_mode = Some(next_value(args, index, "--auth")?);
+                Ok(true)
+            }
             "--username" => {
                 self.username = Some(next_value(args, index, "--username")?);
                 Ok(true)
@@ -76,6 +141,22 @@ impl AuthArgAccumulator {
                 self.workstation = Some(next_value(args, index, "--workstation")?);
                 Ok(true)
             }
+            "--target-host" => {
+                self.target_host = Some(next_value(args, index, "--target-host")?);
+                Ok(true)
+            }
+            "--principal" => {
+                self.target_principal = Some(next_value(args, index, "--principal")?);
+                Ok(true)
+            }
+            "--realm" => {
+                self.realm = Some(next_value(args, index, "--realm")?);
+                Ok(true)
+            }
+            "--kdc-url" => {
+                self.kdc_url = Some(next_value(args, index, "--kdc-url")?);
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
@@ -90,11 +171,26 @@ impl AuthArgAccumulator {
             .or_else(|| env_value(&ENV_PASSWORD))
             .ok_or_else(|| missing_env_error("password", &ENV_PASSWORD, usage))?;
 
+        let kerberos = KerberosOptions {
+            target_host: self
+                .target_host
+                .or_else(|| env_value(&ENV_KERBEROS_TARGET_HOST)),
+            target_principal: self
+                .target_principal
+                .or_else(|| env_value(&ENV_KERBEROS_TARGET_PRINCIPAL)),
+            realm: self.realm.or_else(|| env_value(&ENV_KERBEROS_REALM)),
+            kdc_url: self.kdc_url.or_else(|| env_value(&ENV_KERBEROS_KDC_URL)),
+        };
+
+        let mode = resolve_auth_mode(self.auth_mode, self.kerberos, &kerberos)?;
+
         Ok(AuthOptions {
+            mode,
             username,
             password,
             domain: self.domain.or_else(|| env_value(&ENV_DOMAIN)),
             workstation: self.workstation.or_else(|| env_value(&ENV_WORKSTATION)),
+            kerberos,
         })
     }
 }
@@ -114,18 +210,56 @@ pub(super) struct ExecTarget {
 }
 
 fn share_builder(options: &AuthOptions, remote: &RemoteLocation) -> SmbClientBuilder {
-    let mut credentials = NtlmCredentials::new(&options.username, &options.password);
-    if let Some(domain) = &options.domain {
-        credentials = credentials.with_domain(domain.as_str());
-    }
-    if let Some(workstation) = &options.workstation {
-        credentials = credentials.with_workstation(workstation.as_str());
-    }
-
-    SmbClient::builder()
+    let builder = SmbClient::builder()
         .server(remote.host.as_str())
-        .port(remote.port)
-        .credentials(credentials)
+        .port(remote.port);
+
+    match options.mode {
+        AuthMode::Ntlm => {
+            let mut credentials = NtlmCredentials::new(&options.username, &options.password);
+            if let Some(domain) = &options.domain {
+                credentials = credentials.with_domain(domain.as_str());
+            }
+            if let Some(workstation) = &options.workstation {
+                credentials = credentials.with_workstation(workstation.as_str());
+            }
+            builder.credentials(credentials)
+        }
+        AuthMode::Kerberos => {
+            #[cfg(feature = "kerberos")]
+            {
+                let mut credentials = KerberosCredentials::new(&options.username, &options.password);
+                if let Some(domain) = &options.domain {
+                    credentials = credentials.with_domain(domain.as_str());
+                }
+                if let Some(workstation) = &options.workstation {
+                    credentials = credentials.with_workstation(workstation.as_str());
+                }
+                if let Some(kdc_url) = &options.kerberos.kdc_url {
+                    credentials = credentials.with_kdc_url(kdc_url.as_str());
+                }
+
+                let target_host = options
+                    .kerberos
+                    .target_host
+                    .as_deref()
+                    .unwrap_or(remote.host.as_str());
+                let mut target = KerberosTarget::for_smb_host(target_host);
+                if let Some(principal) = &options.kerberos.target_principal {
+                    target = target.with_principal(principal.as_str());
+                } else if let Some(realm) = &options.kerberos.realm {
+                    target = target.with_realm(realm.as_str());
+                }
+
+                builder.kerberos(credentials, target)
+            }
+            #[cfg(not(feature = "kerberos"))]
+            {
+                let _ = remote;
+                unreachable!("kerberos mode should be rejected before building a share client")
+            }
+        }
+    }
 }
 
 pub(super) async fn connect_share_path(
@@ -176,6 +310,13 @@ pub(super) async fn connect_remote_exec(
     mode: ExecMode,
     service_binary: Option<&Path>,
 ) -> Result<RemoteExecClient, String> {
+    if matches!(options.mode, AuthMode::Kerberos) {
+        return Err(
+            "Kerberos auth is not supported for smbexec/psexec yet; use NTLM for remote execution"
+                .to_string(),
+        );
+    }
+
     let mut credentials = NtlmCredentials::new(&options.username, &options.password);
     if let Some(domain) = &options.domain {
         credentials = credentials.with_domain(domain.as_str());
@@ -214,6 +355,45 @@ pub(super) fn psexec_service_binary_from_env() -> Option<PathBuf> {
 fn env_value(keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+fn resolve_auth_mode(
+    explicit_mode: Option<String>,
+    explicit_kerberos: bool,
+    kerberos: &KerberosOptions,
+) -> Result<AuthMode, String> {
+    let explicit_mode = explicit_mode.or_else(|| env_value(&ENV_AUTH_MODE));
+    let explicit_mode = explicit_mode
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase());
+
+    let inferred_kerberos = explicit_kerberos
+        || kerberos.target_host.is_some()
+        || kerberos.target_principal.is_some()
+        || kerberos.realm.is_some()
+        || kerberos.kdc_url.is_some();
+
+    let mode = match explicit_mode.as_deref() {
+        Some("ntlm") => AuthMode::Ntlm,
+        Some("kerberos") => AuthMode::Kerberos,
+        Some(other) => {
+            return Err(format!(
+                "unsupported auth mode `{other}`; expected `ntlm` or `kerberos`"
+            ))
+        }
+        None if inferred_kerberos => AuthMode::Kerberos,
+        None => AuthMode::Ntlm,
+    };
+
+    #[cfg(not(feature = "kerberos"))]
+    if matches!(mode, AuthMode::Kerberos) {
+        return Err(
+            "this smolder build was not compiled with kerberos support; rebuild with `--features kerberos`"
+                .to_string(),
+        );
+    }
+
+    Ok(mode)
 }
 
 fn missing_env_error(field: &str, keys: &[&str], usage: &str) -> String {
