@@ -14,6 +14,13 @@ The `smolder` package now builds standalone operator binaries such as
 `smbexec`, `psexec`, `smolder-cat`, and `smolder-mv`. The `smolder`
 executable remains as a compatibility wrapper around those shared code paths.
 
+For library-first usage, `smolder-smb-core` now ships compile-checked examples
+for:
+
+- NTLM tree connect
+- named-pipe RPC bind
+- Kerberos tree connect
+
 Published package names:
 
 - `smolder-proto`: wire-format crate

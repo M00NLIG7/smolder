@@ -15,6 +15,10 @@ categories = ["network-programming"]
 name = "smolder_core"
 path = "src/lib.rs"
 
+[[example]]
+name = "kerberos_tree_connect"
+required-features = ["kerberos"]
+
 [features]
 default = []
 kerberos = ["dep:sspi"]
