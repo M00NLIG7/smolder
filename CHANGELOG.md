@@ -27,6 +27,8 @@ and the versioning/MSRV rules are defined in
   published `smolder` tools crate.
 - Added a feature-gated Kerberos high-level share-listing example for the
   published `smolder` tools crate.
+- Added a tiny standalone `smolder-core-demo` reference client crate for users
+  who want a copy-and-adapt binary built directly on `smolder-smb-core`.
 
 ### Fixed
 

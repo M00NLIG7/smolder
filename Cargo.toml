@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "demos/smolder-core-demo",
     "smolder-core",
     "smolder-psexecsvc",
     "smolder-proto",

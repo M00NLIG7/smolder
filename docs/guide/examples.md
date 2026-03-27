@@ -5,6 +5,9 @@ This guide is the practical entry point for Smolder examples.
 For task-oriented usage notes beyond the shipped example files, use the
 [cookbook](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md).
 
+For a tiny standalone binary crate instead of an example target, use
+[demos/smolder-core-demo](/Users/cmagana/Projects/smolder/demos/smolder-core-demo).
+
 It focuses on examples that are:
 
 - compile-checked in the workspace
@@ -57,6 +60,25 @@ Run it:
 
 ```bash
 cargo run -p smolder-smb-core --example core_file_roundtrip
+```
+
+## Standalone Demo
+
+For a minimal copy-and-adapt binary crate built directly on
+`smolder-smb-core`, use:
+
+- [demos/smolder-core-demo](/Users/cmagana/Projects/smolder/demos/smolder-core-demo)
+
+Build it:
+
+```bash
+cargo build -p smolder-core-demo
+```
+
+Run it:
+
+```bash
+cargo run -p smolder-core-demo
 ```
 
 ## Tools Examples
