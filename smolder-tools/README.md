@@ -17,6 +17,17 @@ Real-project readiness:
 - additive API evolution is preferred over churn, even though the project is
   still pre-`1.0`
 
+Start here:
+
+- examples guide:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md>
+- cookbook:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/guide/cookbook.md>
+- support policy:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md>
+- versioning policy:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md>
+
 Standalone binaries:
 
 - `smbexec`

@@ -11,6 +11,17 @@
 //!
 //! The public API is intentionally small because the binary is meant to stay
 //! predictable and easy to audit.
+//!
+//! Most users should consume this indirectly through the `smolder` package. Use
+//! this crate directly only when you are auditing or extending the target-side
+//! payload behavior.
+//!
+//! Start here:
+//!
+//! - [`parse_payload_request`]: decode SCM-delivered file or pipe execution mode
+//! - [`parse_pipe_service_args`]: parse the interactive pipe-backed request shape
+//! - [`PipeNames`]: derive the four local named pipes used by interactive sessions
+//! - [`run_service_once`]: run one file-capture payload request locally
 
 use std::ffi::OsString;
 use std::fs::File;

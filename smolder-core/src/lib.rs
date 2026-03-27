@@ -41,6 +41,21 @@
 //! share/file API or operator-facing workflows such as `smbexec` and `psexec`,
 //! use the `smolder` package instead.
 //!
+//! # Start here
+//!
+//! The fastest supported entry points are:
+//!
+//! - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
+//! - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
+//! - `cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect`
+//!
+//! Supporting project docs:
+//!
+//! - [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md)
+//! - [docs/guide/cookbook.md](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md)
+//! - [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+//! - [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
+//!
 //! # Public API Tiers
 //!
 //! The intended entry points for most consumers are:

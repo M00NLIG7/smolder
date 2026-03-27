@@ -19,6 +19,21 @@
 //!   pipes, and RPC primitives
 //! - `smolder`: high-level file APIs, remote execution, and CLI workflows
 //!
+//! # Start here
+//!
+//! Reach for this crate when you need a safe wire-model layer. If you want a
+//! ready-to-use SMB/RPC client instead of raw packet types, start with
+//! `smolder-smb-core`.
+//!
+//! Supporting project docs:
+//!
+//! - support policy:
+//!   [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+//! - fuzzing/property coverage:
+//!   [docs/testing/fuzzing.md](/Users/cmagana/Projects/smolder/docs/testing/fuzzing.md)
+//! - benchmark harness:
+//!   [docs/testing/benchmarks.md](/Users/cmagana/Projects/smolder/docs/testing/benchmarks.md)
+//!
 //! Copyright (c) 2025 M00NLIG7
 
 #![forbid(unsafe_code)]

@@ -15,6 +15,17 @@ Real-project readiness:
 - pre-`1.0` breaking changes are still possible, but they should be deliberate
   and reflected in the versioning policy rather than landing silently
 
+Start here:
+
+- examples guide:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md>
+- cookbook:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/guide/cookbook.md>
+- support policy:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md>
+- versioning policy:
+  <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md>
+
 Recommended entry points:
 
 - `smolder_core::client::Connection` for typed SMB negotiate/session/tree flow
@@ -27,10 +38,6 @@ API guidance:
 
 - repository API notes:
   <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md>
-- support policy:
-  <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md>
-- versioning policy:
-  <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md>
 
 Examples:
 

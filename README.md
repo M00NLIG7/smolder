@@ -38,6 +38,25 @@ Published package names:
 - `smolder`: CLI package and library package for the `smolder_tools` crate
 - `smolder-psexecsvc`: Windows service payload package
 
+## Start Here
+
+Pick the crate by the layer you actually need:
+
+- need typed SMB/DCE-RPC codecs only:
+  [`smolder-proto`](/Users/cmagana/Projects/smolder/smolder-proto/README.md)
+- need direct SMB/RPC client primitives:
+  [`smolder-smb-core`](/Users/cmagana/Projects/smolder/smolder-core/README.md)
+- need high-level file workflows or remote-exec tooling:
+  [`smolder`](/Users/cmagana/Projects/smolder/smolder-tools/README.md)
+- need the Windows `psexec` payload itself:
+  [`smolder-psexecsvc`](/Users/cmagana/Projects/smolder/smolder-psexecsvc/README.md)
+
+If you are evaluating adoption, start with:
+
+- [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md)
+- [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+- [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
+
 Release notes and published change summaries live in
 [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md).
 

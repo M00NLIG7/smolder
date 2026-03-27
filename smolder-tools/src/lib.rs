@@ -26,6 +26,21 @@
 //!
 //! The most common public types are re-exported in [`prelude`].
 //!
+//! # Start here
+//!
+//! The fastest supported entry points are:
+//!
+//! - `cargo run -p smolder --example file_roundtrip`
+//! - `cargo run -p smolder --features kerberos --example kerberos_share_list`
+//! - `cargo run -p smolder --example interactive_psexec`
+//!
+//! Supporting project docs:
+//!
+//! - [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md)
+//! - [docs/guide/cookbook.md](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md)
+//! - [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+//! - [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
+//!
 //! Copyright (c) 2025 M00NLIG7
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
