@@ -10,7 +10,7 @@
 //! This crate is the reusable library layer for:
 //!
 //! - SMB negotiate, session setup, signing, and encryption
-//! - NTLM/SPNEGO authentication primitives
+//! - NTLM/SPNEGO authentication primitives, with optional Kerberos support
 //! - Tree/file operations, compound dispatch, and credit-aware request flow
 //! - DFS referral helpers
 //! - Named-pipe and DCE/RPC transport on top of SMB
@@ -44,6 +44,8 @@ pub mod prelude {
         AuthProvider, NtlmAuthenticator, NtlmCredentials, NtlmRpcPacketIntegrity,
         NtlmSessionSecurity,
     };
+    #[cfg(feature = "kerberos")]
+    pub use crate::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
     pub use crate::client::{
         Authenticated, CompoundRequest, CompoundResponse, Connected, Connection, DurableHandle,
         DurableOpenOptions, Negotiated, ResilientHandle, TreeConnected,

@@ -1,5 +1,9 @@
 //! Authentication providers and protocol helpers.
 
+#[cfg(feature = "kerberos")]
+mod kerberos;
+#[cfg(feature = "kerberos")]
+mod kerberos_spn;
 mod ntlm;
 mod ntlm_rpc;
 mod ntlm_rpc_bind;
@@ -8,6 +12,10 @@ mod spnego;
 use smolder_proto::smb::smb2::NegotiateResponse;
 use thiserror::Error;
 
+#[cfg(feature = "kerberos")]
+pub use kerberos::{KerberosAuthenticator, KerberosCredentials};
+#[cfg(feature = "kerberos")]
+pub use kerberos_spn::KerberosTarget;
 pub use ntlm::{NtlmAuthenticator, NtlmCredentials};
 pub use ntlm_rpc::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};
 pub(crate) use ntlm_rpc_bind::NtlmRpcBindHandshake;
@@ -30,6 +38,9 @@ pub enum AuthError {
     /// The provider was called in an invalid state.
     #[error("invalid authentication state: {0}")]
     InvalidState(&'static str),
+    /// The underlying authentication backend returned an error.
+    #[error("authentication backend error: {0}")]
+    Backend(String),
 }
 
 /// Drives a GSS-style authentication exchange for SMB `SESSION_SETUP`.
