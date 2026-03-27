@@ -148,6 +148,16 @@ Recommended backend strategy:
 This is closer to the `russh` mindset of clear backend choices than forcing a
 single backend too early.
 
+Current status note:
+
+- the current implementation behind `kerberos` is `sspi`-backed and
+  password-oriented
+- the vendored `sspi` `0.19.2` path used by Smolder requires outbound auth data
+  and does not expose a clean ticket-cache/keytab flow through the current
+  integration shape
+- that means ticket-cache and keytab support should be treated as a backend
+  expansion milestone, not a small extension to `KerberosCredentials`
+
 ### Client Integration
 
 The `Connection::authenticate(...)` flow in

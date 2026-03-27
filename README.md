@@ -74,6 +74,9 @@ Still in progress on this track:
   live Samba AD plus Windows domain-member interop in both core and
   Kerberos-enabled tools workflows, including `smbexec` and `psexec`. The
   remaining track is broader credential sources like ticket-cache and keytab.
+  The current backend is still `sspi`-based and password-oriented, so those
+  sources will require an additional backend/capability layer rather than a
+  small builder tweak.
   The scoped plan is in
   [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md).
   The Samba AD fixture and Windows member flow are documented in
