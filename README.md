@@ -121,6 +121,18 @@ Still in progress on this track:
 
 ## Future Tracks
 
+- The active next-track roadmap for "better general SMB library + better
+  security toolkit" work is in
+  [plans/library-and-security-roadmap.md](/Users/cmagana/Projects/smolder/plans/library-and-security-roadmap.md).
+  That track prioritizes:
+  - high-level `smolder-smb-core` client facade
+  - SMB compression
+  - `SRVSVC` / `SAMR` / `LSARPC`
+  - QUIC
+  - Samba `selftest`
+  - stronger Windows automation
+  SMB1 stays deferred until those milestones are complete or clearly blocked.
+
 - Kerberos in `smolder-core` is now in active implementation behind the
   `kerberos` feature. The current slice covers mechanism-aware SPNEGO, a
   password-backed Kerberos authenticator that exports the SMB session key,
