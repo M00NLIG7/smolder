@@ -2388,22 +2388,28 @@ fn session_setup_security_mode(signing_mode: SigningMode) -> SessionSetupSecurit
 
 #[cfg(test)]
 mod tests {
+    use lznt1::compress as lznt1_compress;
     use std::collections::VecDeque;
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use smolder_proto::smb::compression::{
+        CompressionAlgorithm, CompressionCapabilityFlags, CompressionFlags,
+        CompressionTransformHeader,
+    };
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
         AsyncId, ChangeNotifyFlags, ChangeNotifyRequest, ChangeNotifyResponse, CipherId,
-        CloseRequest, CloseResponse, Command, CompletionFilter, CreateRequest, CreateResponse,
-        Dialect, EchoResponse, EncryptionCapabilities, FileAttributes, FileId, FlushRequest,
-        FlushResponse, GlobalCapabilities, Header, HeaderFlags, IoctlRequest, IoctlResponse,
-        LockElement, LockFlags, LockRequest, LockResponse, LogoffRequest, LogoffResponse,
-        MessageId, NegotiateRequest, NegotiateResponse, OplockLevel, PreauthIntegrityCapabilities,
+        CloseRequest, CloseResponse, Command, CompletionFilter, CompressionCapabilities,
+        CreateRequest, CreateResponse, Dialect, EchoResponse, EncryptionCapabilities,
+        FileAttributes, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
+        HeaderFlags, IoctlRequest, IoctlResponse, LockElement, LockFlags, LockRequest,
+        LockResponse, LogoffRequest, LogoffResponse, MessageId, NegotiateRequest,
+        NegotiateResponse, OplockLevel, PreauthIntegrityCapabilities,
         PreauthIntegrityHashId, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags,
-        SessionId, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
-        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
-        TreeDisconnectRequest, TreeId, WriteRequest, WriteResponse,
+        SessionId, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode,
+        ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectRequest,
+        TreeConnectResponse, TreeDisconnectRequest, TreeId, WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
     use smolder_proto::smb::transform::TransformHeader;
@@ -2602,6 +2608,17 @@ mod tests {
         )
     }
 
+    fn compression_context(
+        algorithm: CompressionAlgorithm,
+    ) -> smolder_proto::smb::smb2::NegotiateContext {
+        smolder_proto::smb::smb2::NegotiateContext::compression_capabilities(
+            CompressionCapabilities {
+                compression_algorithms: vec![algorithm],
+                flags: CompressionCapabilityFlags::empty(),
+            },
+        )
+    }
+
     fn sign_response_packet(signing: &super::SigningState, packet: &mut [u8]) {
         let mut header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
         header.flags |= HeaderFlags::SIGNED | HeaderFlags::SERVER_TO_REDIR;
@@ -2744,6 +2761,31 @@ mod tests {
         state
             .decrypt_message(&transform)
             .expect("encrypted payload should decrypt")
+    }
+
+    fn compressed_response_frame(
+        command: Command,
+        status: u32,
+        message_id: u64,
+        session_id: u64,
+        tree_id: u32,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
+        let packet = response_packet(command, status, message_id, session_id, tree_id, body);
+        let mut compressed = Vec::new();
+        lznt1_compress(&packet, &mut compressed);
+        SessionMessage::new(
+            CompressionTransformHeader {
+                original_compressed_segment_size: packet.len() as u32,
+                compression_algorithm: CompressionAlgorithm::Lznt1,
+                flags: CompressionFlags::empty(),
+                offset_or_length: 0,
+                payload: compressed,
+            }
+            .encode(),
+        )
+        .encode()
+        .expect("compressed response should frame")
     }
 
     #[derive(Debug)]
@@ -3939,6 +3981,86 @@ mod tests {
         assert_eq!(header.command, Command::TreeConnect);
         assert_eq!(header.session_id, SessionId(77));
         assert!(!header.flags.contains(HeaderFlags::SIGNED));
+    }
+
+    #[tokio::test]
+    async fn authenticate_accepts_compressed_session_setup_response_when_negotiated() {
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-cmpr",
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![
+                preauth_context(b"client-salt-cmpr"),
+                compression_context(CompressionAlgorithm::Lznt1),
+            ],
+        };
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![
+                preauth_context(b"server-salt-cmpr"),
+                compression_context(CompressionAlgorithm::Lznt1),
+            ],
+            server_guid: *b"server-guid-cmpr",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: Vec::new(),
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            compressed_response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                44,
+                0,
+                session_response.encode(),
+            ),
+        ]);
+
+        let mut auth_provider = MockAuthProvider {
+            initial_token: vec![0x01, 0x02],
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: None,
+            finished: false,
+        };
+
+        let connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut auth_provider)
+            .await
+            .expect("compressed session setup should authenticate");
+
+        assert_eq!(connection.state().session_id, SessionId(44));
+        assert_eq!(
+            connection
+                .state()
+                .compression
+                .as_ref()
+                .expect("compression should be negotiated")
+                .algorithm,
+            CompressionAlgorithm::Lznt1
+        );
+        assert!(auth_provider.finished);
     }
 
     #[tokio::test]
