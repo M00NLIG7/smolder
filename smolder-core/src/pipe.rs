@@ -10,11 +10,13 @@ use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use smolder_proto::smb::smb2::{
-    CipherId, CloseRequest, Command, CreateDisposition, CreateOptions, CreateRequest, Dialect,
-    EncryptionCapabilities, FileAttributes, FileId, FlushRequest, GlobalCapabilities,
-    NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
-    ReadRequest, ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
+    CipherId, CloseRequest, Command, CompressionCapabilities, CreateDisposition, CreateOptions,
+    CreateRequest, Dialect, EncryptionCapabilities, FileAttributes, FileId, FlushRequest,
+    GlobalCapabilities, NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities,
+    PreauthIntegrityHashId, ReadRequest, ShareAccess, SigningMode, TreeConnectRequest,
+    WriteRequest,
 };
+use smolder_proto::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
 use smolder_proto::smb::status::NtStatus;
 
 #[cfg(feature = "kerberos-api")]
@@ -42,6 +44,7 @@ pub struct SmbSessionConfig {
     capabilities: GlobalCapabilities,
     dialects: Vec<Dialect>,
     client_guid: [u8; 16],
+    compression: Option<CompressionCapabilities>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +71,7 @@ impl SmbSessionConfig {
                 | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
+            compression: None,
         }
     }
 
@@ -92,6 +96,7 @@ impl SmbSessionConfig {
                 | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
+            compression: None,
         }
     }
 
@@ -130,6 +135,26 @@ impl SmbSessionConfig {
         self
     }
 
+    /// Overrides the advertised SMB compression capabilities.
+    #[must_use]
+    pub fn with_compression_capabilities(mut self, compression: CompressionCapabilities) -> Self {
+        self.compression = Some(compression);
+        self
+    }
+
+    /// Advertises unchained SMB compression with the provided algorithms.
+    #[must_use]
+    pub fn with_compression_algorithms(
+        mut self,
+        compression_algorithms: Vec<CompressionAlgorithm>,
+    ) -> Self {
+        self.compression = Some(CompressionCapabilities {
+            compression_algorithms,
+            flags: CompressionCapabilityFlags::empty(),
+        });
+        self
+    }
+
     /// Returns the configured server host name or IP address.
     #[must_use]
     pub fn server(&self) -> &str {
@@ -164,6 +189,12 @@ impl SmbSessionConfig {
     #[must_use]
     pub fn client_guid(&self) -> &[u8; 16] {
         &self.client_guid
+    }
+
+    /// Returns the configured SMB compression capabilities, if any.
+    #[must_use]
+    pub fn compression_capabilities(&self) -> Option<&CompressionCapabilities> {
+        self.compression.as_ref()
     }
 }
 
@@ -779,7 +810,11 @@ pub async fn connect_session(
         security_mode: config.signing_mode,
         capabilities: config.capabilities,
         client_guid: config.client_guid,
-        negotiate_contexts: default_negotiate_contexts(&config.dialects, config.capabilities),
+        negotiate_contexts: default_negotiate_contexts(
+            &config.dialects,
+            config.capabilities,
+            config.compression.as_ref(),
+        ),
         dialects: config.dialects.clone(),
     };
     let connection = Connection::new(transport).negotiate(&request).await?;
@@ -814,6 +849,7 @@ pub async fn connect_tree(
 fn default_negotiate_contexts(
     dialects: &[Dialect],
     capabilities: GlobalCapabilities,
+    compression: Option<&CompressionCapabilities>,
 ) -> Vec<NegotiateContext> {
     if !dialects.contains(&Dialect::Smb311) {
         return Vec::new();
@@ -830,6 +866,11 @@ fn default_negotiate_contexts(
             EncryptionCapabilities {
                 ciphers: vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm],
             },
+        ));
+    }
+    if let Some(compression) = compression {
+        contexts.push(NegotiateContext::compression_capabilities(
+            compression.clone(),
         ));
     }
     contexts
@@ -854,6 +895,7 @@ mod tests {
 
     use async_trait::async_trait;
     use smolder_proto::smb::netbios::SessionMessage;
+    use smolder_proto::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
     use smolder_proto::smb::smb2::{
         CipherId, CloseResponse, Command, CreateResponse, Dialect, FileAttributes, FileId,
         FlushResponse, GlobalCapabilities, Header, MessageId, NegotiateRequest, NegotiateResponse,
@@ -893,7 +935,8 @@ mod tests {
         let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"));
         assert!(config.capabilities.contains(GlobalCapabilities::ENCRYPTION));
 
-        let contexts = super::default_negotiate_contexts(&config.dialects, config.capabilities);
+        let contexts =
+            super::default_negotiate_contexts(&config.dialects, config.capabilities, None);
         assert_eq!(contexts.len(), 2);
         assert!(contexts[0]
             .as_preauth_integrity()
@@ -908,6 +951,30 @@ mod tests {
             encryption.ciphers,
             vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm]
         );
+    }
+
+    #[test]
+    fn smb_session_config_can_enable_compression() {
+        let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
+            .with_compression_algorithms(vec![
+                CompressionAlgorithm::Lz77,
+                CompressionAlgorithm::Lznt1,
+            ]);
+
+        let contexts = super::default_negotiate_contexts(
+            &config.dialects,
+            config.capabilities,
+            config.compression_capabilities(),
+        );
+        let compression = contexts[2]
+            .as_compression_capabilities()
+            .expect("compression context should decode")
+            .expect("compression context should be present");
+        assert_eq!(
+            compression.compression_algorithms,
+            vec![CompressionAlgorithm::Lz77, CompressionAlgorithm::Lznt1]
+        );
+        assert_eq!(compression.flags, CompressionCapabilityFlags::empty());
     }
 
     #[cfg(feature = "kerberos-api")]

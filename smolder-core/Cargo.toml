@@ -44,6 +44,8 @@ hmac = "0.12"
 md-5 = "0.10"
 md4 = "0.10"
 rand = "0.8"
+lznt1 = "0.1"
+rust-lzxpress = "0.7"
 sha2 = "0.10"
 smolder-proto = { path = "../smolder-proto", version = "0.2.0" }
 sspi = { version = "0.19.2", optional = true, default-features = false, features = ["network_client", "ring"] }

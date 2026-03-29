@@ -9,6 +9,7 @@ use super::{
     check_fixed_structure_size, get_array, get_u16, get_u32, get_u64, put_padding,
     slice_from_offset, HEADER_LEN,
 };
+use crate::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
 use crate::smb::ProtocolError;
 
 bitflags! {
@@ -186,6 +187,62 @@ pub struct EncryptionCapabilities {
     pub ciphers: Vec<CipherId>,
 }
 
+/// `SMB2_COMPRESSION_CAPABILITIES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompressionCapabilities {
+    /// Supported compression algorithms in preference order.
+    pub compression_algorithms: Vec<CompressionAlgorithm>,
+    /// Compression capability flags.
+    pub flags: CompressionCapabilityFlags,
+}
+
+impl CompressionCapabilities {
+    /// Serializes the context payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(8 + self.compression_algorithms.len() * 2);
+        out.put_u16_le(self.compression_algorithms.len() as u16);
+        out.put_u16_le(0);
+        out.put_u32_le(self.flags.bits());
+        for algorithm in &self.compression_algorithms {
+            out.put_u16_le(*algorithm as u16);
+        }
+        out.to_vec()
+    }
+
+    /// Parses the context payload.
+    pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = data;
+        let algorithm_count = usize::from(get_u16(&mut input, "compression_algorithm_count")?);
+        let _padding = get_u16(&mut input, "padding")?;
+        let flags = CompressionCapabilityFlags::from_bits(get_u32(&mut input, "flags")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "flags",
+                reason: "unknown compression capability flags set",
+            },
+        )?;
+        if algorithm_count == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "compression_algorithm_count",
+                reason: "at least one compression algorithm is required",
+            });
+        }
+
+        let mut compression_algorithms = Vec::with_capacity(algorithm_count);
+        for _ in 0..algorithm_count {
+            compression_algorithms.push(CompressionAlgorithm::try_from(get_u16(
+                &mut input,
+                "compression_algorithm",
+            )?)?);
+        }
+
+        Ok(Self {
+            compression_algorithms,
+            flags,
+        })
+    }
+}
+
 impl EncryptionCapabilities {
     /// Serializes the context payload.
     #[must_use]
@@ -315,6 +372,25 @@ impl NegotiateContext {
             return Ok(None);
         }
         EncryptionCapabilities::decode(&self.data).map(Some)
+    }
+
+    /// Builds a compression-capabilities negotiate context.
+    #[must_use]
+    pub fn compression_capabilities(capabilities: CompressionCapabilities) -> Self {
+        Self {
+            context_type: NegotiateContextType::CompressionCapabilities as u16,
+            data: capabilities.encode(),
+        }
+    }
+
+    /// Decodes a compression-capabilities negotiate context.
+    pub fn as_compression_capabilities(
+        &self,
+    ) -> Result<Option<CompressionCapabilities>, ProtocolError> {
+        if self.context_type() != Some(NegotiateContextType::CompressionCapabilities) {
+            return Ok(None);
+        }
+        CompressionCapabilities::decode(&self.data).map(Some)
     }
 
     fn encode_into(&self, out: &mut Vec<u8>) {
@@ -611,10 +687,12 @@ fn decode_contexts(
 
 #[cfg(test)]
 mod tests {
+    use crate::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
+
     use super::{
-        CipherId, Dialect, EncryptionCapabilities, GlobalCapabilities, NegotiateContext,
-        NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
-        SigningMode,
+        CipherId, CompressionCapabilities, Dialect, EncryptionCapabilities, GlobalCapabilities,
+        NegotiateContext, NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities,
+        PreauthIntegrityHashId, SigningMode,
     };
 
     #[test]
@@ -654,6 +732,35 @@ mod tests {
             decoded,
             EncryptionCapabilities {
                 ciphers: vec![CipherId::Aes128Gcm],
+            }
+        );
+    }
+
+    #[test]
+    fn compression_capabilities_context_roundtrips() {
+        let capabilities = CompressionCapabilities {
+            compression_algorithms: vec![CompressionAlgorithm::Lz77, CompressionAlgorithm::Lznt1],
+            flags: CompressionCapabilityFlags::empty(),
+        };
+        let context = NegotiateContext::compression_capabilities(capabilities.clone());
+
+        let decoded = context
+            .as_compression_capabilities()
+            .expect("context should decode")
+            .expect("context should be compression");
+        assert_eq!(decoded, capabilities);
+    }
+
+    #[test]
+    fn compression_capabilities_decode_accepts_single_algorithm_response_shape() {
+        let decoded =
+            CompressionCapabilities::decode(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00])
+                .expect("single-algorithm compression capabilities should decode");
+        assert_eq!(
+            decoded,
+            CompressionCapabilities {
+                compression_algorithms: vec![CompressionAlgorithm::Lznt1],
+                flags: CompressionCapabilityFlags::empty(),
             }
         );
     }

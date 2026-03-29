@@ -7,11 +7,13 @@
 use rand::random;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use smolder_proto::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
 use smolder_proto::smb::smb2::{
-    CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, DispositionInformation,
-    EchoResponse, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
-    FileStandardInformation, FlushRequest, GlobalCapabilities, QueryInfoRequest, ReadRequest,
-    SessionId, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, TreeId, WriteRequest,
+    CloseRequest, CompressionCapabilities, CreateDisposition, CreateOptions, CreateRequest,
+    Dialect, DispositionInformation, EchoResponse, FileAttributes, FileBasicInformation, FileId,
+    FileInfoClass, FileStandardInformation, FlushRequest, GlobalCapabilities, QueryInfoRequest,
+    ReadRequest, SessionId, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, TreeId,
+    WriteRequest,
 };
 
 use crate::auth::NtlmCredentials;
@@ -59,6 +61,7 @@ pub struct ClientBuilder {
     capabilities: GlobalCapabilities,
     dialects: Vec<Dialect>,
     client_guid: [u8; 16],
+    compression: Option<CompressionCapabilities>,
 }
 
 impl ClientBuilder {
@@ -75,6 +78,7 @@ impl ClientBuilder {
                 | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
+            compression: None,
         }
     }
 
@@ -110,6 +114,26 @@ impl ClientBuilder {
     #[must_use]
     pub fn with_client_guid(mut self, client_guid: [u8; 16]) -> Self {
         self.client_guid = client_guid;
+        self
+    }
+
+    /// Overrides the advertised SMB compression capabilities.
+    #[must_use]
+    pub fn with_compression_capabilities(mut self, compression: CompressionCapabilities) -> Self {
+        self.compression = Some(compression);
+        self
+    }
+
+    /// Advertises unchained SMB compression with the provided algorithms.
+    #[must_use]
+    pub fn with_compression_algorithms(
+        mut self,
+        compression_algorithms: Vec<CompressionAlgorithm>,
+    ) -> Self {
+        self.compression = Some(CompressionCapabilities {
+            compression_algorithms,
+            flags: CompressionCapabilityFlags::empty(),
+        });
         self
     }
 
@@ -158,6 +182,11 @@ impl ClientBuilder {
         .with_capabilities(self.capabilities)
         .with_dialects(self.dialects)
         .with_client_guid(self.client_guid);
+        let config = if let Some(compression) = self.compression {
+            config.with_compression_capabilities(compression)
+        } else {
+            config
+        };
 
         Ok(Client::from_session_config(config))
     }

@@ -10,20 +10,23 @@ use aes::Aes128;
 use cmac::Cmac;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
+use smolder_proto::smb::compression::{
+    CompressionCapabilityFlags, CompressionTransformHeader, COMPRESSION_TRANSFORM_PROTOCOL_ID,
+};
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
     AsyncId, ChangeNotifyRequest, ChangeNotifyResponse, CipherId, CloseRequest, CloseResponse,
-    Command, CreateContext, CreateRequest, CreateResponse, Dialect, DurableHandleFlags,
-    DurableHandleReconnect, DurableHandleReconnectV2, DurableHandleRequest, DurableHandleRequestV2,
-    EchoRequest, EchoResponse, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
-    HeaderFlags, IoctlRequest, IoctlResponse, LockRequest, LockResponse, LogoffRequest,
-    LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
-    PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryRequest,
-    QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse,
-    ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
-    SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, ShareFlags, SigningMode,
-    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse, TreeId,
-    WriteRequest, WriteResponse,
+    Command, CompressionCapabilities, CreateContext, CreateRequest, CreateResponse, Dialect,
+    DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2, DurableHandleRequest,
+    DurableHandleRequestV2, EchoRequest, EchoResponse, FileId, FlushRequest, FlushResponse,
+    GlobalCapabilities, Header, HeaderFlags, IoctlRequest, IoctlResponse, LockRequest,
+    LockResponse, LogoffRequest, LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse,
+    NetworkInterfaceInfoResponse, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
+    QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
+    ReadRequest, ReadResponse, ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest,
+    SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, ShareFlags,
+    SigningMode, TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest,
+    TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
 use smolder_proto::smb::transform::{TransformHeader, TRANSFORM_PROTOCOL_ID};
@@ -31,6 +34,7 @@ use std::sync::Arc;
 use tracing::{trace, trace_span, Instrument};
 
 use crate::auth::AuthProvider;
+use crate::compression::CompressionState;
 use crate::crypto::{derive_encryption_keys, EncryptionState};
 use crate::error::CoreError;
 use crate::transport::Transport;
@@ -48,6 +52,8 @@ pub struct Negotiated {
     pub client_signing_mode: SigningMode,
     /// Preauthentication integrity state for SMB 3.1.1, if negotiated.
     pub preauth_integrity: Option<PreauthIntegrityState>,
+    /// Receive-side compression state, if negotiated.
+    pub compression: Option<Arc<CompressionState>>,
 }
 
 /// The transport has an authenticated SMB session.
@@ -73,6 +79,8 @@ pub struct Authenticated {
     pub encryption_required: bool,
     /// Derived SMB 3.x encryption state for the session, if available.
     pub encryption: Option<Arc<EncryptionState>>,
+    /// Receive-side compression state, if negotiated.
+    pub compression: Option<Arc<CompressionState>>,
 }
 
 /// The transport is connected to a tree and can issue file operations.
@@ -102,6 +110,8 @@ pub struct TreeConnected {
     pub encryption_required: bool,
     /// Derived SMB 3.x encryption state for the session, if available.
     pub encryption: Option<Arc<EncryptionState>>,
+    /// Receive-side compression state, if negotiated.
+    pub compression: Option<Arc<CompressionState>>,
 }
 
 /// SMB 3.1.1 preauthentication transcript state.
@@ -467,6 +477,7 @@ struct RequestContext {
     signing: Option<Arc<SigningState>>,
     encryption_required: bool,
     encryption: Option<Arc<EncryptionState>>,
+    compression: Option<Arc<CompressionState>>,
 }
 
 impl RequestContext {
@@ -483,6 +494,7 @@ impl RequestContext {
             signing,
             encryption_required: false,
             encryption: None,
+            compression: None,
         }
     }
 
@@ -500,6 +512,11 @@ impl RequestContext {
         self
     }
 
+    fn with_compression(mut self, compression: Option<Arc<CompressionState>>) -> Self {
+        self.compression = compression;
+        self
+    }
+
     fn should_encrypt(&self) -> bool {
         self.encryption_required
     }
@@ -514,6 +531,7 @@ impl Authenticated {
             self.signing.clone(),
         )
         .with_encryption(self.encryption_required, self.encryption.clone())
+        .with_compression(self.compression.clone())
     }
 }
 
@@ -526,6 +544,7 @@ impl TreeConnected {
             self.signing.clone(),
         )
         .with_encryption(self.encryption_required, self.encryption.clone())
+        .with_compression(self.compression.clone())
     }
 
     fn session_request_context(&self) -> RequestContext {
@@ -536,6 +555,7 @@ impl TreeConnected {
             self.signing.clone(),
         )
         .with_encryption(self.encryption_required, self.encryption.clone())
+        .with_compression(self.compression.clone())
     }
 }
 
@@ -590,6 +610,7 @@ where
             &transaction.request_packet,
             &transaction.response_packet,
         )?;
+        let compression = negotiate_compression_state(request, &response)?;
 
         if transaction.header.session_id != SessionId(0) {
             return Err(CoreError::InvalidResponse(
@@ -605,6 +626,7 @@ where
                 response,
                 client_signing_mode: request.security_mode,
                 preauth_integrity,
+                compression,
             },
         })
     }
@@ -641,7 +663,8 @@ where
                 .transact_framed(
                     Command::SessionSetup,
                     request.encode(),
-                    RequestContext::unsigned(session_id, TreeId(0)),
+                    RequestContext::unsigned(session_id, TreeId(0))
+                        .with_compression(self.state.compression.clone()),
                     &[
                         NtStatus::SUCCESS.to_u32(),
                         NtStatus::MORE_PROCESSING_REQUIRED.to_u32(),
@@ -713,6 +736,7 @@ where
                 let Negotiated {
                     response: negotiated,
                     client_signing_mode,
+                    compression,
                     ..
                 } = state;
                 let encryption_required = session_encryption_required(response.session_flags);
@@ -731,6 +755,7 @@ where
                         signing,
                         encryption_required,
                         encryption,
+                        compression,
                     },
                 });
             }
@@ -750,7 +775,8 @@ where
             .transact_framed(
                 Command::SessionSetup,
                 request.encode(),
-                RequestContext::unsigned(SessionId(0), TreeId(0)),
+                RequestContext::unsigned(SessionId(0), TreeId(0))
+                    .with_compression(self.state.compression.clone()),
                 &[0],
             )
             .await?;
@@ -794,6 +820,7 @@ where
         let Negotiated {
             response: negotiated,
             client_signing_mode,
+            compression,
             ..
         } = state;
         let encryption_required = session_encryption_required(response.session_flags);
@@ -813,6 +840,7 @@ where
                 signing: None,
                 encryption_required,
                 encryption,
+                compression,
             },
         })
     }
@@ -880,6 +908,7 @@ where
             negotiated: response,
             client_signing_mode,
             preauth_integrity,
+            compression,
             ..
         } = state;
 
@@ -891,6 +920,7 @@ where
                 response,
                 client_signing_mode,
                 preauth_integrity,
+                compression,
             },
         })
     }
@@ -933,6 +963,7 @@ where
             signing,
             encryption_required: _,
             encryption,
+            compression,
         } = state;
         let encryption_required =
             tree_encryption_required(session.session_flags, response.share_flags);
@@ -954,6 +985,7 @@ where
                 signing,
                 encryption_required,
                 encryption,
+                compression,
             },
         })
     }
@@ -1000,6 +1032,7 @@ where
             signing_required,
             signing,
             encryption,
+            compression,
             ..
         } = state;
         let encryption_required = session_encryption_required(session.session_flags);
@@ -1019,6 +1052,7 @@ where
                 signing,
                 encryption_required,
                 encryption,
+                compression,
             },
         })
     }
@@ -1792,6 +1826,21 @@ fn decode_session_payload(
         }
         return Ok((encryption.decrypt_message(&transform)?, true));
     }
+    if frame.payload.starts_with(&COMPRESSION_TRANSFORM_PROTOCOL_ID) {
+        if context.should_encrypt() {
+            return Err(CoreError::InvalidResponse(
+                "session required encryption but the SMB response was only compressed",
+            ));
+        }
+        let compression = context
+            .compression
+            .as_deref()
+            .ok_or(CoreError::InvalidResponse(
+                "received compressed SMB response but no compression state is available",
+            ))?;
+        let transform = CompressionTransformHeader::decode(&frame.payload)?;
+        return Ok((compression.decompress_message(&transform)?, false));
+    }
     if context.should_encrypt() {
         return Err(CoreError::InvalidResponse(
             "session required encryption but the SMB response was not encrypted",
@@ -2006,6 +2055,48 @@ fn negotiate_preauth_integrity_state(
     Ok(Some(preauth))
 }
 
+fn negotiate_compression_state(
+    request: &NegotiateRequest,
+    response: &NegotiateResponse,
+) -> Result<Option<Arc<CompressionState>>, CoreError> {
+    if response.dialect_revision != Dialect::Smb311 {
+        return Ok(None);
+    }
+
+    let Some(requested) = single_compression_context(&request.negotiate_contexts, true)? else {
+        return Ok(None);
+    };
+    let Some(received) = single_compression_context(&response.negotiate_contexts, false)? else {
+        return Ok(None);
+    };
+    if received.compression_algorithms.len() != 1 {
+        return Err(CoreError::InvalidResponse(
+            "SMB 3.1.1 negotiate response must select exactly one compression algorithm",
+        ));
+    }
+    let algorithm = received.compression_algorithms[0];
+    if !requested.compression_algorithms.contains(&algorithm) {
+        return Err(CoreError::InvalidResponse(
+            "server selected a compression algorithm that was not offered by the client",
+        ));
+    }
+    if !requested.flags.contains(received.flags) {
+        return Err(CoreError::InvalidResponse(
+            "server selected unsupported SMB compression flags",
+        ));
+    }
+    if received.flags.contains(CompressionCapabilityFlags::CHAINED) {
+        return Err(CoreError::Unsupported(
+            "SMB chained compression negotiation is not supported yet",
+        ));
+    }
+
+    Ok(Some(Arc::new(CompressionState::new(
+        algorithm,
+        received.flags.contains(CompressionCapabilityFlags::CHAINED),
+    ))))
+}
+
 fn single_preauth_context(
     contexts: &[smolder_proto::smb::smb2::NegotiateContext],
     request: bool,
@@ -2027,6 +2118,31 @@ fn single_preauth_context(
             });
         }
         found = Some(preauth);
+    }
+    Ok(found)
+}
+
+fn single_compression_context(
+    contexts: &[smolder_proto::smb::smb2::NegotiateContext],
+    request: bool,
+) -> Result<Option<CompressionCapabilities>, CoreError> {
+    let mut found = None;
+    for context in contexts {
+        let Some(compression) = context.as_compression_capabilities()? else {
+            continue;
+        };
+        if found.is_some() {
+            return Err(if request {
+                CoreError::InvalidInput(
+                    "SMB 3.1.1 negotiate request contained multiple compression contexts",
+                )
+            } else {
+                CoreError::InvalidResponse(
+                    "SMB 3.1.1 negotiate response contained multiple compression contexts",
+                )
+            });
+        }
+        found = Some(compression);
     }
     Ok(found)
 }
