@@ -45,6 +45,7 @@
 //! The fastest supported entry points are:
 //!
 //! - `cargo run -p smolder-smb-core --example client_session_connect`
+//! - `cargo run -p smolder-smb-core --example client_file_roundtrip`
 //! - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
 //! - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
 //! - `cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect`
@@ -61,6 +62,8 @@
 //! The intended entry points for most consumers are:
 //!
 //! - [`facade::Client`] and [`facade::ClientBuilder`] for embedded client usage
+//! - [`facade::Session`], [`facade::Share`], [`facade::File`], and
+//!   [`facade::OpenOptions`] for authenticated-session, share, and file flows
 //! - [`client::Connection`] plus its typestate markers for negotiate, session,
 //!   tree, and file operations
 //! - [`pipe::SmbSessionConfig`], [`pipe::connect_tree`], and
@@ -114,7 +117,9 @@ pub mod prelude {
     pub use crate::crypto::{derive_encryption_keys, EncryptionKeys};
     pub use crate::dfs::{resolve_unc_path, DfsReferral, UncPath};
     pub use crate::error::CoreError;
-    pub use crate::facade::{Client, ClientBuilder};
+    pub use crate::facade::{
+        Client, ClientBuilder, File, FileMetadata, OpenOptions, Session, Share,
+    };
     pub use crate::pipe::{connect_session, connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::rpc::PipeRpcClient;
     pub use crate::transport::{TokioTcpTransport, Transport};

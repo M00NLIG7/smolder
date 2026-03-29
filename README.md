@@ -17,6 +17,8 @@ executable remains as a compatibility wrapper around those shared code paths.
 For library-first usage, `smolder-smb-core` now ships compile-checked examples
 for:
 
+- high-level client session/share connect
+- high-level file roundtrip
 - NTLM tree connect
 - named-pipe RPC bind
 - Kerberos tree connect
