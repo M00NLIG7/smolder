@@ -478,6 +478,7 @@ struct RequestContext {
     encryption_required: bool,
     encryption: Option<Arc<EncryptionState>>,
     compression: Option<Arc<CompressionState>>,
+    compress_outbound: bool,
 }
 
 impl RequestContext {
@@ -495,6 +496,7 @@ impl RequestContext {
             encryption_required: false,
             encryption: None,
             compression: None,
+            compress_outbound: false,
         }
     }
 
@@ -517,6 +519,11 @@ impl RequestContext {
         self
     }
 
+    fn with_outbound_compression(mut self, compress_outbound: bool) -> Self {
+        self.compress_outbound = compress_outbound;
+        self
+    }
+
     fn should_encrypt(&self) -> bool {
         self.encryption_required
     }
@@ -532,6 +539,7 @@ impl Authenticated {
         )
         .with_encryption(self.encryption_required, self.encryption.clone())
         .with_compression(self.compression.clone())
+        .with_outbound_compression(true)
     }
 }
 
@@ -545,6 +553,7 @@ impl TreeConnected {
         )
         .with_encryption(self.encryption_required, self.encryption.clone())
         .with_compression(self.compression.clone())
+        .with_outbound_compression(true)
     }
 
     fn session_request_context(&self) -> RequestContext {
@@ -556,6 +565,7 @@ impl TreeConnected {
         )
         .with_encryption(self.encryption_required, self.encryption.clone())
         .with_compression(self.compression.clone())
+        .with_outbound_compression(true)
     }
 }
 
@@ -1790,6 +1800,17 @@ fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreError> {
 }
 
 fn encode_session_frame(payload: &[u8], context: &RequestContext) -> Result<Vec<u8>, CoreError> {
+    let session_payload = if context.compress_outbound {
+        context
+            .compression
+            .as_deref()
+            .map(|compression| compression.compress_message(payload))
+            .transpose()?
+            .flatten()
+            .unwrap_or_else(|| payload.to_vec())
+    } else {
+        payload.to_vec()
+    };
     let session_payload = if context.should_encrypt() {
         let encryption = context
             .encryption
@@ -1798,10 +1819,10 @@ fn encode_session_frame(payload: &[u8], context: &RequestContext) -> Result<Vec<
                 "session requires encryption but no encryption key is available",
             ))?;
         encryption
-            .encrypt_message(context.session_id.0, payload)?
+            .encrypt_message(context.session_id.0, &session_payload)?
             .encode()
     } else {
-        payload.to_vec()
+        session_payload
     };
     SessionMessage::encode_payload(&session_payload).map_err(CoreError::from)
 }
@@ -2395,7 +2416,7 @@ mod tests {
     use async_trait::async_trait;
     use smolder_proto::smb::compression::{
         CompressionAlgorithm, CompressionCapabilityFlags, CompressionFlags,
-        CompressionTransformHeader,
+        CompressionTransformHeader, COMPRESSION_TRANSFORM_PROTOCOL_ID,
     };
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
@@ -2416,6 +2437,7 @@ mod tests {
 
     use crate::auth::{AuthError, AuthProvider};
     use crate::client::Connection;
+    use crate::compression::CompressionState;
     use crate::crypto::{derive_encryption_keys, EncryptionState};
     use crate::error::CoreError;
     use crate::transport::Transport;
@@ -2763,6 +2785,19 @@ mod tests {
             .expect("encrypted payload should decrypt")
     }
 
+    fn decompress_transform_payload(payload: &[u8]) -> Vec<u8> {
+        let transform =
+            CompressionTransformHeader::decode(payload).expect("compression header should decode");
+        CompressionState::new(transform.compression_algorithm, false)
+            .decompress_message(&transform)
+            .expect("compressed payload should decompress")
+    }
+
+    fn outbound_compressed_packet(frame: &[u8]) -> Vec<u8> {
+        let frame = SessionMessage::decode(frame).expect("frame should decode");
+        decompress_transform_payload(&frame.payload)
+    }
+
     fn compressed_response_frame(
         command: Command,
         status: u32,
@@ -2786,6 +2821,59 @@ mod tests {
         )
         .encode()
         .expect("compressed response should frame")
+    }
+
+    fn smb311_encryption_state(
+        negotiate_request: &NegotiateRequest,
+        negotiate_response: &NegotiateResponse,
+        session_request: &SessionSetupRequest,
+        session_key: &[u8],
+        cipher: CipherId,
+    ) -> Arc<EncryptionState> {
+        let negotiate_request_packet = request_packet_with_credits(
+            Command::Negotiate,
+            0,
+            0,
+            0,
+            32,
+            negotiate_request.encode().expect("request should encode"),
+        );
+        let negotiate_response_packet = response_packet(
+            Command::Negotiate,
+            NtStatus::SUCCESS.to_u32(),
+            0,
+            0,
+            0,
+            negotiate_response.encode(),
+        );
+        let mut preauth = super::negotiate_preauth_integrity_state(
+            negotiate_request,
+            negotiate_response,
+            &negotiate_request_packet,
+            &negotiate_response_packet,
+        )
+        .expect("preauth state should derive")
+        .expect("SMB 3.1.1 should negotiate preauth");
+        let session_request_packet = request_packet_with_credits(
+            Command::SessionSetup,
+            1,
+            0,
+            0,
+            32,
+            session_request.encode(),
+        );
+        preauth
+            .update(&session_request_packet)
+            .expect("session request should update preauth state");
+        let keys = derive_encryption_keys(
+            Dialect::Smb311,
+            cipher,
+            session_key,
+            None,
+            Some(preauth.hash_value.as_slice()),
+        )
+        .expect("SMB 3.1.1 encryption keys should derive");
+        Arc::new(EncryptionState::new(Dialect::Smb311, keys))
     }
 
     #[derive(Debug)]
@@ -4061,6 +4149,246 @@ mod tests {
             CompressionAlgorithm::Lznt1
         );
         assert!(auth_provider.finished);
+    }
+
+    #[tokio::test]
+    async fn write_compresses_signed_tree_requests_when_negotiated() {
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-cmpw",
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![
+                preauth_context(b"client-salt-cmpw"),
+                compression_context(CompressionAlgorithm::Lznt1),
+            ],
+        };
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![
+                preauth_context(b"server-salt-cmpw"),
+                compression_context(CompressionAlgorithm::Lznt1),
+            ],
+            server_guid: *b"server-guid-cmpw",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: Vec::new(),
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let write_response = WriteResponse { count: 4096 };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                61,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                61,
+                7,
+                tree_response.encode(),
+            ),
+            response_frame(
+                Command::Write,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                61,
+                7,
+                write_response.encode(),
+            ),
+        ]);
+        let mut auth_provider = MockAuthProvider {
+            initial_token: vec![0x01, 0x02],
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: Some(vec![0x44; 16]),
+            finished: false,
+        };
+        let file_id = FileId {
+            persistent: 0x1122_3344,
+            volatile: 0x5566_7788,
+        };
+
+        let mut connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut auth_provider)
+            .await
+            .expect("authenticate should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+
+        connection
+            .write(&WriteRequest::for_file(file_id, 0, vec![b'A'; 4096]))
+            .await
+            .expect("write should succeed");
+
+        let transport = connection.into_transport();
+        let decompressed = outbound_compressed_packet(&transport.writes[3]);
+        let header = Header::decode(&decompressed[..Header::LEN]).expect("header should decode");
+        let request =
+            WriteRequest::decode(&decompressed[Header::LEN..]).expect("write should decode");
+
+        assert_eq!(header.command, Command::Write);
+        assert_eq!(header.session_id, SessionId(61));
+        assert_eq!(header.tree_id, TreeId(7));
+        assert!(header.flags.contains(HeaderFlags::SIGNED));
+        assert_eq!(request.write_channel_info, Vec::<u8>::new());
+        assert_eq!(request.data.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn write_compresses_before_encryption_when_session_requires_it() {
+        let session_key = [0x33; 16];
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
+            client_guid: *b"client-guid-cme1",
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![
+                preauth_context(b"client-salt-cme1"),
+                encryption_context(CipherId::Aes128Gcm),
+                compression_context(CompressionAlgorithm::Lznt1),
+            ],
+        };
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![
+                preauth_context(b"server-salt-cme1"),
+                encryption_context(CipherId::Aes128Gcm),
+                compression_context(CompressionAlgorithm::Lznt1),
+            ],
+            server_guid: *b"server-guid-cme1",
+            capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x01, 0x02],
+            previous_session_id: 0,
+        };
+        let client_encryption = smb311_encryption_state(
+            &negotiate_request,
+            &negotiate_response,
+            &session_request,
+            &session_key,
+            CipherId::Aes128Gcm,
+        );
+        let server_encryption = peer_encryption_state(client_encryption.as_ref());
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::ENCRYPT_DATA,
+            security_buffer: Vec::new(),
+        };
+        let write_response = WriteResponse { count: 4096 };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                62,
+                0,
+                session_response.encode(),
+            ),
+            encrypted_response_frame(
+                &server_encryption,
+                Command::Write,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                62,
+                0,
+                write_response.encode(),
+            ),
+        ]);
+        let mut auth_provider = MockAuthProvider {
+            initial_token: session_request.security_buffer.clone(),
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: Some(session_key.to_vec()),
+            finished: false,
+        };
+        let file_id = FileId {
+            persistent: 0x2233_4455,
+            volatile: 0x6677_8899,
+        };
+
+        let mut connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut auth_provider)
+            .await
+            .expect("authenticate should succeed");
+
+        let responses = connection
+            .compound_raw(&[super::CompoundRequest::new(
+                Command::Write,
+                WriteRequest::for_file(file_id, 0, vec![b'B'; 4096]).encode(),
+            )])
+            .await
+            .expect("compound write should succeed");
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].header.command, Command::Write);
+
+        let transport = connection.into_transport();
+        let decrypted = outbound_encrypted_packet(&transport.writes[2], &server_encryption);
+        assert!(decrypted.starts_with(&COMPRESSION_TRANSFORM_PROTOCOL_ID));
+        let decompressed = decompress_transform_payload(&decrypted);
+        let header = Header::decode(&decompressed[..Header::LEN]).expect("header should decode");
+        let request =
+            WriteRequest::decode(&decompressed[Header::LEN..]).expect("write should decode");
+
+        assert_eq!(header.command, Command::Write);
+        assert_eq!(header.session_id, SessionId(62));
+        assert_eq!(header.tree_id, TreeId(0));
+        assert!(!header.flags.contains(HeaderFlags::SIGNED));
+        assert_eq!(request.data.len(), 4096);
     }
 
     #[tokio::test]
