@@ -36,15 +36,15 @@
 //!
 //! # Usage model
 //!
-//! Use `smolder_core` when you want typed SMB/RPC client primitives and are
-//! comfortable orchestrating the protocol yourself. If you want a higher-level
-//! share/file API or operator-facing workflows such as `smbexec` and `psexec`,
-//! use the `smolder` package instead.
+//! Use `smolder_core` when you want typed SMB/RPC client primitives or the new
+//! embedded-client facade in [`facade`]. If you want operator-facing workflows
+//! such as `smbexec` and `psexec`, use the `smolder` package instead.
 //!
 //! # Start here
 //!
 //! The fastest supported entry points are:
 //!
+//! - `cargo run -p smolder-smb-core --example client_session_connect`
 //! - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
 //! - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
 //! - `cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect`
@@ -60,6 +60,7 @@
 //!
 //! The intended entry points for most consumers are:
 //!
+//! - [`facade::Client`] and [`facade::ClientBuilder`] for embedded client usage
 //! - [`client::Connection`] plus its typestate markers for negotiate, session,
 //!   tree, and file operations
 //! - [`pipe::SmbSessionConfig`], [`pipe::connect_tree`], and
@@ -84,6 +85,7 @@ pub mod client;
 pub mod crypto;
 pub mod dfs;
 pub mod error;
+pub mod facade;
 pub mod pipe;
 pub mod rpc;
 pub mod prelude {
@@ -112,7 +114,8 @@ pub mod prelude {
     pub use crate::crypto::{derive_encryption_keys, EncryptionKeys};
     pub use crate::dfs::{resolve_unc_path, DfsReferral, UncPath};
     pub use crate::error::CoreError;
-    pub use crate::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
+    pub use crate::facade::{Client, ClientBuilder};
+    pub use crate::pipe::{connect_session, connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::rpc::PipeRpcClient;
     pub use crate::transport::{TokioTcpTransport, Transport};
 }

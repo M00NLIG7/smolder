@@ -17,6 +17,12 @@ and the versioning/MSRV rules are defined in
 
 ## [Unreleased]
 
+### Added
+
+- Added a high-level embedded client facade to `smolder-smb-core` with
+  `ClientBuilder`, `Client`, authenticated session wrappers, and tree-connected
+  share wrappers on top of the existing typestate SMB client.
+
 ### Release Notes Flow
 
 - Add user-visible changes here as they land.

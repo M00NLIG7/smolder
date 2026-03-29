@@ -15,6 +15,7 @@ on the right abstractions.
 For most users, the supported starting surface is:
 
 - `smolder_core::prelude`
+- `smolder_core::facade::{Client, ClientBuilder}`
 - `smolder_core::client::Connection`
 - `smolder_core::pipe::{SmbSessionConfig, NamedPipe, PipeAccess, connect_tree}`
 - `smolder_core::rpc::PipeRpcClient`
@@ -30,6 +31,13 @@ For most users, the supported starting surface is:
 
 These are the APIs new examples, docs, and downstream integrations should
 prefer.
+
+For the `0.2.x` line, the preferred split is:
+
+- use `facade::Client` when you want an embedded SMB client that gets you to an
+  authenticated session or tree connection quickly
+- use `client::Connection` directly when you need full typestate control or are
+  implementing new high-level flows inside Smolder itself
 
 ## Public But Expert-Oriented
 

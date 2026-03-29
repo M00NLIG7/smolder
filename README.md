@@ -97,8 +97,8 @@ Implemented now:
   headers
 - `smolder-core`: SMB negotiate/session setup, NTLMv2/SPNEGO auth, signing,
   SMB3 encryption, named pipes, DCE/RPC transport, DFS referral handling,
-  compound requests, durable/resilient reconnect primitives, and feature-gated
-  Kerberos session-setup/auth primitives
+  compound requests, durable/resilient reconnect primitives, a new embedded
+  client facade, and feature-gated Kerberos session-setup/auth primitives
 - `smolder-tools`: high-level SMB file APIs, DFS-aware path resolution,
   reconnect helpers, CLI file workflows, feature-gated Kerberos file auth,
   `smbexec`, and `psexec`

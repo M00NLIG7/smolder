@@ -60,6 +60,7 @@ Not in scope:
 
 Supported:
 
+- high-level embedded client facade for connect/authenticate/tree-connect flows
 - SMB2/3 negotiate, session setup, tree connect, file lifecycle primitives
 - NTLMv2 / SPNEGO auth
 - SMB signing

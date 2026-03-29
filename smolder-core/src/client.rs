@@ -12,18 +12,18 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    AsyncId, ChangeNotifyRequest, ChangeNotifyResponse, CloseRequest, CloseResponse, Command,
-    CreateContext, CreateRequest, CreateResponse, EchoRequest, EchoResponse, CipherId, Dialect,
-    DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2, DurableHandleRequest,
-    DurableHandleRequestV2, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
+    AsyncId, ChangeNotifyRequest, ChangeNotifyResponse, CipherId, CloseRequest, CloseResponse,
+    Command, CreateContext, CreateRequest, CreateResponse, Dialect, DurableHandleFlags,
+    DurableHandleReconnect, DurableHandleReconnectV2, DurableHandleRequest, DurableHandleRequestV2,
+    EchoRequest, EchoResponse, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
     HeaderFlags, IoctlRequest, IoctlResponse, LockRequest, LockResponse, LogoffRequest,
     LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
     PreauthIntegrityCapabilities, PreauthIntegrityHashId, QueryDirectoryRequest,
     QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse, ReadRequest, ReadResponse,
     ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
     SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, ShareFlags, SigningMode,
-    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse,
-    TreeId, WriteRequest, WriteResponse,
+    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse, TreeId,
+    WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
 use smolder_proto::smb::transform::{TransformHeader, TRANSFORM_PROTOCOL_ID};
@@ -783,7 +783,8 @@ where
             self.state.response.security_mode,
             response.session_flags,
         );
-        let encryption = derive_encryption_state(&self.state.response, None, preauth_integrity.as_ref())?;
+        let encryption =
+            derive_encryption_state(&self.state.response, None, preauth_integrity.as_ref())?;
         let Connection {
             transport,
             next_message_id,
@@ -821,6 +822,18 @@ impl<T> Connection<T, Authenticated>
 where
     T: Transport + Send,
 {
+    /// Returns the active session identifier.
+    #[must_use]
+    pub fn session_id(&self) -> SessionId {
+        self.state.session_id
+    }
+
+    /// Returns the exported session key for the authenticated session, if available.
+    #[must_use]
+    pub fn session_key(&self) -> Option<&[u8]> {
+        self.state.session_key.as_deref()
+    }
+
     /// Executes a raw compound request within the authenticated session.
     pub async fn compound_raw(
         &mut self,
@@ -1031,7 +1044,8 @@ where
         request: &CreateRequest,
         options: DurableOpenOptions,
     ) -> Result<DurableHandle, CoreError> {
-        let durable_request = durable_create_request(self.state.negotiated.dialect_revision, request, &options)?;
+        let durable_request =
+            durable_create_request(self.state.negotiated.dialect_revision, request, &options)?;
         let response = self.create(&durable_request).await?;
         build_durable_handle(
             self.state.negotiated.dialect_revision,
@@ -1557,12 +1571,12 @@ where
 
     fn commit_message_ids(&mut self, count: usize) -> Result<(), CoreError> {
         let count = self.validate_request_count(count)?;
-        self.next_message_id = self
-            .next_message_id
-            .checked_add(u64::from(count))
-            .ok_or(CoreError::InvalidInput(
-                "message id space exhausted for SMB request dispatch",
-            ))?;
+        self.next_message_id =
+            self.next_message_id
+                .checked_add(u64::from(count))
+                .ok_or(CoreError::InvalidInput(
+                    "message id space exhausted for SMB request dispatch",
+                ))?;
         self.available_credits -= count;
         Ok(())
     }
@@ -1585,12 +1599,12 @@ where
     }
 
     fn apply_credit_grant(&mut self, granted: u32) -> Result<(), CoreError> {
-        self.available_credits = self
-            .available_credits
-            .checked_add(granted)
-            .ok_or(CoreError::InvalidResponse(
-                "server granted too many SMB credits",
-            ))?;
+        self.available_credits =
+            self.available_credits
+                .checked_add(granted)
+                .ok_or(CoreError::InvalidResponse(
+                    "server granted too many SMB credits",
+                ))?;
         Ok(())
     }
 
@@ -1649,19 +1663,23 @@ where
                 header.flags |= HeaderFlags::SIGNED;
             }
 
-            let base_len = Header::LEN
-                .checked_add(request.body.len())
-                .ok_or(CoreError::InvalidInput("compound request element was too large"))?;
+            let base_len =
+                Header::LEN
+                    .checked_add(request.body.len())
+                    .ok_or(CoreError::InvalidInput(
+                        "compound request element was too large",
+                    ))?;
             let packet_len = if index + 1 == requests.len() {
                 base_len
             } else {
                 align_to_8(base_len)
             };
             if index + 1 < requests.len() {
-                header.next_command =
-                    u32::try_from(packet_len).map_err(|_| CoreError::InvalidInput(
+                header.next_command = u32::try_from(packet_len).map_err(|_| {
+                    CoreError::InvalidInput(
                         "compound request element exceeded SMB next-command limits",
-                    ))?;
+                    )
+                })?;
             }
 
             let mut packet = header.encode();
@@ -1700,7 +1718,9 @@ fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreError> {
     loop {
         let header_end = offset
             .checked_add(Header::LEN)
-            .ok_or(CoreError::InvalidResponse("compound response offset overflowed"))?;
+            .ok_or(CoreError::InvalidResponse(
+                "compound response offset overflowed",
+            ))?;
         if header_end > payload.len() {
             return Err(CoreError::InvalidResponse(
                 "compound response packet was truncated",
@@ -1737,10 +1757,15 @@ fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreError> {
 
 fn encode_session_frame(payload: &[u8], context: &RequestContext) -> Result<Vec<u8>, CoreError> {
     let session_payload = if context.should_encrypt() {
-        let encryption = context.encryption.as_deref().ok_or(CoreError::InvalidInput(
-            "session requires encryption but no encryption key is available",
-        ))?;
-        encryption.encrypt_message(context.session_id.0, payload)?.encode()
+        let encryption = context
+            .encryption
+            .as_deref()
+            .ok_or(CoreError::InvalidInput(
+                "session requires encryption but no encryption key is available",
+            ))?;
+        encryption
+            .encrypt_message(context.session_id.0, payload)?
+            .encode()
     } else {
         payload.to_vec()
     };
@@ -1753,9 +1778,12 @@ fn decode_session_payload(
 ) -> Result<(Vec<u8>, bool), CoreError> {
     let frame = SessionMessage::decode(frame)?;
     if frame.payload.starts_with(&TRANSFORM_PROTOCOL_ID) {
-        let encryption = context.encryption.as_deref().ok_or(CoreError::InvalidResponse(
-            "received encrypted SMB response but no encryption state is available",
-        ))?;
+        let encryption = context
+            .encryption
+            .as_deref()
+            .ok_or(CoreError::InvalidResponse(
+                "received encrypted SMB response but no encryption state is available",
+            ))?;
         let transform = TransformHeader::decode(&frame.payload)?;
         if transform.session_id != context.session_id.0 {
             return Err(CoreError::InvalidResponse(
@@ -1854,11 +1882,7 @@ fn build_durable_handle(
             let (timeout, flags) = granted
                 .map(|granted| (granted.timeout, granted.flags))
                 .unwrap_or((options.timeout, options.flags));
-            (
-                timeout,
-                flags,
-                Some(create_guid),
-            )
+            (timeout, flags, Some(create_guid))
         }
     };
 
@@ -1872,7 +1896,9 @@ fn build_durable_handle(
     })
 }
 
-fn strip_durable_create_contexts(contexts: &[CreateContext]) -> Result<Vec<CreateContext>, CoreError> {
+fn strip_durable_create_contexts(
+    contexts: &[CreateContext],
+) -> Result<Vec<CreateContext>, CoreError> {
     let mut filtered = Vec::with_capacity(contexts.len());
     for context in contexts {
         if context.durable_handle_request_data()?.is_some()
@@ -2135,7 +2161,10 @@ fn negotiated_cipher(negotiated: &NegotiateResponse) -> Result<Option<CipherId>,
     match negotiated.dialect_revision {
         Dialect::Smb202 | Dialect::Smb210 => Ok(None),
         Dialect::Smb300 | Dialect::Smb302 => {
-            if negotiated.capabilities.contains(GlobalCapabilities::ENCRYPTION) {
+            if negotiated
+                .capabilities
+                .contains(GlobalCapabilities::ENCRYPTION)
+            {
                 Ok(Some(CipherId::Aes128Ccm))
             } else {
                 Ok(None)
@@ -2159,7 +2188,10 @@ fn negotiated_cipher(negotiated: &NegotiateResponse) -> Result<Option<CipherId>,
                 }
             }
 
-            if negotiated.capabilities.contains(GlobalCapabilities::ENCRYPTION) && selected.is_none()
+            if negotiated
+                .capabilities
+                .contains(GlobalCapabilities::ENCRYPTION)
+                && selected.is_none()
             {
                 return Err(CoreError::InvalidResponse(
                     "SMB 3.1.1 negotiate response did not select an encryption cipher",
@@ -2251,15 +2283,14 @@ mod tests {
         Dialect, EchoResponse, EncryptionCapabilities, FileAttributes, FileId, FlushRequest,
         FlushResponse, GlobalCapabilities, Header, HeaderFlags, IoctlRequest, IoctlResponse,
         LockElement, LockFlags, LockRequest, LockResponse, LogoffRequest, LogoffResponse,
-        MessageId, NegotiateRequest, NegotiateResponse, OplockLevel,
-        PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, ReadResponse,
-        ReadResponseFlags, SessionFlags, SessionId, SessionSetupRequest, SessionSetupResponse,
-        SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode, TreeCapabilities,
-        TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeId, WriteRequest,
-        WriteResponse,
+        MessageId, NegotiateRequest, NegotiateResponse, OplockLevel, PreauthIntegrityCapabilities,
+        PreauthIntegrityHashId, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags,
+        SessionId, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, ShareFlags,
+        ShareType, SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
+        TreeDisconnectRequest, TreeId, WriteRequest, WriteResponse,
     };
-    use smolder_proto::smb::transform::TransformHeader;
     use smolder_proto::smb::status::NtStatus;
+    use smolder_proto::smb::transform::TransformHeader;
 
     use crate::auth::{AuthError, AuthProvider};
     use crate::client::Connection;
@@ -2519,8 +2550,14 @@ mod tests {
         )
         .expect("preauth state should derive")
         .expect("SMB 3.1.1 should negotiate preauth");
-        let session_request_packet =
-            request_packet_with_credits(Command::SessionSetup, 1, 0, 0, 32, session_request.encode());
+        let session_request_packet = request_packet_with_credits(
+            Command::SessionSetup,
+            1,
+            0,
+            0,
+            32,
+            session_request.encode(),
+        );
         preauth
             .update(&session_request_packet)
             .expect("session request should update preauth state");
@@ -2551,7 +2588,9 @@ mod tests {
 
         assert_eq!(
             super::derive_smb_session_key(Some(&[0x41, 0x42, 0x43])),
-            Some(vec![0x41, 0x42, 0x43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            Some(vec![
+                0x41, 0x42, 0x43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ])
         );
     }
 
@@ -3991,7 +4030,10 @@ mod tests {
                 flags: LockFlags::EXCLUSIVE_LOCK | LockFlags::FAIL_IMMEDIATELY,
             }],
         );
-        let response = connection.lock(&request).await.expect("lock should succeed");
+        let response = connection
+            .lock(&request)
+            .await
+            .expect("lock should succeed");
         assert_eq!(response, LockResponse);
 
         let transport = connection.into_transport();

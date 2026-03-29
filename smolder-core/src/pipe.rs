@@ -20,7 +20,7 @@ use smolder_proto::smb::status::NtStatus;
 #[cfg(feature = "kerberos-api")]
 use crate::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
-use crate::client::{Connection, TreeConnected};
+use crate::client::{Authenticated, Connection, TreeConnected};
 use crate::error::CoreError;
 use crate::transport::{TokioTcpTransport, Transport};
 
@@ -140,6 +140,30 @@ impl SmbSessionConfig {
     #[must_use]
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Returns the configured SMB signing mode.
+    #[must_use]
+    pub fn signing_mode(&self) -> SigningMode {
+        self.signing_mode
+    }
+
+    /// Returns the configured SMB capabilities.
+    #[must_use]
+    pub fn capabilities(&self) -> GlobalCapabilities {
+        self.capabilities
+    }
+
+    /// Returns the configured negotiate dialects.
+    #[must_use]
+    pub fn dialects(&self) -> &[Dialect] {
+        &self.dialects
+    }
+
+    /// Returns the configured client GUID.
+    #[must_use]
+    pub fn client_guid(&self) -> &[u8; 16] {
+        &self.client_guid
     }
 }
 
@@ -747,10 +771,9 @@ where
 }
 
 /// Authenticates and tree-connects to the requested share.
-pub async fn connect_tree(
+pub async fn connect_session(
     config: &SmbSessionConfig,
-    share: &str,
-) -> Result<Connection<TokioTcpTransport, TreeConnected>, CoreError> {
+) -> Result<Connection<TokioTcpTransport, Authenticated>, CoreError> {
     let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
     let request = NegotiateRequest {
         security_mode: config.signing_mode,
@@ -760,10 +783,10 @@ pub async fn connect_tree(
         dialects: config.dialects.clone(),
     };
     let connection = Connection::new(transport).negotiate(&request).await?;
-    let connection = match config.auth.clone() {
+    match config.auth.clone() {
         SessionAuth::Ntlm(credentials) => {
             let mut auth = NtlmAuthenticator::new(credentials);
-            connection.authenticate(&mut auth).await?
+            connection.authenticate(&mut auth).await
         }
         #[cfg(feature = "kerberos-api")]
         SessionAuth::Kerberos {
@@ -771,9 +794,17 @@ pub async fn connect_tree(
             target,
         } => {
             let mut auth = KerberosAuthenticator::new(credentials, target);
-            connection.authenticate(&mut auth).await?
+            connection.authenticate(&mut auth).await
         }
-    };
+    }
+}
+
+/// Authenticates and tree-connects to the requested share.
+pub async fn connect_tree(
+    config: &SmbSessionConfig,
+    share: &str,
+) -> Result<Connection<TokioTcpTransport, TreeConnected>, CoreError> {
+    let connection = connect_session(config).await?;
     let unc = format!(r"\\{}\{}", config.server, normalize_share_name(share)?);
     connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
@@ -834,9 +865,9 @@ mod tests {
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    use crate::auth::NtlmCredentials;
     #[cfg(feature = "kerberos-api")]
     use crate::auth::{KerberosCredentials, KerberosTarget};
-    use crate::auth::NtlmCredentials;
     use crate::client::{Connection, TreeConnected};
     use crate::transport::Transport;
 
