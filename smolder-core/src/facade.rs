@@ -24,6 +24,7 @@ use crate::client::{
     Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle, TreeConnected,
 };
 use crate::error::CoreError;
+use crate::lsarpc::LsarpcClient;
 use crate::pipe::{connect_session, NamedPipe, PipeAccess, SmbSessionConfig};
 use crate::rpc::PipeRpcClient;
 use crate::samr::SamrClient;
@@ -257,6 +258,16 @@ impl Client {
     pub async fn connect_ipc(&self) -> Result<Share, CoreError> {
         self.connect_share("IPC$").await
     }
+
+    /// Connects, authenticates, opens `IPC$`, and binds a typed `lsarpc` client.
+    pub async fn connect_lsarpc(&self) -> Result<LsarpcClient, CoreError> {
+        self.connect().await?.connect_lsarpc().await
+    }
+
+    /// Connects, authenticates, opens `IPC$`, and binds a typed `srvsvc` client.
+    pub async fn connect_srvsvc(&self) -> Result<SrvsvcClient, CoreError> {
+        self.connect().await?.connect_srvsvc().await
+    }
 }
 
 /// Authenticated SMB session returned by the high-level client.
@@ -370,6 +381,14 @@ where
             .connect_rpc_pipe("srvsvc", PipeAccess::ReadWrite)
             .await?;
         SrvsvcClient::bind(rpc).await
+    }
+
+    /// Opens `\\PIPE\\lsarpc` on `IPC$`, performs the bind/open, and returns a typed client.
+    pub async fn connect_lsarpc(self) -> Result<LsarpcClient<T>, CoreError> {
+        let rpc = self
+            .connect_rpc_pipe("lsarpc", PipeAccess::ReadWrite)
+            .await?;
+        LsarpcClient::bind(rpc).await
     }
 
     /// Opens a caller-selected SAMR-capable pipe on `IPC$`, performs the bind/connect, and returns a typed client.
@@ -523,6 +542,14 @@ where
             .connect_rpc_pipe("srvsvc", PipeAccess::ReadWrite)
             .await?;
         SrvsvcClient::bind(rpc).await
+    }
+
+    /// Opens `\\PIPE\\lsarpc` on the current tree, performs the bind/open, and returns a typed client.
+    pub async fn connect_lsarpc(self) -> Result<LsarpcClient<T>, CoreError> {
+        let rpc = self
+            .connect_rpc_pipe("lsarpc", PipeAccess::ReadWrite)
+            .await?;
+        LsarpcClient::bind(rpc).await
     }
 
     /// Opens a caller-selected SAMR-capable pipe on the current tree, performs the bind/connect, and returns a typed client.

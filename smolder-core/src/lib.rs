@@ -90,6 +90,7 @@ pub mod crypto;
 pub mod dfs;
 pub mod error;
 pub mod facade;
+pub mod lsarpc;
 pub mod pipe;
 pub mod rpc;
 pub mod samr;
@@ -124,6 +125,7 @@ pub mod prelude {
     pub use crate::facade::{
         Client, ClientBuilder, File, FileMetadata, OpenOptions, Session, Share,
     };
+    pub use crate::lsarpc::{LsaDomainInfo, LsaSid, LsarpcClient, DEFAULT_POLICY_ACCESS};
     pub use crate::pipe::{connect_session, connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::rpc::PipeRpcClient;
     pub use crate::samr::{
