@@ -19,14 +19,21 @@ const SAMR_SYNTAX: SyntaxId = SyntaxId::new(
 const SAMR_CONTEXT_ID: u16 = 0;
 const SAMR_CONNECT5_OPNUM: u16 = 64;
 const SAMR_CLOSE_HANDLE_OPNUM: u16 = 1;
+const SAMR_LOOKUP_DOMAIN_OPNUM: u16 = 5;
 const SAMR_ENUMERATE_DOMAINS_OPNUM: u16 = 6;
+const SAMR_OPEN_DOMAIN_OPNUM: u16 = 7;
+const SAMR_ENUMERATE_USERS_OPNUM: u16 = 13;
 const SAM_SERVER_CONNECT: u32 = 0x0000_0001;
 const SAM_SERVER_ENUMERATE_DOMAINS: u32 = 0x0000_0010;
 const SAM_SERVER_LOOKUP_DOMAIN: u32 = 0x0000_0020;
+const DOMAIN_LIST_ACCOUNTS: u32 = 0x0000_0100;
+const DOMAIN_LOOKUP: u32 = 0x0000_0200;
 
 /// Default SAM server access mask used by the typed client.
 pub const DEFAULT_SERVER_ACCESS: u32 =
     SAM_SERVER_CONNECT | SAM_SERVER_ENUMERATE_DOMAINS | SAM_SERVER_LOOKUP_DOMAIN;
+/// Default domain access mask used by the typed client.
+pub const DEFAULT_DOMAIN_ACCESS: u32 = DOMAIN_LIST_ACCOUNTS | DOMAIN_LOOKUP;
 
 /// Revision/capability info returned by `SamrConnect5`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +51,37 @@ pub struct SamrDomain {
     pub relative_id: u32,
     /// Domain name.
     pub name: String,
+}
+
+/// Minimal SAM domain SID representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamrSid {
+    /// SID revision.
+    pub revision: u8,
+    /// SID identifier authority bytes.
+    pub identifier_authority: [u8; 6],
+    /// SID subauthorities.
+    pub sub_authorities: Vec<u32>,
+}
+
+/// Domain-scoped user enumeration entry returned by `SamrEnumerateUsersInDomain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamrUser {
+    /// User RID.
+    pub relative_id: u32,
+    /// Account name.
+    pub name: String,
+}
+
+/// Typed `samr` domain client over an already-open domain handle.
+#[derive(Debug)]
+pub struct SamrDomainClient<T = TokioTcpTransport> {
+    rpc: PipeRpcClient<T>,
+    context_id: u16,
+    server_handle: [u8; 20],
+    domain_handle: [u8; 20],
+    domain_name: String,
+    domain_sid: SamrSid,
 }
 
 /// Typed `samr` client over an already-open RPC transport and server handle.
@@ -78,6 +116,26 @@ impl<T> SamrClient<T> {
     #[must_use]
     pub fn into_rpc(self) -> PipeRpcClient<T> {
         self.rpc
+    }
+}
+
+impl<T> SamrDomainClient<T> {
+    /// Returns the opened domain name.
+    #[must_use]
+    pub fn domain_name(&self) -> &str {
+        &self.domain_name
+    }
+
+    /// Returns the opened domain SID.
+    #[must_use]
+    pub fn domain_sid(&self) -> &SamrSid {
+        &self.domain_sid
+    }
+
+    /// Returns the underlying RPC transport.
+    #[must_use]
+    pub fn rpc(&self) -> &PipeRpcClient<T> {
+        &self.rpc
     }
 }
 
@@ -117,8 +175,93 @@ where
         parse_enumerate_domains_response(&response)
     }
 
+    /// Looks up the SID for a hosted SAM domain by exact name.
+    pub async fn lookup_domain_sid(&mut self, domain_name: &str) -> Result<SamrSid, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_LOOKUP_DOMAIN_OPNUM,
+                encode_lookup_domain_request(self.server_handle, domain_name)?,
+            )
+            .await?;
+        parse_lookup_domain_response(&response)
+    }
+
+    /// Opens a domain handle by name and consumes the server-scoped client.
+    pub async fn open_domain(mut self, domain_name: &str) -> Result<SamrDomainClient<T>, CoreError> {
+        let domain_sid = self.lookup_domain_sid(domain_name).await?;
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_OPEN_DOMAIN_OPNUM,
+                encode_open_domain_request(self.server_handle, DEFAULT_DOMAIN_ACCESS, &domain_sid),
+            )
+            .await?;
+        let domain_handle = parse_open_domain_response(&response)?;
+        Ok(SamrDomainClient {
+            rpc: self.rpc,
+            context_id: self.context_id,
+            server_handle: self.server_handle,
+            domain_handle,
+            domain_name: domain_name.to_owned(),
+            domain_sid,
+        })
+    }
+
     /// Closes the server handle and returns the underlying RPC transport.
     pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_CLOSE_HANDLE_OPNUM,
+                encode_close_handle_request(self.server_handle),
+            )
+            .await?;
+        parse_close_handle_response(&response)?;
+        Ok(self.rpc)
+    }
+}
+
+impl<T> SamrDomainClient<T>
+where
+    T: crate::transport::Transport + Send,
+{
+    /// Enumerates users in the currently-open domain.
+    pub async fn enumerate_users(
+        &mut self,
+        user_account_control: u32,
+    ) -> Result<Vec<SamrUser>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_ENUMERATE_USERS_OPNUM,
+                encode_enumerate_users_request(
+                    self.domain_handle,
+                    0,
+                    user_account_control,
+                    u32::MAX,
+                ),
+            )
+            .await?;
+        parse_enumerate_users_response(&response)
+    }
+
+    /// Closes the domain handle, then the server handle, and returns the underlying RPC transport.
+    pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_CLOSE_HANDLE_OPNUM,
+                encode_close_handle_request(self.domain_handle),
+            )
+            .await?;
+        parse_close_handle_response(&response)?;
+
         let response = self
             .rpc
             .call(
@@ -191,6 +334,140 @@ fn encode_enumerate_domains_request(
     bytes.extend_from_slice(&enumeration_context.to_le_bytes());
     bytes.extend_from_slice(&preferred_maximum_length.to_le_bytes());
     bytes
+}
+
+fn encode_lookup_domain_request(
+    server_handle: [u8; 20],
+    domain_name: &str,
+) -> Result<Vec<u8>, CoreError> {
+    if domain_name.is_empty() || domain_name.contains('\0') {
+        return Err(CoreError::PathInvalid(
+            "SAMR domain name must be a non-empty UTF-16 string",
+        ));
+    }
+
+    let mut writer = NdrWriter::new();
+    writer.write_bytes(&server_handle);
+    writer.write_ref_unicode_string(domain_name);
+    Ok(writer.into_bytes())
+}
+
+fn parse_lookup_domain_response(response: &[u8]) -> Result<SamrSid, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let sid_referent = reader.read_u32("DomainSidReferent")?;
+    if sid_referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "SamrLookupDomainInSamServer did not return a SID",
+        ));
+    }
+    let sid = reader.read_sid("DomainSid")?;
+    let status = reader.read_u32("SamrLookupDomainInSamServerStatus")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrLookupDomainInSamServer",
+            code: status,
+        });
+    }
+    Ok(sid)
+}
+
+fn encode_open_domain_request(
+    server_handle: [u8; 20],
+    desired_access: u32,
+    domain_sid: &SamrSid,
+) -> Vec<u8> {
+    let mut writer = NdrWriter::new();
+    writer.write_bytes(&server_handle);
+    writer.write_u32(desired_access);
+    writer.write_sid(domain_sid);
+    writer.into_bytes()
+}
+
+fn parse_open_domain_response(response: &[u8]) -> Result<[u8; 20], CoreError> {
+    if response.len() < 24 {
+        return Err(CoreError::InvalidResponse(
+            "SamrOpenDomain response was too short",
+        ));
+    }
+    let mut domain_handle = [0_u8; 20];
+    domain_handle.copy_from_slice(&response[..20]);
+    let status = u32::from_le_bytes(response[20..24].try_into().expect("status slice"));
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrOpenDomain",
+            code: status,
+        });
+    }
+    Ok(domain_handle)
+}
+
+fn encode_enumerate_users_request(
+    domain_handle: [u8; 20],
+    enumeration_context: u32,
+    user_account_control: u32,
+    preferred_maximum_length: u32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(32);
+    bytes.extend_from_slice(&domain_handle);
+    bytes.extend_from_slice(&enumeration_context.to_le_bytes());
+    bytes.extend_from_slice(&user_account_control.to_le_bytes());
+    bytes.extend_from_slice(&preferred_maximum_length.to_le_bytes());
+    bytes
+}
+
+fn parse_enumerate_users_response(response: &[u8]) -> Result<Vec<SamrUser>, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let _enumeration_context = reader.read_u32("EnumerationContext")?;
+    let buffer_referent = reader.read_u32("BufferReferent")?;
+    let mut users = Vec::new();
+
+    if buffer_referent != 0 {
+        let entries_read = reader.read_u32("EntriesRead")? as usize;
+        let array_referent = reader.read_u32("RidEnumerationArray")?;
+        if entries_read > 0 && array_referent == 0 {
+            return Err(CoreError::InvalidResponse(
+                "SamrEnumerateUsersInDomain returned entries without an array",
+            ));
+        }
+        if array_referent != 0 {
+            let max_count = reader.read_u32("RidEnumerationMaxCount")? as usize;
+            if max_count < entries_read {
+                return Err(CoreError::InvalidResponse(
+                    "SamrEnumerateUsersInDomain returned fewer array slots than entries",
+                ));
+            }
+            let mut raw_entries = Vec::with_capacity(entries_read);
+            for _ in 0..entries_read {
+                raw_entries.push(RidEnumeration {
+                    relative_id: reader.read_u32("RelativeId")?,
+                    name: reader.read_rpc_unicode_string("Name")?,
+                });
+            }
+            users = raw_entries
+                .into_iter()
+                .map(|entry| SamrUser {
+                    relative_id: entry.relative_id,
+                    name: entry.name,
+                })
+                .collect();
+        }
+    }
+
+    let count_returned = reader.read_u32("CountReturned")? as usize;
+    if count_returned != users.len() {
+        return Err(CoreError::InvalidResponse(
+            "SamrEnumerateUsersInDomain count did not match returned entries",
+        ));
+    }
+
+    let status = reader.read_u32("SamrEnumerateUsersInDomainStatus")?;
+    if status != 0 && status != 0x0000_0105 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrEnumerateUsersInDomain",
+            code: status,
+        });
+    }
+    Ok(users)
 }
 
 fn parse_enumerate_domains_response(response: &[u8]) -> Result<Vec<SamrDomain>, CoreError> {
@@ -347,14 +624,94 @@ impl<'a> NdrReader<'a> {
         String::from_utf16(&code_units[..actual_units])
             .map_err(|_| CoreError::InvalidResponse("failed to decode samr UTF-16 string"))
     }
+
+    fn read_sid(&mut self, field: &'static str) -> Result<SamrSid, CoreError> {
+        if self.remaining() < 8 {
+            return Err(CoreError::InvalidResponse(field));
+        }
+        let revision = self.bytes[self.offset];
+        let sub_authority_count = self.bytes[self.offset + 1] as usize;
+        let mut identifier_authority = [0_u8; 6];
+        identifier_authority.copy_from_slice(&self.bytes[self.offset + 2..self.offset + 8]);
+        self.offset += 8;
+
+        let mut sub_authorities = Vec::with_capacity(sub_authority_count);
+        for _ in 0..sub_authority_count {
+            sub_authorities.push(self.read_u32(field)?);
+        }
+
+        Ok(SamrSid {
+            revision,
+            identifier_authority,
+            sub_authorities,
+        })
+    }
+}
+
+struct NdrWriter {
+    bytes: Vec<u8>,
+}
+
+impl NdrWriter {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.align(4);
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_ref_unicode_string(&mut self, value: &str) {
+        let encoded = value.encode_utf16().collect::<Vec<_>>();
+        let byte_len = (encoded.len() * 2) as u16;
+        self.write_u16(byte_len);
+        self.write_u16(byte_len);
+        self.write_u32(1);
+        self.align(4);
+        self.write_u32(encoded.len() as u32);
+        for code_unit in encoded {
+            self.write_u16(code_unit);
+        }
+        self.align(4);
+    }
+
+    fn write_sid(&mut self, sid: &SamrSid) {
+        self.bytes.push(sid.revision);
+        self.bytes.push(sid.sub_authorities.len() as u8);
+        self.bytes.extend_from_slice(&sid.identifier_authority);
+        for sub_authority in &sid.sub_authorities {
+            self.write_u32(*sub_authority);
+        }
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn align(&mut self, alignment: usize) {
+        let padding = (alignment - (self.bytes.len() % alignment)) % alignment;
+        self.bytes.resize(self.bytes.len() + padding, 0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         encode_close_handle_request, encode_connect5_request, encode_enumerate_domains_request,
+        encode_enumerate_users_request, encode_lookup_domain_request, encode_open_domain_request,
         parse_close_handle_response, parse_connect5_response, parse_enumerate_domains_response,
-        SamrDomain, SamrServerRevision, DEFAULT_SERVER_ACCESS,
+        parse_enumerate_users_response, parse_lookup_domain_response, parse_open_domain_response,
+        SamrDomain, SamrServerRevision, SamrSid, SamrUser, DEFAULT_DOMAIN_ACCESS,
+        DEFAULT_SERVER_ACCESS,
     };
     use crate::error::CoreError;
 
@@ -500,5 +857,118 @@ mod tests {
         response[20..24].copy_from_slice(&5_u32.to_le_bytes());
         let error = parse_close_handle_response(&response).expect_err("non-zero status should fail");
         assert!(matches!(error, CoreError::RemoteOperation { .. }));
+    }
+
+    #[test]
+    fn lookup_domain_request_encodes_server_handle_and_name() {
+        assert_eq!(
+            encode_lookup_domain_request([0x41; 20], "Builtin").expect("request should encode"),
+            [
+                [0x41; 20].to_vec(),
+                14_u16.to_le_bytes().to_vec(),
+                14_u16.to_le_bytes().to_vec(),
+                1_u32.to_le_bytes().to_vec(),
+                7_u32.to_le_bytes().to_vec(),
+                b"B\0u\0i\0l\0t\0i\0n\0".to_vec(),
+                0_u16.to_le_bytes().to_vec(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn lookup_domain_response_decodes_sid() {
+        let response = [
+            1_u32.to_le_bytes().to_vec(),
+            vec![1, 2, 0, 0, 0, 0, 0, 5],
+            32_u32.to_le_bytes().to_vec(),
+            544_u32.to_le_bytes().to_vec(),
+            0_u32.to_le_bytes().to_vec(),
+        ]
+        .concat();
+
+        assert_eq!(
+            parse_lookup_domain_response(&response).expect("response should decode"),
+            SamrSid {
+                revision: 1,
+                identifier_authority: [0, 0, 0, 0, 0, 5],
+                sub_authorities: vec![32, 544],
+            }
+        );
+    }
+
+    #[test]
+    fn open_domain_request_encodes_sid_inline() {
+        let sid = SamrSid {
+            revision: 1,
+            identifier_authority: [0, 0, 0, 0, 0, 5],
+            sub_authorities: vec![32, 544],
+        };
+        assert_eq!(
+            encode_open_domain_request([0x41; 20], DEFAULT_DOMAIN_ACCESS, &sid),
+            [
+                [0x41; 20].to_vec(),
+                DEFAULT_DOMAIN_ACCESS.to_le_bytes().to_vec(),
+                vec![1, 2, 0, 0, 0, 0, 0, 5],
+                32_u32.to_le_bytes().to_vec(),
+                544_u32.to_le_bytes().to_vec(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn open_domain_response_decodes_handle() {
+        let response = [[0x77; 20].to_vec(), 0_u32.to_le_bytes().to_vec()].concat();
+        assert_eq!(
+            parse_open_domain_response(&response).expect("response should decode"),
+            [0x77; 20]
+        );
+    }
+
+    #[test]
+    fn enumerate_users_request_encodes_handle_context_and_filter() {
+        assert_eq!(
+            encode_enumerate_users_request([0x12; 20], 4, 0x20, u32::MAX),
+            [
+                [0x12; 20].to_vec(),
+                4_u32.to_le_bytes().to_vec(),
+                0x20_u32.to_le_bytes().to_vec(),
+                u32::MAX.to_le_bytes().to_vec(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn enumerate_users_response_decodes_entries() {
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(0);
+        let buffer_ref = writer.next_referent();
+        writer.write_u32(buffer_ref);
+        writer.write_u32(2);
+        let array_ref = writer.next_referent();
+        writer.write_u32(array_ref);
+        writer.write_u32(2);
+        writer.write_u32(500);
+        writer.write_rpc_unicode_string("Administrator");
+        writer.write_u32(501);
+        writer.write_rpc_unicode_string("Guest");
+        writer.write_u32(2);
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_enumerate_users_response(&writer.into_bytes()).expect("response should decode"),
+            vec![
+                SamrUser {
+                    relative_id: 500,
+                    name: "Administrator".to_owned(),
+                },
+                SamrUser {
+                    relative_id: 501,
+                    name: "Guest".to_owned(),
+                },
+            ]
+        );
     }
 }

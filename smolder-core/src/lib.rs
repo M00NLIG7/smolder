@@ -126,7 +126,10 @@ pub mod prelude {
     };
     pub use crate::pipe::{connect_session, connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::rpc::PipeRpcClient;
-    pub use crate::samr::{SamrClient, SamrDomain, SamrServerRevision, DEFAULT_SERVER_ACCESS};
+    pub use crate::samr::{
+        SamrClient, SamrDomain, SamrDomainClient, SamrServerRevision, SamrSid, SamrUser,
+        DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
+    };
     pub use crate::srvsvc::{ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};
     pub use crate::transport::{TokioTcpTransport, Transport};
 }

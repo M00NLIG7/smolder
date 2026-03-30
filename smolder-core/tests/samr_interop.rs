@@ -94,8 +94,26 @@ async fn enumerates_windows_samr_domains_when_configured() {
             .any(|domain| domain.name.eq_ignore_ascii_case("Builtin")),
         "Windows SAMR enumeration should include the Builtin domain"
     );
+    let account_domain = domains
+        .iter()
+        .find(|domain| !domain.name.eq_ignore_ascii_case("Builtin"))
+        .expect("Windows SAMR enumeration should include a non-Builtin account domain")
+        .name
+        .clone();
+    let mut domain = samr
+        .open_domain(&account_domain)
+        .await
+        .expect("should open the enumerated account domain");
+    let users = domain
+        .enumerate_users(0)
+        .await
+        .expect("SamrEnumerateUsersInDomain should succeed");
+    assert!(
+        !users.is_empty(),
+        "account-domain SAMR user enumeration should not be empty"
+    );
 
-    let rpc = samr.close().await.expect("samr close should succeed");
+    let rpc = domain.close().await.expect("samr domain close should succeed");
     let connection = rpc
         .into_pipe()
         .close()
