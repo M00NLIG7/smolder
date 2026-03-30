@@ -89,6 +89,16 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
     assert!(time_of_day.year >= 2020);
     assert!(time_of_day.weekday < 7);
 
+    let shares = srvsvc
+        .share_enum_level1()
+        .await
+        .expect("NetrShareEnum level 1 should succeed over encrypted IPC$");
+    assert!(!shares.is_empty(), "srvsvc share enumeration should not be empty");
+    assert!(
+        shares.iter().any(|share| share.name.eq_ignore_ascii_case("IPC$")),
+        "srvsvc share enumeration should include IPC$"
+    );
+
     let connection = srvsvc
         .into_rpc()
         .into_pipe()

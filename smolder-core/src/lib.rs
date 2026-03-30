@@ -125,7 +125,7 @@ pub mod prelude {
     };
     pub use crate::pipe::{connect_session, connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::rpc::PipeRpcClient;
-    pub use crate::srvsvc::{SrvsvcClient, TimeOfDayInfo};
+    pub use crate::srvsvc::{ShareInfo1, SrvsvcClient, TimeOfDayInfo};
     pub use crate::transport::{TokioTcpTransport, Transport};
 }
 
