@@ -130,7 +130,7 @@ pub mod prelude {
         SamrClient, SamrDomain, SamrDomainClient, SamrServerRevision, SamrSid, SamrUser,
         DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
     };
-    pub use crate::srvsvc::{ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};
+    pub use crate::srvsvc::{ServerInfo101, ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};
     pub use crate::transport::{TokioTcpTransport, Transport};
 }
 

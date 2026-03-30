@@ -47,6 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shares.len()
     );
 
-    let _ = srvsvc.into_rpc().into_pipe().close().await?;
+    let connection = srvsvc.into_rpc().into_pipe().close().await?;
+    let connection = connection.tree_disconnect().await?;
+    connection.logoff().await?;
     Ok(())
 }
