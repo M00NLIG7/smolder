@@ -7,6 +7,7 @@
 use rand::random;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use smolder_proto::rpc::SyntaxId;
 use smolder_proto::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
 use smolder_proto::smb::smb2::{
     CloseRequest, CompressionCapabilities, CreateDisposition, CreateOptions, CreateRequest,
@@ -23,7 +24,8 @@ use crate::client::{
     Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle, TreeConnected,
 };
 use crate::error::CoreError;
-use crate::pipe::{connect_session, SmbSessionConfig};
+use crate::pipe::{connect_session, NamedPipe, PipeAccess, SmbSessionConfig};
+use crate::rpc::PipeRpcClient;
 use crate::transport::{TokioTcpTransport, Transport};
 
 const DEFAULT_PORT: u16 = 445;
@@ -327,6 +329,39 @@ where
         self.connect_share("IPC$").await
     }
 
+    /// Opens a named pipe on `IPC$`.
+    pub async fn connect_pipe(
+        self,
+        pipe_name: &str,
+        access: PipeAccess,
+    ) -> Result<NamedPipe<T>, CoreError> {
+        self.connect_ipc().await?.open_pipe(pipe_name, access).await
+    }
+
+    /// Opens a named pipe on `IPC$` and wraps it as an RPC transport.
+    pub async fn connect_rpc_pipe(
+        self,
+        pipe_name: &str,
+        access: PipeAccess,
+    ) -> Result<PipeRpcClient<T>, CoreError> {
+        let pipe = self.connect_pipe(pipe_name, access).await?;
+        Ok(PipeRpcClient::new(pipe))
+    }
+
+    /// Opens a named pipe on `IPC$`, performs an RPC bind, and returns the bound RPC client.
+    pub async fn bind_rpc(
+        self,
+        pipe_name: &str,
+        context_id: u16,
+        abstract_syntax: SyntaxId,
+    ) -> Result<PipeRpcClient<T>, CoreError> {
+        let mut rpc = self
+            .connect_rpc_pipe(pipe_name, PipeAccess::ReadWrite)
+            .await?;
+        rpc.bind_context(context_id, abstract_syntax).await?;
+        Ok(rpc)
+    }
+
     /// Logs off the authenticated SMB session.
     pub async fn logoff(self) -> Result<(), CoreError> {
         let _ = self.connection.logoff().await?;
@@ -423,6 +458,40 @@ where
             durable_handle,
             resilient_handle,
         })
+    }
+
+    /// Opens a named pipe on the current tree, which is usually `IPC$`.
+    pub async fn open_pipe(
+        self,
+        pipe_name: &str,
+        access: PipeAccess,
+    ) -> Result<NamedPipe<T>, CoreError> {
+        let normalized_pipe = normalize_pipe_name(pipe_name)?;
+        NamedPipe::open(self.connection, &normalized_pipe, access).await
+    }
+
+    /// Opens a named pipe on the current tree and wraps it as an RPC transport.
+    pub async fn connect_rpc_pipe(
+        self,
+        pipe_name: &str,
+        access: PipeAccess,
+    ) -> Result<PipeRpcClient<T>, CoreError> {
+        let pipe = self.open_pipe(pipe_name, access).await?;
+        Ok(PipeRpcClient::new(pipe))
+    }
+
+    /// Opens a named pipe on the current tree, performs an RPC bind, and returns the bound client.
+    pub async fn bind_rpc(
+        self,
+        pipe_name: &str,
+        context_id: u16,
+        abstract_syntax: SyntaxId,
+    ) -> Result<PipeRpcClient<T>, CoreError> {
+        let mut rpc = self
+            .connect_rpc_pipe(pipe_name, PipeAccess::ReadWrite)
+            .await?;
+        rpc.bind_context(context_id, abstract_syntax).await?;
+        Ok(rpc)
     }
 
     /// Reads the full contents of a file on the current tree.
@@ -905,6 +974,29 @@ fn normalize_share_path(path: &str) -> Result<String, CoreError> {
     Ok(normalized)
 }
 
+fn normalize_pipe_name(pipe_name: &str) -> Result<String, CoreError> {
+    if pipe_name.contains('\0') {
+        return Err(CoreError::PathInvalid("pipe name must not contain NUL bytes"));
+    }
+
+    let normalized = pipe_name.trim().replace('/', "\\");
+    let trimmed = normalized.trim_matches('\\');
+    if trimmed.is_empty() {
+        return Err(CoreError::PathInvalid("pipe name must not be empty"));
+    }
+
+    let trimmed = if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("pipe\\") {
+        trimmed[5..].trim_start_matches('\\')
+    } else {
+        trimmed
+    };
+    if trimmed.is_empty() {
+        return Err(CoreError::PathInvalid("pipe name must not be empty"));
+    }
+
+    Ok(format!(r"\\{trimmed}"))
+}
+
 fn desired_access_mask(options: &OpenOptions) -> u32 {
     let mut desired_access = READ_CONTROL | SYNCHRONIZE;
     if options.read {
@@ -987,8 +1079,8 @@ mod tests {
     use crate::transport::Transport;
 
     use super::{
-        normalize_share_name, normalize_share_path, Client, ClientBuilder, FileMetadata,
-        OpenOptions, Share,
+        normalize_pipe_name, normalize_share_name, normalize_share_path, Client, ClientBuilder,
+        FileMetadata, OpenOptions, Share,
     };
 
     #[derive(Debug)]
@@ -1210,6 +1302,20 @@ mod tests {
         );
         assert!(normalize_share_path("").is_err());
         assert!(normalize_share_path("\0bad").is_err());
+    }
+
+    #[test]
+    fn normalize_pipe_name_rejects_invalid_values() {
+        assert_eq!(
+            normalize_pipe_name("srvsvc").expect("pipe should normalize"),
+            r"\\srvsvc"
+        );
+        assert_eq!(
+            normalize_pipe_name(r"\\PIPE\\srvsvc").expect("pipe should normalize"),
+            r"\\srvsvc"
+        );
+        assert!(normalize_pipe_name("").is_err());
+        assert!(normalize_pipe_name("\0bad").is_err());
     }
 
     #[tokio::test]
