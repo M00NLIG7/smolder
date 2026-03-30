@@ -98,6 +98,16 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
         shares.iter().any(|share| share.name.eq_ignore_ascii_case("IPC$")),
         "srvsvc share enumeration should include IPC$"
     );
+    let ipc = shares
+        .iter()
+        .find(|share| share.name.eq_ignore_ascii_case("IPC$"))
+        .expect("share enumeration should include IPC$");
+    let ipc_info = srvsvc
+        .share_get_info_level2("IPC$")
+        .await
+        .expect("NetrShareGetInfo level 2 should succeed over encrypted IPC$");
+    assert_eq!(ipc_info.name, "IPC$");
+    assert_eq!(ipc_info.share_type, ipc.share_type);
 
     let connection = srvsvc
         .into_rpc()

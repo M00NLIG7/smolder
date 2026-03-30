@@ -32,6 +32,27 @@ pub struct ShareInfo1 {
     pub remark: Option<String>,
 }
 
+/// Decoded `SHARE_INFO_2` entry returned by `NetrShareGetInfo` level 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareInfo2 {
+    /// Share name.
+    pub name: String,
+    /// Raw `shi2_type` bitfield.
+    pub share_type: u32,
+    /// Optional share remark/comment.
+    pub remark: Option<String>,
+    /// Share permissions field.
+    pub permissions: u32,
+    /// Maximum concurrent uses.
+    pub max_uses: u32,
+    /// Current concurrent uses.
+    pub current_uses: u32,
+    /// Local backing path if present.
+    pub path: Option<String>,
+    /// Legacy share password field if present.
+    pub password: Option<String>,
+}
+
 /// Decoded `TIME_OF_DAY_INFO` fields returned by `NetrRemoteTOD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeOfDayInfo {
@@ -118,6 +139,22 @@ where
             .await?;
         parse_share_enum_level1_response(&response)
     }
+
+    /// Calls `NetrShareGetInfo` at information level 2.
+    pub async fn share_get_info_level2(
+        &mut self,
+        share_name: &str,
+    ) -> Result<ShareInfo2, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                16,
+                encode_share_get_info_level2_request(share_name)?,
+            )
+            .await?;
+        parse_share_get_info_level2_response(&response)
+    }
 }
 
 fn encode_remote_tod_request() -> Vec<u8> {
@@ -134,6 +171,20 @@ fn encode_share_enum_level1_request() -> Vec<u8> {
     stub.extend_from_slice(&MAX_PREFERRED_LENGTH.to_le_bytes());
     stub.extend_from_slice(&0_u32.to_le_bytes());
     stub
+}
+
+fn encode_share_get_info_level2_request(share_name: &str) -> Result<Vec<u8>, CoreError> {
+    if share_name.is_empty() || share_name.contains('\0') {
+        return Err(CoreError::PathInvalid(
+            "share name for NetrShareGetInfo must be a non-empty UTF-16 string",
+        ));
+    }
+
+    let mut writer = NdrWriter::new();
+    writer.write_u32(0);
+    writer.write_ref_wide_string(share_name);
+    writer.write_u32(2);
+    Ok(writer.into_bytes())
 }
 
 fn parse_remote_tod_response(response: &[u8]) -> Result<TimeOfDayInfo, CoreError> {
@@ -260,6 +311,67 @@ fn parse_share_enum_level1_response(response: &[u8]) -> Result<Vec<ShareInfo1>, 
         .collect())
 }
 
+fn parse_share_get_info_level2_response(response: &[u8]) -> Result<ShareInfo2, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let info_referent = reader.read_u32("InfoStruct")?;
+    if info_referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "NetrShareGetInfo did not return a SHARE_INFO_2 buffer",
+        ));
+    }
+
+    let name_referent = reader.read_u32("shi2_netname")?;
+    let share_type = reader.read_u32("shi2_type")?;
+    let remark_referent = reader.read_u32("shi2_remark")?;
+    let permissions = reader.read_u32("shi2_permissions")?;
+    let max_uses = reader.read_u32("shi2_max_uses")?;
+    let current_uses = reader.read_u32("shi2_current_uses")?;
+    let path_referent = reader.read_u32("shi2_path")?;
+    let password_referent = reader.read_u32("shi2_passwd")?;
+
+    let name = if name_referent != 0 {
+        reader.read_wide_string("shi2_netname")?
+    } else {
+        return Err(CoreError::InvalidResponse(
+            "NetrShareGetInfo did not return a share name",
+        ));
+    };
+    let remark = if remark_referent != 0 {
+        Some(reader.read_wide_string("shi2_remark")?)
+    } else {
+        None
+    };
+    let path = if path_referent != 0 {
+        Some(reader.read_wide_string("shi2_path")?)
+    } else {
+        None
+    };
+    let password = if password_referent != 0 {
+        Some(reader.read_wide_string("shi2_passwd")?)
+    } else {
+        None
+    };
+
+    let status = reader.read_u32("NetrShareGetInfoStatus")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "NetrShareGetInfo",
+            code: status,
+        });
+    }
+
+    Ok(ShareInfo2 {
+        name,
+        share_type,
+        remark,
+        permissions,
+        max_uses,
+        current_uses,
+        path,
+        password,
+    })
+}
+
 #[derive(Debug)]
 struct ShareInfo1Stub {
     name_referent: u32,
@@ -343,20 +455,60 @@ impl<'a> NdrReader<'a> {
     }
 }
 
+struct NdrWriter {
+    bytes: Vec<u8>,
+}
+
+impl NdrWriter {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.align(4);
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_ref_wide_string(&mut self, value: &str) {
+        self.align(4);
+        let mut encoded = value.encode_utf16().collect::<Vec<_>>();
+        encoded.push(0);
+        let count = encoded.len() as u32;
+        self.bytes.extend_from_slice(&count.to_le_bytes());
+        self.bytes.extend_from_slice(&0_u32.to_le_bytes());
+        self.bytes.extend_from_slice(&count.to_le_bytes());
+        for code_unit in encoded {
+            self.bytes.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        self.align(4);
+    }
+
+    fn align(&mut self, alignment: usize) {
+        let padding = (alignment - (self.bytes.len() % alignment)) % alignment;
+        self.bytes.resize(self.bytes.len() + padding, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_remote_tod_request, encode_share_enum_level1_request, parse_remote_tod_response,
-        parse_share_enum_level1_response, ShareInfo1, TimeOfDayInfo,
+        encode_remote_tod_request, encode_share_enum_level1_request,
+        encode_share_get_info_level2_request, parse_remote_tod_response,
+        parse_share_enum_level1_response, parse_share_get_info_level2_response, ShareInfo1,
+        ShareInfo2, TimeOfDayInfo,
     };
     use crate::error::CoreError;
 
-    struct NdrWriter {
+    struct ResponseWriter {
         bytes: Vec<u8>,
         referent: u32,
     }
 
-    impl NdrWriter {
+    impl ResponseWriter {
         fn new() -> Self {
             Self {
                 bytes: Vec::new(),
@@ -456,7 +608,7 @@ mod tests {
 
     #[test]
     fn parse_share_enum_level1_response_decodes_entries() {
-        let mut writer = NdrWriter::new();
+        let mut writer = ResponseWriter::new();
         writer.write_u32(1);
         writer.write_u32(1);
         writer.write_u32(2);
@@ -496,6 +648,60 @@ mod tests {
                     remark: None,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn share_get_info_level2_request_encodes_server_null_and_ref_string() {
+        assert_eq!(
+            encode_share_get_info_level2_request("IPC$").expect("request should encode"),
+            [
+                0_u32.to_le_bytes().to_vec(),
+                5_u32.to_le_bytes().to_vec(),
+                0_u32.to_le_bytes().to_vec(),
+                5_u32.to_le_bytes().to_vec(),
+                b"I\0P\0C\0$\0\0\0".to_vec(),
+                0_u16.to_le_bytes().to_vec(),
+                2_u32.to_le_bytes().to_vec(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn parse_share_get_info_level2_response_decodes_entry() {
+        let mut writer = ResponseWriter::new();
+        let info_ref = writer.next_referent();
+        let name_ref = writer.next_referent();
+        let remark_ref = writer.next_referent();
+        let path_ref = writer.next_referent();
+        writer.write_u32(info_ref);
+        writer.write_u32(name_ref);
+        writer.write_u32(0x8000_0003);
+        writer.write_u32(remark_ref);
+        writer.write_u32(0);
+        writer.write_u32(u32::MAX);
+        writer.write_u32(1);
+        writer.write_u32(path_ref);
+        writer.write_u32(0);
+        writer.write_wide_string("IPC$");
+        writer.write_wide_string("Remote IPC");
+        writer.write_wide_string(r"C:\Windows");
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_share_get_info_level2_response(&writer.into_bytes())
+                .expect("response should decode"),
+            ShareInfo2 {
+                name: "IPC$".to_owned(),
+                share_type: 0x8000_0003,
+                remark: Some("Remote IPC".to_owned()),
+                permissions: 0,
+                max_uses: u32::MAX,
+                current_uses: 1,
+                path: Some(r"C:\Windows".to_owned()),
+                password: None,
+            }
         );
     }
 }
