@@ -4,6 +4,70 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
+/// The network transport protocol used to carry SMB session traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportProtocol {
+    /// Classic SMB over TCP, typically on port `445`.
+    Tcp,
+    /// SMB over QUIC, typically on port `443`.
+    Quic,
+}
+
+/// An SMB transport target including the server identity, port, and protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportTarget {
+    server: String,
+    port: u16,
+    protocol: TransportProtocol,
+}
+
+impl TransportTarget {
+    /// Creates a TCP transport target.
+    #[must_use]
+    pub fn tcp(server: impl Into<String>) -> Self {
+        Self {
+            server: server.into(),
+            port: 445,
+            protocol: TransportProtocol::Tcp,
+        }
+    }
+
+    /// Creates a QUIC transport target.
+    #[must_use]
+    pub fn quic(server: impl Into<String>) -> Self {
+        Self {
+            server: server.into(),
+            port: 443,
+            protocol: TransportProtocol::Quic,
+        }
+    }
+
+    /// Returns the SMB server host name or IP address.
+    #[must_use]
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+
+    /// Returns the configured port.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Returns the configured transport protocol.
+    #[must_use]
+    pub fn protocol(&self) -> TransportProtocol {
+        self.protocol
+    }
+
+    /// Returns a copy of this target with a different port.
+    #[must_use]
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+}
+
 /// Abstracts framed SMB request and response transport.
 #[async_trait]
 pub trait Transport {

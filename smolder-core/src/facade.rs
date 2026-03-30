@@ -29,9 +29,7 @@ use crate::pipe::{connect_session, NamedPipe, PipeAccess, SmbSessionConfig};
 use crate::rpc::PipeRpcClient;
 use crate::samr::SamrClient;
 use crate::srvsvc::SrvsvcClient;
-use crate::transport::{TokioTcpTransport, Transport};
-
-const DEFAULT_PORT: u16 = 445;
+use crate::transport::{TokioTcpTransport, Transport, TransportProtocol, TransportTarget};
 const MAX_IO_CHUNK_SIZE: usize = u16::MAX as usize;
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
@@ -59,8 +57,7 @@ enum BuilderAuth {
 /// Builder for the high-level SMB client facade.
 #[derive(Debug, Clone)]
 pub struct ClientBuilder {
-    server: String,
-    port: u16,
+    target: TransportTarget,
     auth: Option<BuilderAuth>,
     signing_mode: SigningMode,
     capabilities: GlobalCapabilities,
@@ -74,8 +71,7 @@ impl ClientBuilder {
     #[must_use]
     pub fn new(server: impl Into<String>) -> Self {
         Self {
-            server: server.into(),
-            port: DEFAULT_PORT,
+            target: TransportTarget::tcp(server),
             auth: None,
             signing_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU
@@ -90,7 +86,14 @@ impl ClientBuilder {
     /// Overrides the target SMB TCP port.
     #[must_use]
     pub fn with_port(mut self, port: u16) -> Self {
-        self.port = port;
+        self.target = self.target.with_port(port);
+        self
+    }
+
+    /// Overrides the full transport target.
+    #[must_use]
+    pub fn with_transport_target(mut self, target: TransportTarget) -> Self {
+        self.target = target;
         self
     }
 
@@ -175,14 +178,16 @@ impl ClientBuilder {
         ))?;
 
         let config = match auth {
-            BuilderAuth::Ntlm(credentials) => SmbSessionConfig::new(self.server, credentials),
+            BuilderAuth::Ntlm(credentials) => {
+                SmbSessionConfig::new(self.target.server().to_owned(), credentials)
+            }
             #[cfg(feature = "kerberos-api")]
             BuilderAuth::Kerberos {
                 credentials,
                 target,
-            } => SmbSessionConfig::kerberos(self.server, credentials, target),
+            } => SmbSessionConfig::kerberos(self.target.server().to_owned(), credentials, target),
         }
-        .with_port(self.port)
+        .with_transport_target(self.target)
         .with_signing_mode(self.signing_mode)
         .with_capabilities(self.capabilities)
         .with_dialects(self.dialects)
@@ -238,6 +243,18 @@ impl Client {
     #[must_use]
     pub fn port(&self) -> u16 {
         self.config.port()
+    }
+
+    /// Returns the configured transport target.
+    #[must_use]
+    pub fn transport_target(&self) -> &TransportTarget {
+        self.config.transport_target()
+    }
+
+    /// Returns the configured transport protocol.
+    #[must_use]
+    pub fn transport_protocol(&self) -> TransportProtocol {
+        self.config.transport_protocol()
     }
 
     /// Connects and authenticates an SMB session.
@@ -1205,6 +1222,7 @@ mod tests {
     #[cfg(feature = "kerberos-api")]
     use crate::auth::{KerberosCredentials, KerberosTarget};
     use crate::client::Connection;
+    use crate::transport::{TransportProtocol, TransportTarget};
     use crate::transport::Transport;
 
     use super::{
@@ -1378,6 +1396,23 @@ mod tests {
         assert_eq!(config.capabilities(), GlobalCapabilities::ENCRYPTION);
         assert_eq!(config.dialects(), &[Dialect::Smb302]);
         assert_eq!(config.client_guid(), b"0123456789abcdef");
+    }
+
+    #[test]
+    fn builder_can_override_transport_target() {
+        let client = ClientBuilder::new("server")
+            .with_transport_target(TransportTarget::quic("edge.lab.example").with_port(8443))
+            .with_ntlm_credentials(NtlmCredentials::new("user", "pass"))
+            .build()
+            .expect("builder should produce a client");
+
+        assert_eq!(client.server(), "edge.lab.example");
+        assert_eq!(client.port(), 8443);
+        assert_eq!(client.transport_protocol(), TransportProtocol::Quic);
+        assert_eq!(
+            client.transport_target(),
+            &TransportTarget::quic("edge.lab.example").with_port(8443)
+        );
     }
 
     #[cfg(feature = "kerberos-api")]

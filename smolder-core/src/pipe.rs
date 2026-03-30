@@ -24,9 +24,8 @@ use crate::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
 use crate::client::{Authenticated, Connection, TreeConnected};
 use crate::error::CoreError;
-use crate::transport::{TokioTcpTransport, Transport};
+use crate::transport::{TokioTcpTransport, Transport, TransportProtocol, TransportTarget};
 
-const DEFAULT_PORT: u16 = 445;
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
@@ -37,8 +36,7 @@ const SYNCHRONIZE: u32 = 0x0010_0000;
 /// SMB session configuration used to authenticate and connect to shares or pipes.
 #[derive(Debug, Clone)]
 pub struct SmbSessionConfig {
-    server: String,
-    port: u16,
+    target: TransportTarget,
     auth: SessionAuth,
     signing_mode: SigningMode,
     capabilities: GlobalCapabilities,
@@ -62,8 +60,7 @@ impl SmbSessionConfig {
     #[must_use]
     pub fn new(server: impl Into<String>, credentials: NtlmCredentials) -> Self {
         Self {
-            server: server.into(),
-            port: DEFAULT_PORT,
+            target: TransportTarget::tcp(server),
             auth: SessionAuth::Ntlm(credentials),
             signing_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU
@@ -84,8 +81,7 @@ impl SmbSessionConfig {
         target: KerberosTarget,
     ) -> Self {
         Self {
-            server: server.into(),
-            port: DEFAULT_PORT,
+            target: TransportTarget::tcp(server),
             auth: SessionAuth::Kerberos {
                 credentials,
                 target,
@@ -103,7 +99,14 @@ impl SmbSessionConfig {
     /// Overrides the target SMB TCP port.
     #[must_use]
     pub fn with_port(mut self, port: u16) -> Self {
-        self.port = port;
+        self.target = self.target.with_port(port);
+        self
+    }
+
+    /// Overrides the full transport target.
+    #[must_use]
+    pub fn with_transport_target(mut self, target: TransportTarget) -> Self {
+        self.target = target;
         self
     }
 
@@ -158,13 +161,25 @@ impl SmbSessionConfig {
     /// Returns the configured server host name or IP address.
     #[must_use]
     pub fn server(&self) -> &str {
-        &self.server
+        self.target.server()
     }
 
     /// Returns the configured SMB TCP port.
     #[must_use]
     pub fn port(&self) -> u16 {
-        self.port
+        self.target.port()
+    }
+
+    /// Returns the configured transport target.
+    #[must_use]
+    pub fn transport_target(&self) -> &TransportTarget {
+        &self.target
+    }
+
+    /// Returns the configured transport protocol.
+    #[must_use]
+    pub fn transport_protocol(&self) -> TransportProtocol {
+        self.target.protocol()
     }
 
     /// Returns the configured SMB signing mode.
@@ -270,7 +285,8 @@ impl NamedPipe<TokioTcpTransport> {
         pipe_name: &str,
         access: PipeAccess,
     ) -> Result<Self, CoreError> {
-        let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
+        let transport =
+            TokioTcpTransport::connect((config.server(), config.port())).await?;
         Self::connect_with_transport(transport, config, share, pipe_name, access).await
     }
 }
@@ -818,8 +834,15 @@ where
 pub async fn connect_session(
     config: &SmbSessionConfig,
 ) -> Result<Connection<TokioTcpTransport, Authenticated>, CoreError> {
-    let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
-    connect_session_with_transport(transport, config).await
+    match config.transport_protocol() {
+        TransportProtocol::Tcp => {
+            let transport = TokioTcpTransport::connect((config.server(), config.port())).await?;
+            connect_session_with_transport(transport, config).await
+        }
+        TransportProtocol::Quic => Err(CoreError::Unsupported(
+            "SMB over QUIC is not implemented yet",
+        )),
+    }
 }
 
 /// Authenticates a session over an already-created transport.
@@ -863,8 +886,15 @@ pub async fn connect_tree(
     config: &SmbSessionConfig,
     share: &str,
 ) -> Result<Connection<TokioTcpTransport, TreeConnected>, CoreError> {
-    let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
-    connect_tree_with_transport(transport, config, share).await
+    match config.transport_protocol() {
+        TransportProtocol::Tcp => {
+            let transport = TokioTcpTransport::connect((config.server(), config.port())).await?;
+            connect_tree_with_transport(transport, config, share).await
+        }
+        TransportProtocol::Quic => Err(CoreError::Unsupported(
+            "SMB over QUIC is not implemented yet",
+        )),
+    }
 }
 
 /// Authenticates and tree-connects to the requested share over an already-created transport.
@@ -877,7 +907,7 @@ where
     T: Transport + Send,
 {
     let connection = connect_session_with_transport(transport, config).await?;
-    let unc = format!(r"\\{}\{}", config.server, normalize_share_name(share)?);
+    let unc = format!(r"\\{}\{}", config.server(), normalize_share_name(share)?);
     connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
         .await
@@ -948,7 +978,8 @@ mod tests {
     #[cfg(feature = "kerberos-api")]
     use crate::auth::{KerberosCredentials, KerberosTarget};
     use crate::client::{Connection, TreeConnected};
-    use crate::transport::Transport;
+    use crate::error::CoreError;
+    use crate::transport::{Transport, TransportProtocol, TransportTarget};
 
     use super::{NamedPipe, PipeAccess, SmbSessionConfig};
 
@@ -1012,6 +1043,34 @@ mod tests {
             vec![CompressionAlgorithm::Lz77, CompressionAlgorithm::Lznt1]
         );
         assert_eq!(compression.flags, CompressionCapabilityFlags::empty());
+    }
+
+    #[test]
+    fn smb_session_config_can_override_transport_target() {
+        let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
+            .with_transport_target(TransportTarget::quic("edge.lab.example").with_port(8443));
+
+        assert_eq!(config.server(), "edge.lab.example");
+        assert_eq!(config.port(), 8443);
+        assert_eq!(config.transport_protocol(), TransportProtocol::Quic);
+        assert_eq!(
+            config.transport_target(),
+            &TransportTarget::quic("edge.lab.example").with_port(8443)
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_session_rejects_quic_until_transport_exists() {
+        let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
+            .with_transport_target(TransportTarget::quic("server"));
+
+        let error = super::connect_session(&config)
+            .await
+            .expect_err("quic dial path should reject until implemented");
+        assert!(matches!(
+            error,
+            CoreError::Unsupported("SMB over QUIC is not implemented yet")
+        ));
     }
 
     #[cfg(feature = "kerberos-api")]
