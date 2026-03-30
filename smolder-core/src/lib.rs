@@ -92,6 +92,7 @@ pub mod error;
 pub mod facade;
 pub mod pipe;
 pub mod rpc;
+pub mod samr;
 pub mod srvsvc;
 pub mod prelude {
     //! Curated imports for the intended `smolder_core` entry points.
@@ -125,6 +126,7 @@ pub mod prelude {
     };
     pub use crate::pipe::{connect_session, connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
     pub use crate::rpc::PipeRpcClient;
+    pub use crate::samr::{SamrClient, SamrDomain, SamrServerRevision, DEFAULT_SERVER_ACCESS};
     pub use crate::srvsvc::{ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};
     pub use crate::transport::{TokioTcpTransport, Transport};
 }

@@ -26,6 +26,7 @@ use crate::client::{
 use crate::error::CoreError;
 use crate::pipe::{connect_session, NamedPipe, PipeAccess, SmbSessionConfig};
 use crate::rpc::PipeRpcClient;
+use crate::samr::SamrClient;
 use crate::srvsvc::SrvsvcClient;
 use crate::transport::{TokioTcpTransport, Transport};
 
@@ -371,6 +372,14 @@ where
         SrvsvcClient::bind(rpc).await
     }
 
+    /// Opens the stable SAMR endpoint on `IPC$`, performs the bind/connect, and returns a typed client.
+    pub async fn connect_samr(self) -> Result<SamrClient<T>, CoreError> {
+        let rpc = self
+            .connect_rpc_pipe("lsarpc", PipeAccess::ReadWrite)
+            .await?;
+        SamrClient::bind(rpc).await
+    }
+
     /// Logs off the authenticated SMB session.
     pub async fn logoff(self) -> Result<(), CoreError> {
         let _ = self.connection.logoff().await?;
@@ -509,6 +518,14 @@ where
             .connect_rpc_pipe("srvsvc", PipeAccess::ReadWrite)
             .await?;
         SrvsvcClient::bind(rpc).await
+    }
+
+    /// Opens the stable SAMR endpoint on the current tree, performs the bind/connect, and returns a typed client.
+    pub async fn connect_samr(self) -> Result<SamrClient<T>, CoreError> {
+        let rpc = self
+            .connect_rpc_pipe("lsarpc", PipeAccess::ReadWrite)
+            .await?;
+        SamrClient::bind(rpc).await
     }
 
     /// Reads the full contents of a file on the current tree.
