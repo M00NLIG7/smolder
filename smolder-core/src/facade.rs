@@ -570,6 +570,14 @@ where
         Ok(output)
     }
 
+    /// Reads the full contents of a file on the current tree.
+    ///
+    /// This is an ergonomic alias for [`Share::read`] that matches the
+    /// higher-level "get/put" workflow commonly used by embedded clients.
+    pub async fn get(&mut self, path: &str) -> Result<Vec<u8>, CoreError> {
+        self.read(path).await
+    }
+
     /// Writes the full contents of a file on the current tree, creating it when absent.
     pub async fn write(&mut self, path: &str, data: &[u8]) -> Result<(), CoreError> {
         let normalized_path = normalize_share_path(path)?;
@@ -603,6 +611,14 @@ where
         Ok(())
     }
 
+    /// Writes the full contents of a file on the current tree, creating it when absent.
+    ///
+    /// This is an ergonomic alias for [`Share::write`] that matches the
+    /// higher-level "get/put" workflow commonly used by embedded clients.
+    pub async fn put(&mut self, path: &str, data: &[u8]) -> Result<(), CoreError> {
+        self.write(path, data).await
+    }
+
     /// Queries file metadata on the current tree.
     pub async fn stat(&mut self, path: &str) -> Result<FileMetadata, CoreError> {
         let normalized_path = normalize_share_path(path)?;
@@ -618,6 +634,14 @@ where
             .close(&CloseRequest { flags: 0, file_id })
             .await?;
         Ok(metadata)
+    }
+
+    /// Queries file metadata on the current tree.
+    ///
+    /// This is an ergonomic alias for [`Share::stat`] for callers that prefer
+    /// a filesystem-style naming convention.
+    pub async fn metadata(&mut self, path: &str) -> Result<FileMetadata, CoreError> {
+        self.stat(path).await
     }
 
     /// Removes a file from the current tree by marking it delete-pending and closing it.
@@ -645,6 +669,21 @@ where
             .close(&CloseRequest { flags: 0, file_id })
             .await?;
         Ok(())
+    }
+
+    /// Opens an existing file on the current tree for read access.
+    pub async fn open_reader(self, path: &str) -> Result<File<T>, CoreError> {
+        self.open(path, OpenOptions::new().read(true)).await
+    }
+
+    /// Opens a file on the current tree for write access, creating it when absent
+    /// and truncating it before writing.
+    pub async fn open_writer(self, path: &str) -> Result<File<T>, CoreError> {
+        self.open(
+            path,
+            OpenOptions::new().write(true).create(true).truncate(true),
+        )
+        .await
     }
 
     /// Disconnects the tree and returns to an authenticated session wrapper.
@@ -908,6 +947,14 @@ where
         Ok(output)
     }
 
+    /// Reads the full contents of the open file.
+    ///
+    /// This is an alias for [`File::read_all`] that matches the standard async
+    /// I/O naming convention used by Rust callers.
+    pub async fn read_to_end(&mut self) -> Result<Vec<u8>, CoreError> {
+        self.read_all().await
+    }
+
     /// Writes the full provided buffer to the open file starting at offset zero.
     pub async fn write_all(&mut self, data: &[u8]) -> Result<(), CoreError> {
         let mut offset = 0u64;
@@ -934,6 +981,14 @@ where
             .flush(&FlushRequest::for_file(self.file_id))
             .await?;
         Ok(())
+    }
+
+    /// Flushes all buffered SMB state for the open file handle.
+    ///
+    /// This is an alias for [`File::flush`] that matches common filesystem
+    /// terminology used by embedders.
+    pub async fn sync_all(&mut self) -> Result<(), CoreError> {
+        self.flush().await
     }
 
     /// Queries metadata for the open file handle.
@@ -1020,7 +1075,9 @@ fn normalize_share_path(path: &str) -> Result<String, CoreError> {
 
 fn normalize_pipe_name(pipe_name: &str) -> Result<String, CoreError> {
     if pipe_name.contains('\0') {
-        return Err(CoreError::PathInvalid("pipe name must not contain NUL bytes"));
+        return Err(CoreError::PathInvalid(
+            "pipe name must not contain NUL bytes",
+        ));
     }
 
     let normalized = pipe_name.trim().replace('/', "\\");
@@ -1109,9 +1166,10 @@ mod tests {
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
         CloseResponse, Command, CreateDisposition, CreateResponse, Dialect, FileAttributes, FileId,
-        GlobalCapabilities, Header, MessageId, NegotiateRequest, NegotiateResponse, OplockLevel,
-        QueryInfoResponse, SessionFlags, SessionSetupResponse, ShareFlags, ShareType,
+        FlushResponse, GlobalCapabilities, Header, MessageId, NegotiateRequest, NegotiateResponse,
+        OplockLevel, QueryInfoResponse, SessionFlags, SessionSetupResponse, ShareFlags, ShareType,
         SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeId,
+        WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
@@ -1457,6 +1515,165 @@ mod tests {
 
         let data = share.read("notes.txt").await.expect("read should succeed");
         assert_eq!(data, b"hello");
+    }
+
+    #[tokio::test]
+    async fn share_get_alias_reads_contents() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 5,
+            end_of_file: 5,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let basic = QueryInfoResponse {
+            output_buffer: {
+                let mut buffer = Vec::new();
+                buffer.extend_from_slice(&1u64.to_le_bytes());
+                buffer.extend_from_slice(&2u64.to_le_bytes());
+                buffer.extend_from_slice(&3u64.to_le_bytes());
+                buffer.extend_from_slice(&4u64.to_le_bytes());
+                buffer.extend_from_slice(&FileAttributes::ARCHIVE.bits().to_le_bytes());
+                buffer.extend_from_slice(&0u32.to_le_bytes());
+                buffer
+            },
+        };
+        let standard = QueryInfoResponse {
+            output_buffer: {
+                let mut buffer = Vec::new();
+                buffer.extend_from_slice(&5u64.to_le_bytes());
+                buffer.extend_from_slice(&5u64.to_le_bytes());
+                buffer.extend_from_slice(&1u32.to_le_bytes());
+                buffer.push(0);
+                buffer.push(0);
+                buffer.extend_from_slice(&0u16.to_le_bytes());
+                buffer
+            },
+        };
+        let read_response = smolder_proto::smb::smb2::ReadResponse {
+            data_remaining: 0,
+            flags: smolder_proto::smb::smb2::ReadResponseFlags::empty(),
+            data: b"hello".to_vec(),
+        };
+
+        let mut share = build_share(vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::QueryInfo,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                basic.encode(),
+            ),
+            response_frame(
+                Command::QueryInfo,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                standard.encode(),
+            ),
+            response_frame(
+                Command::Read,
+                NtStatus::SUCCESS.to_u32(),
+                6,
+                11,
+                7,
+                read_response.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                7,
+                11,
+                7,
+                CloseResponse {
+                    flags: 0,
+                    allocation_size: 5,
+                    end_of_file: 5,
+                    file_attributes: FileAttributes::ARCHIVE,
+                }
+                .encode(),
+            ),
+        ])
+        .await;
+
+        let data = share.get("notes.txt").await.expect("get should succeed");
+        assert_eq!(data, b"hello");
+    }
+
+    #[tokio::test]
+    async fn share_put_alias_writes_contents() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 5,
+            end_of_file: 5,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+
+        let mut share = build_share(vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Write,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                WriteResponse { count: 5 }.encode(),
+            ),
+            response_frame(
+                Command::Flush,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                FlushResponse.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                6,
+                11,
+                7,
+                CloseResponse {
+                    flags: 0,
+                    allocation_size: 5,
+                    end_of_file: 5,
+                    file_attributes: FileAttributes::ARCHIVE,
+                }
+                .encode(),
+            ),
+        ])
+        .await;
+
+        share
+            .put("notes.txt", b"hello")
+            .await
+            .expect("put should succeed");
     }
 
     #[tokio::test]

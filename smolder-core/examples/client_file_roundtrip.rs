@@ -65,12 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let mut share = client.connect_share(&share_name).await?;
 
-    share.write(&path, EXAMPLE_CONTENT).await?;
-    let read_back = share.read(&path).await?;
+    share.put(&path, EXAMPLE_CONTENT).await?;
+    let read_back = share.get(&path).await?;
     if read_back != EXAMPLE_CONTENT {
         return Err(format!("roundtrip mismatch for {}", path).into());
     }
-    let metadata = share.stat(&path).await?;
+    let metadata = share.metadata(&path).await?;
     share.remove(&path).await?;
 
     println!(
