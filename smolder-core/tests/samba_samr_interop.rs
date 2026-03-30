@@ -7,11 +7,11 @@ use tokio::sync::Mutex;
 
 const SAMR_PIPE_CANDIDATES: &[&str] = &["samr", "lsarpc"];
 
-fn required_env(name: &str) -> Option<String> {
+fn optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-struct WindowsSamrConfig {
+struct SambaSamrConfig {
     host: String,
     port: u16,
     username: String,
@@ -20,17 +20,20 @@ struct WindowsSamrConfig {
     workstation: Option<String>,
 }
 
-impl WindowsSamrConfig {
+impl SambaSamrConfig {
     fn from_env() -> Option<Self> {
+        let host = optional_env("SMOLDER_SAMBA_AD_HOST")?;
         Some(Self {
-            host: required_env("SMOLDER_WINDOWS_HOST")?,
-            port: required_env("SMOLDER_WINDOWS_PORT")
+            host,
+            port: optional_env("SMOLDER_SAMBA_AD_PORT")
                 .and_then(|value| value.parse::<u16>().ok())
                 .unwrap_or(445),
-            username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
-            domain: required_env("SMOLDER_WINDOWS_DOMAIN"),
-            workstation: required_env("SMOLDER_WINDOWS_WORKSTATION"),
+            username: optional_env("SMOLDER_SAMBA_AD_USERNAME")
+                .unwrap_or_else(|| "smolder".to_owned()),
+            password: optional_env("SMOLDER_SAMBA_AD_PASSWORD")
+                .unwrap_or_else(|| "Passw0rd!".to_owned()),
+            domain: optional_env("SMOLDER_SAMBA_AD_DOMAIN").or_else(|| Some("LAB".to_owned())),
+            workstation: optional_env("SMOLDER_SAMBA_AD_WORKSTATION"),
         })
     }
 
@@ -46,17 +49,17 @@ impl WindowsSamrConfig {
     }
 }
 
-fn windows_lock() -> &'static Mutex<()> {
+fn samba_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[tokio::test]
-async fn enumerates_windows_samr_domains_when_configured() {
-    let _guard = windows_lock().lock().await;
-    let Some(config) = WindowsSamrConfig::from_env() else {
+async fn enumerates_samba_ad_samr_domains_when_configured() {
+    let _guard = samba_lock().lock().await;
+    let Some(config) = SambaSamrConfig::from_env() else {
         eprintln!(
-            "skipping live Windows SAMR test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"
+            "skipping live Samba AD SAMR test: SMOLDER_SAMBA_AD_HOST must be set"
         );
         return;
     };
@@ -74,28 +77,28 @@ async fn enumerates_windows_samr_domains_when_configured() {
             status,
         }) if status == NtStatus::OBJECT_NAME_NOT_FOUND.0 => {
             eprintln!(
-                "skipping live Windows SAMR test: the guest did not expose a reachable SAMR pipe endpoint"
+                "skipping live Samba AD SAMR test: the DC did not expose a reachable SAMR pipe endpoint"
             );
             return;
         }
         Err(error) => panic!("should bind and connect to samr: {error:?}"),
     };
+
     let domains = samr
         .enumerate_domains()
         .await
         .expect("SamrEnumerateDomainsInSamServer should succeed");
-
     assert!(!domains.is_empty(), "SAMR should enumerate at least one domain");
     assert!(
         domains
             .iter()
             .any(|domain| domain.name.eq_ignore_ascii_case("Builtin")),
-        "Windows SAMR enumeration should include the Builtin domain"
+        "Samba AD SAMR enumeration should include the Builtin domain"
     );
     let account_domain = domains
         .iter()
         .find(|domain| !domain.name.eq_ignore_ascii_case("Builtin"))
-        .expect("Windows SAMR enumeration should include a non-Builtin account domain")
+        .expect("Samba AD SAMR enumeration should include an account domain")
         .name
         .clone();
     let mut domain = samr
@@ -107,8 +110,8 @@ async fn enumerates_windows_samr_domains_when_configured() {
         .await
         .expect("SamrEnumerateUsersInDomain should succeed");
     assert!(
-        !users.is_empty(),
-        "account-domain SAMR user enumeration should not be empty"
+        users.iter().any(|user| user.name.eq_ignore_ascii_case("smolder")),
+        "Samba AD SAMR user enumeration should include the fixture user"
     );
 
     let rpc = domain.close().await.expect("samr domain close should succeed");

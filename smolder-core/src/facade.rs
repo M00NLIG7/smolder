@@ -372,12 +372,17 @@ where
         SrvsvcClient::bind(rpc).await
     }
 
-    /// Opens the stable SAMR endpoint on `IPC$`, performs the bind/connect, and returns a typed client.
-    pub async fn connect_samr(self) -> Result<SamrClient<T>, CoreError> {
+    /// Opens a caller-selected SAMR-capable pipe on `IPC$`, performs the bind/connect, and returns a typed client.
+    pub async fn connect_samr_pipe(self, pipe_name: &str) -> Result<SamrClient<T>, CoreError> {
         let rpc = self
-            .connect_rpc_pipe("lsarpc", PipeAccess::ReadWrite)
+            .connect_rpc_pipe(pipe_name, PipeAccess::ReadWrite)
             .await?;
         SamrClient::bind(rpc).await
+    }
+
+    /// Opens the default SAMR endpoint on `IPC$`, performs the bind/connect, and returns a typed client.
+    pub async fn connect_samr(self) -> Result<SamrClient<T>, CoreError> {
+        self.connect_samr_pipe("lsarpc").await
     }
 
     /// Logs off the authenticated SMB session.
@@ -520,12 +525,17 @@ where
         SrvsvcClient::bind(rpc).await
     }
 
-    /// Opens the stable SAMR endpoint on the current tree, performs the bind/connect, and returns a typed client.
-    pub async fn connect_samr(self) -> Result<SamrClient<T>, CoreError> {
+    /// Opens a caller-selected SAMR-capable pipe on the current tree, performs the bind/connect, and returns a typed client.
+    pub async fn connect_samr_pipe(self, pipe_name: &str) -> Result<SamrClient<T>, CoreError> {
         let rpc = self
-            .connect_rpc_pipe("lsarpc", PipeAccess::ReadWrite)
+            .connect_rpc_pipe(pipe_name, PipeAccess::ReadWrite)
             .await?;
         SamrClient::bind(rpc).await
+    }
+
+    /// Opens the default SAMR endpoint on the current tree, performs the bind/connect, and returns a typed client.
+    pub async fn connect_samr(self) -> Result<SamrClient<T>, CoreError> {
+        self.connect_samr_pipe("lsarpc").await
     }
 
     /// Reads the full contents of a file on the current tree.

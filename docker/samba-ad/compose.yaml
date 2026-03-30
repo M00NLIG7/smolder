@@ -19,6 +19,7 @@ services:
         aliases:
           - dc1.lab.example
     ports:
+      - "3445:445"
       - "1088:88/tcp"
       - "1088:88/udp"
       - "1464:464/tcp"
