@@ -113,7 +113,8 @@ Validated now:
   encrypted share I/O, named pipes, RPC, DFS, Kerberos core auth, Kerberos file
   CLI workflows, Kerberos `smbexec`, Kerberos `psexec`, `smbexec`, and `psexec`
 - Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
-  named pipes, encrypted RPC, and Kerberos core auth
+  named pipes, encrypted RPC, standalone `lsarpc` policy-open/close, and
+  Kerberos core auth
 
 Still in progress on this track:
 
@@ -147,6 +148,8 @@ Still in progress on this track:
   [docs/testing/samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md)
   and
   [docs/testing/windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
+  The standalone Samba RPC fixture is documented in
+  [docs/testing/samba-rpc.md](/Users/cmagana/Projects/smolder/docs/testing/samba-rpc.md).
   The default build remains static-friendlier because `kerberos-gssapi`
   no longer drags in Unix GSS/Kerberos libraries unless it is explicitly
   enabled.

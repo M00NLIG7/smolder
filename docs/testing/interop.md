@@ -9,6 +9,8 @@ The higher-level support contract that this matrix backs is documented in
 [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
 
 Detailed Samba fixture notes still live in [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md).
+The standalone Samba RPC fixture is documented in
+[samba-rpc.md](/Users/cmagana/Projects/smolder/docs/testing/samba-rpc.md).
 The AD-backed Samba Kerberos fixture is documented in
 [samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md).
 The Tiny11 / Windows release-style gate is documented in
@@ -93,6 +95,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Samba | encrypted `srvsvc` RPC call over `IPC$` | `samba_rpc_encryption.rs` |
+| `smolder-core` | Samba | typed `lsarpc` open-policy/close against standalone `IPC$` with `rpcclient` preflight | `samba_lsarpc_interop.rs` via `run-samba-rpc-interop.sh` |
 | `smolder-tools` | Windows | durable reconnect helper | `windows_reconnect.rs` |
 | `smolder-tools` | Windows | encrypted-share requirement enforcement | `windows_encryption.rs` |
 | `smolder-tools` | Windows | DFS path resolution and CLI `mv` | `windows_dfs.rs` |
@@ -131,6 +134,12 @@ SMOLDER_SAMBA_PASSWORD=smolderpass \
 scripts/run-interop.sh --samba
 ```
 
+Run the standalone Samba RPC fixture:
+
+```bash
+scripts/run-samba-rpc-interop.sh
+```
+
 Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 
 ## CI Boundary
@@ -138,6 +147,7 @@ Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 - GitHub Actions runs the Samba-backed subset through `scripts/run-interop.sh --samba --core --tools`.
 - GitHub Actions can also run the Windows gate through the self-hosted `interop-windows-self-hosted.yml` workflow when a runner labeled `smolder-windows-gate` is available.
 - Tiny11 / Windows still depends on the local VM fixture, local credentials, and the current VirtualBox port-forward setup.
+- The standalone Samba RPC fixture is local-only today and currently focuses on `lsarpc` because the typed `SAMR` decoder still needs follow-up work.
 
 ## Core Commands
 
