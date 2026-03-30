@@ -26,6 +26,7 @@ use crate::client::{
 use crate::error::CoreError;
 use crate::pipe::{connect_session, NamedPipe, PipeAccess, SmbSessionConfig};
 use crate::rpc::PipeRpcClient;
+use crate::srvsvc::SrvsvcClient;
 use crate::transport::{TokioTcpTransport, Transport};
 
 const DEFAULT_PORT: u16 = 445;
@@ -362,6 +363,14 @@ where
         Ok(rpc)
     }
 
+    /// Opens `\\PIPE\\srvsvc` on `IPC$`, performs the bind, and returns a typed client.
+    pub async fn connect_srvsvc(self) -> Result<SrvsvcClient<T>, CoreError> {
+        let rpc = self
+            .connect_rpc_pipe("srvsvc", PipeAccess::ReadWrite)
+            .await?;
+        SrvsvcClient::bind(rpc).await
+    }
+
     /// Logs off the authenticated SMB session.
     pub async fn logoff(self) -> Result<(), CoreError> {
         let _ = self.connection.logoff().await?;
@@ -492,6 +501,14 @@ where
             .await?;
         rpc.bind_context(context_id, abstract_syntax).await?;
         Ok(rpc)
+    }
+
+    /// Opens `\\PIPE\\srvsvc` on the current tree, performs the bind, and returns a typed client.
+    pub async fn connect_srvsvc(self) -> Result<SrvsvcClient<T>, CoreError> {
+        let rpc = self
+            .connect_rpc_pipe("srvsvc", PipeAccess::ReadWrite)
+            .await?;
+        SrvsvcClient::bind(rpc).await
     }
 
     /// Reads the full contents of a file on the current tree.
