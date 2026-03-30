@@ -270,8 +270,8 @@ impl NamedPipe<TokioTcpTransport> {
         pipe_name: &str,
         access: PipeAccess,
     ) -> Result<Self, CoreError> {
-        let connection = connect_tree(config, share).await?;
-        Self::open(connection, pipe_name, access).await
+        let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
+        Self::connect_with_transport(transport, config, share, pipe_name, access).await
     }
 }
 
@@ -279,6 +279,19 @@ impl<T> NamedPipe<T>
 where
     T: Transport + Send,
 {
+    /// Connects using an already-created transport, tree-connects to the target share,
+    /// and opens the requested named pipe.
+    pub async fn connect_with_transport(
+        transport: T,
+        config: &SmbSessionConfig,
+        share: &str,
+        pipe_name: &str,
+        access: PipeAccess,
+    ) -> Result<Self, CoreError> {
+        let connection = connect_tree_with_transport(transport, config, share).await?;
+        Self::open(connection, pipe_name, access).await
+    }
+
     /// Opens a named pipe on an existing tree-connected share.
     pub async fn open(
         mut connection: Connection<T, TreeConnected>,
@@ -806,6 +819,17 @@ pub async fn connect_session(
     config: &SmbSessionConfig,
 ) -> Result<Connection<TokioTcpTransport, Authenticated>, CoreError> {
     let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
+    connect_session_with_transport(transport, config).await
+}
+
+/// Authenticates a session over an already-created transport.
+pub async fn connect_session_with_transport<T>(
+    transport: T,
+    config: &SmbSessionConfig,
+) -> Result<Connection<T, Authenticated>, CoreError>
+where
+    T: Transport + Send,
+{
     let request = NegotiateRequest {
         security_mode: config.signing_mode,
         capabilities: config.capabilities,
@@ -839,7 +863,20 @@ pub async fn connect_tree(
     config: &SmbSessionConfig,
     share: &str,
 ) -> Result<Connection<TokioTcpTransport, TreeConnected>, CoreError> {
-    let connection = connect_session(config).await?;
+    let transport = TokioTcpTransport::connect((config.server.as_str(), config.port)).await?;
+    connect_tree_with_transport(transport, config, share).await
+}
+
+/// Authenticates and tree-connects to the requested share over an already-created transport.
+pub async fn connect_tree_with_transport<T>(
+    transport: T,
+    config: &SmbSessionConfig,
+    share: &str,
+) -> Result<Connection<T, TreeConnected>, CoreError>
+where
+    T: Transport + Send,
+{
+    let connection = connect_session_with_transport(transport, config).await?;
     let unc = format!(r"\\{}\{}", config.server, normalize_share_name(share)?);
     connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
