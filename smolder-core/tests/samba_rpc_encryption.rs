@@ -109,6 +109,13 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
     assert_eq!(ipc_info.name, "IPC$");
     assert_eq!(ipc_info.share_type, ipc.share_type);
 
+    let server_info = srvsvc
+        .server_get_info_level101()
+        .await
+        .expect("NetrServerGetInfo level 101 should succeed over encrypted IPC$");
+    assert!(!server_info.name.is_empty(), "server name should not be empty");
+    assert!(server_info.version_major > 0, "server major version should be populated");
+
     let connection = srvsvc
         .into_rpc()
         .into_pipe()

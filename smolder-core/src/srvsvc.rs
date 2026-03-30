@@ -18,6 +18,7 @@ const SRVSVC_SYNTAX: SyntaxId = SyntaxId::new(
 );
 const SRVSVC_CONTEXT_ID: u16 = 0;
 const NETR_SHARE_ENUM_OPNUM: u16 = 15;
+const NETR_SERVER_GET_INFO_OPNUM: u16 = 21;
 const NETR_REMOTE_TOD_OPNUM: u16 = 28;
 const MAX_PREFERRED_LENGTH: u32 = u32::MAX;
 
@@ -70,6 +71,23 @@ pub struct TimeOfDayInfo {
     pub year: u32,
     /// Weekday in the range `0..=6`.
     pub weekday: u32,
+}
+
+/// Decoded `SERVER_INFO_101` fields returned by `NetrServerGetInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerInfo101 {
+    /// Raw platform identifier.
+    pub platform_id: u32,
+    /// Server name returned by the endpoint.
+    pub name: String,
+    /// Server major version.
+    pub version_major: u32,
+    /// Server minor version.
+    pub version_minor: u32,
+    /// Raw server-type bitfield.
+    pub server_type: u32,
+    /// Optional server comment/description.
+    pub comment: Option<String>,
 }
 
 /// Typed `srvsvc` client over an already-open RPC transport.
@@ -155,6 +173,19 @@ where
             .await?;
         parse_share_get_info_level2_response(&response)
     }
+
+    /// Calls `NetrServerGetInfo` at information level 101.
+    pub async fn server_get_info_level101(&mut self) -> Result<ServerInfo101, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                NETR_SERVER_GET_INFO_OPNUM,
+                encode_server_get_info_level101_request(),
+            )
+            .await?;
+        parse_server_get_info_level101_response(&response)
+    }
 }
 
 fn encode_remote_tod_request() -> Vec<u8> {
@@ -185,6 +216,13 @@ fn encode_share_get_info_level2_request(share_name: &str) -> Result<Vec<u8>, Cor
     writer.write_ref_wide_string(share_name);
     writer.write_u32(2);
     Ok(writer.into_bytes())
+}
+
+fn encode_server_get_info_level101_request() -> Vec<u8> {
+    let mut writer = NdrWriter::new();
+    writer.write_u32(0);
+    writer.write_u32(101);
+    writer.into_bytes()
 }
 
 fn parse_remote_tod_response(response: &[u8]) -> Result<TimeOfDayInfo, CoreError> {
@@ -372,6 +410,53 @@ fn parse_share_get_info_level2_response(response: &[u8]) -> Result<ShareInfo2, C
     })
 }
 
+fn parse_server_get_info_level101_response(response: &[u8]) -> Result<ServerInfo101, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let info_referent = reader.read_u32("ServerInfo101")?;
+    if info_referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "NetrServerGetInfo did not return a SERVER_INFO_101 buffer",
+        ));
+    }
+
+    let platform_id = reader.read_u32("sv101_platform_id")?;
+    let name_referent = reader.read_u32("sv101_name")?;
+    let version_major = reader.read_u32("sv101_version_major")?;
+    let version_minor = reader.read_u32("sv101_version_minor")?;
+    let server_type = reader.read_u32("sv101_type")?;
+    let comment_referent = reader.read_u32("sv101_comment")?;
+
+    let name = if name_referent != 0 {
+        reader.read_wide_string("sv101_name")?
+    } else {
+        return Err(CoreError::InvalidResponse(
+            "NetrServerGetInfo did not return a server name",
+        ));
+    };
+    let comment = if comment_referent != 0 {
+        Some(reader.read_wide_string("sv101_comment")?)
+    } else {
+        None
+    };
+
+    let status = reader.read_u32("NetrServerGetInfoStatus")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "NetrServerGetInfo",
+            code: status,
+        });
+    }
+
+    Ok(ServerInfo101 {
+        platform_id,
+        name,
+        version_major,
+        version_minor,
+        server_type,
+        comment,
+    })
+}
+
 #[derive(Debug)]
 struct ShareInfo1Stub {
     name_referent: u32,
@@ -496,10 +581,11 @@ impl NdrWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_remote_tod_request, encode_share_enum_level1_request,
-        encode_share_get_info_level2_request, parse_remote_tod_response,
+        encode_remote_tod_request, encode_server_get_info_level101_request,
+        encode_share_enum_level1_request, encode_share_get_info_level2_request,
+        parse_remote_tod_response, parse_server_get_info_level101_response,
         parse_share_enum_level1_response, parse_share_get_info_level2_response, ShareInfo1,
-        ShareInfo2, TimeOfDayInfo,
+        ShareInfo2, ServerInfo101, TimeOfDayInfo,
     };
     use crate::error::CoreError;
 
@@ -701,6 +787,45 @@ mod tests {
                 current_uses: 1,
                 path: Some(r"C:\Windows".to_owned()),
                 password: None,
+            }
+        );
+    }
+
+    #[test]
+    fn server_get_info_level101_request_uses_null_server_and_expected_level() {
+        assert_eq!(
+            encode_server_get_info_level101_request(),
+            [0_u32.to_le_bytes(), 101_u32.to_le_bytes()].concat()
+        );
+    }
+
+    #[test]
+    fn parse_server_get_info_level101_response_decodes_entry() {
+        let mut writer = ResponseWriter::new();
+        let info_ref = writer.next_referent();
+        let name_ref = writer.next_referent();
+        let comment_ref = writer.next_referent();
+        writer.write_u32(info_ref);
+        writer.write_u32(500);
+        writer.write_u32(name_ref);
+        writer.write_u32(6);
+        writer.write_u32(3);
+        writer.write_u32(0x0000_0002);
+        writer.write_u32(comment_ref);
+        writer.write_wide_string("files1");
+        writer.write_wide_string("Samba file server");
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_server_get_info_level101_response(&writer.into_bytes())
+                .expect("response should decode"),
+            ServerInfo101 {
+                platform_id: 500,
+                name: "files1".to_owned(),
+                version_major: 6,
+                version_minor: 3,
+                server_type: 0x0000_0002,
+                comment: Some("Samba file server".to_owned()),
             }
         );
     }
