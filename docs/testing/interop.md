@@ -96,6 +96,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Samba | encrypted `srvsvc` RPC call over `IPC$` | `samba_rpc_encryption.rs` |
 | `smolder-core` | Samba | typed `lsarpc` open-policy/close against standalone `IPC$` with `rpcclient` preflight | `samba_lsarpc_interop.rs` via `run-samba-rpc-interop.sh` |
+| `smolder-core` | Samba | typed `samr` bind plus domain enumeration against standalone `samr` with `rpcclient` preflight | `samba_samr_standalone_interop.rs` via `run-samba-rpc-interop.sh` |
 | `smolder-tools` | Windows | durable reconnect helper | `windows_reconnect.rs` |
 | `smolder-tools` | Windows | encrypted-share requirement enforcement | `windows_encryption.rs` |
 | `smolder-tools` | Windows | DFS path resolution and CLI `mv` | `windows_dfs.rs` |
@@ -147,7 +148,7 @@ Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 - GitHub Actions runs the Samba-backed subset through `scripts/run-interop.sh --samba --core --tools`.
 - GitHub Actions can also run the Windows gate through the self-hosted `interop-windows-self-hosted.yml` workflow when a runner labeled `smolder-windows-gate` is available.
 - Tiny11 / Windows still depends on the local VM fixture, local credentials, and the current VirtualBox port-forward setup.
-- The standalone Samba RPC fixture is local-only today and currently focuses on `lsarpc` because the typed `SAMR` decoder still needs follow-up work.
+- The standalone Samba RPC fixture is local-only today and currently proves `lsarpc` open-policy/close plus `samr` bind/domain enumeration. Domain-open and user-query `SAMR` flows still need follow-up work.
 
 ## Core Commands
 

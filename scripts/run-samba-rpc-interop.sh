@@ -21,3 +21,4 @@ docker exec smolder-samba sh -lc \
   "rpcclient -U '${SMOLDER_SAMBA_USERNAME}%${SMOLDER_SAMBA_PASSWORD}' localhost -c enumdomusers"
 
 cargo test -p smolder-smb-core --test samba_lsarpc_interop -- --nocapture
+cargo test -p smolder-smb-core --test samba_samr_standalone_interop -- --nocapture

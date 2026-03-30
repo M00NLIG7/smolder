@@ -58,8 +58,18 @@ Today that test proves:
 - `\\PIPE\\lsarpc` open via the high-level client facade
 - typed `LsarpcClient` bind/open-policy/close round-trip
 
+The same harness now also includes:
+
+- [samba_samr_standalone_interop.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/samba_samr_standalone_interop.rs)
+
+Today that test proves:
+
+- `\\PIPE\\samr` access against the standalone Samba fixture
+- typed `SamrClient` bind with the current `SamrConnect2` fallback path
+- `SamrEnumerateDomainsInSamServer` against the standalone server
+
 ## Follow-Up Scope
 
-The fixture also proves server-side `samr` exposure through `rpcclient`, but the
-typed Smolder `SAMR` client still needs additional decoder work before that lane
-should be promoted into this harness.
+The remaining standalone `SAMR` gap is deeper domain-scoped work such as
+`SamrOpenDomain` and user enumeration/query flows. Those still need follow-up
+client work and are intentionally not claimed by this fixture yet.

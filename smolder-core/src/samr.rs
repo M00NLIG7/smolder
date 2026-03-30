@@ -17,6 +17,7 @@ const SAMR_SYNTAX: SyntaxId = SyntaxId::new(
     0,
 );
 const SAMR_CONTEXT_ID: u16 = 0;
+const SAMR_CONNECT2_OPNUM: u16 = 57;
 const SAMR_CONNECT5_OPNUM: u16 = 64;
 const SAMR_CLOSE_HANDLE_OPNUM: u16 = 1;
 const SAMR_LOOKUP_DOMAIN_OPNUM: u16 = 5;
@@ -196,14 +197,26 @@ where
     /// Performs the default `samr` bind and `SamrConnect5`.
     pub async fn bind(mut rpc: PipeRpcClient<T>) -> Result<Self, CoreError> {
         rpc.bind_context(Self::CONTEXT_ID, Self::SYNTAX).await?;
-        let response = rpc
+        let response = match rpc
             .call(
                 Self::CONTEXT_ID,
                 SAMR_CONNECT5_OPNUM,
                 encode_connect5_request(DEFAULT_SERVER_ACCESS),
             )
-            .await?;
-        let (server_handle, revision) = parse_connect5_response(&response)?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if should_fallback_to_connect2(&error) => {
+                rpc.call(
+                    Self::CONTEXT_ID,
+                    SAMR_CONNECT2_OPNUM,
+                    encode_connect2_request(DEFAULT_SERVER_ACCESS),
+                )
+                .await?
+            }
+            Err(error) => return Err(error),
+        };
+        let (server_handle, revision) = parse_connect_response(&response)?;
         Ok(Self {
             rpc,
             context_id: Self::CONTEXT_ID,
@@ -400,6 +413,13 @@ fn encode_connect5_request(desired_access: u32) -> Vec<u8> {
     bytes
 }
 
+fn encode_connect2_request(desired_access: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&desired_access.to_le_bytes());
+    bytes
+}
+
 fn parse_connect5_response(response: &[u8]) -> Result<([u8; 20], SamrServerRevision), CoreError> {
     if response.len() < 32 {
         return Err(CoreError::InvalidResponse(
@@ -437,6 +457,50 @@ fn parse_connect5_response(response: &[u8]) -> Result<([u8; 20], SamrServerRevis
             supported_features,
         },
     ))
+}
+
+fn parse_connect2_response(response: &[u8]) -> Result<([u8; 20], SamrServerRevision), CoreError> {
+    if response.len() < 24 {
+        return Err(CoreError::InvalidResponse(
+            "SamrConnect2 response was too short",
+        ));
+    }
+
+    let mut server_handle = [0_u8; 20];
+    server_handle.copy_from_slice(&response[..20]);
+    let status = u32::from_le_bytes(response[20..24].try_into().expect("status slice"));
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrConnect2",
+            code: status,
+        });
+    }
+
+    Ok((
+        server_handle,
+        SamrServerRevision {
+            revision: 2,
+            supported_features: 0,
+        },
+    ))
+}
+
+fn parse_connect_response(response: &[u8]) -> Result<([u8; 20], SamrServerRevision), CoreError> {
+    match parse_connect5_response(response) {
+        Ok(parsed) => Ok(parsed),
+        Err(CoreError::InvalidResponse(_)) if response.len() >= 24 => parse_connect2_response(response),
+        Err(error) => Err(error),
+    }
+}
+
+fn should_fallback_to_connect2(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::RemoteOperation {
+            operation: "rpc_fault",
+            code: 1783,
+        }
+    )
 }
 
 fn encode_enumerate_domains_request(
@@ -608,11 +672,16 @@ fn parse_enumerate_users_response(response: &[u8]) -> Result<Vec<SamrUser>, Core
                 ));
             }
             let mut raw_entries = Vec::with_capacity(entries_read);
+            let mut headers = Vec::with_capacity(entries_read);
             for _ in 0..entries_read {
                 raw_entries.push(RidEnumeration {
                     relative_id: reader.read_u32("RelativeId")?,
-                    name: reader.read_rpc_unicode_string("Name")?,
+                    name: String::new(),
                 });
+                headers.push(reader.read_unicode_string_header("Name")?);
+            }
+            for (entry, header) in raw_entries.iter_mut().zip(headers) {
+                entry.name = reader.read_deferred_unicode_string(header, "Name")?;
             }
             users = raw_entries
                 .into_iter()
@@ -664,11 +733,16 @@ fn parse_enumerate_domains_response(response: &[u8]) -> Result<Vec<SamrDomain>, 
                 ));
             }
             let mut raw_entries = Vec::with_capacity(entries_read);
+            let mut headers = Vec::with_capacity(entries_read);
             for _ in 0..entries_read {
                 raw_entries.push(RidEnumeration {
                     relative_id: reader.read_u32("RelativeId")?,
-                    name: reader.read_rpc_unicode_string("Name")?,
+                    name: String::new(),
                 });
+                headers.push(reader.read_unicode_string_header("Name")?);
+            }
+            for (entry, header) in raw_entries.iter_mut().zip(headers) {
+                entry.name = reader.read_deferred_unicode_string(header, "Name")?;
             }
             domains = raw_entries
                 .into_iter()
@@ -724,6 +798,13 @@ struct RidEnumeration {
     name: String,
 }
 
+#[derive(Clone, Copy)]
+struct UnicodeStringHeader {
+    length: usize,
+    maximum_length: usize,
+    referent: u32,
+}
+
 struct NdrReader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -772,6 +853,49 @@ impl<'a> NdrReader<'a> {
         );
         self.offset += 2;
         Ok(value)
+    }
+
+    fn read_unicode_string_header(
+        &mut self,
+        field: &'static str,
+    ) -> Result<UnicodeStringHeader, CoreError> {
+        let length = self.read_u16(field)? as usize;
+        let maximum_length = self.read_u16(field)? as usize;
+        let referent = self.read_u32(field)?;
+        Ok(UnicodeStringHeader {
+            length,
+            maximum_length,
+            referent,
+        })
+    }
+
+    fn read_deferred_unicode_string(
+        &mut self,
+        header: UnicodeStringHeader,
+        field: &'static str,
+    ) -> Result<String, CoreError> {
+        if header.referent == 0 {
+            return Ok(String::new());
+        }
+        self.align(4, field)?;
+        let max_count = self.read_u32(field)? as usize;
+        let offset = self.read_u32(field)? as usize;
+        let actual_count = self.read_u32(field)? as usize;
+        if offset != 0
+            || actual_count > max_count
+            || actual_count * 2 < header.length
+            || header.maximum_length < header.length
+        {
+            return Err(CoreError::InvalidResponse(field));
+        }
+        let mut code_units = Vec::with_capacity(actual_count);
+        for _ in 0..actual_count {
+            code_units.push(self.read_u16(field)?);
+        }
+        self.align(4, field)?;
+        let actual_units = header.length / 2;
+        String::from_utf16(&code_units[..actual_units])
+            .map_err(|_| CoreError::InvalidResponse("failed to decode samr UTF-16 string"))
     }
 
     fn read_rpc_unicode_string(&mut self, field: &'static str) -> Result<String, CoreError> {
@@ -877,9 +1001,10 @@ impl NdrWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_close_handle_request, encode_connect5_request, encode_enumerate_domains_request,
-        encode_enumerate_users_request, encode_lookup_domain_request, encode_open_domain_request,
-        encode_open_user_request, encode_query_user_request, parse_close_handle_response,
+        encode_close_handle_request, encode_connect2_request, encode_connect5_request,
+        encode_enumerate_domains_request, encode_enumerate_users_request,
+        encode_lookup_domain_request, encode_open_domain_request, encode_open_user_request,
+        encode_query_user_request, parse_close_handle_response, parse_connect2_response,
         parse_connect5_response, parse_enumerate_domains_response,
         parse_enumerate_users_response, parse_lookup_domain_response, parse_open_domain_response,
         parse_open_user_response, parse_query_account_name_response, SamrDomain,
@@ -922,6 +1047,28 @@ mod tests {
             let referent = self.next_referent();
             self.write_u32(referent);
             self.align(4);
+            self.write_u32(encoded.len() as u32);
+            for code_unit in encoded {
+                self.write_u16(code_unit);
+            }
+            self.align(4);
+        }
+
+        fn write_unicode_string_header(&mut self, value: &str) -> u32 {
+            let encoded = value.encode_utf16().collect::<Vec<_>>();
+            let byte_len = (encoded.len() * 2) as u16;
+            self.write_u16(byte_len);
+            self.write_u16(byte_len);
+            let referent = self.next_referent();
+            self.write_u32(referent);
+            referent
+        }
+
+        fn write_deferred_unicode_string(&mut self, value: &str) {
+            let encoded = value.encode_utf16().collect::<Vec<_>>();
+            self.align(4);
+            self.write_u32(encoded.len() as u32);
+            self.write_u32(0);
             self.write_u32(encoded.len() as u32);
             for code_unit in encoded {
                 self.write_u16(code_unit);
@@ -978,6 +1125,29 @@ mod tests {
     }
 
     #[test]
+    fn connect2_request_encodes_null_server_name_and_access() {
+        assert_eq!(
+            encode_connect2_request(DEFAULT_SERVER_ACCESS),
+            [0_u32.to_le_bytes(), DEFAULT_SERVER_ACCESS.to_le_bytes()].concat()
+        );
+    }
+
+    #[test]
+    fn connect2_response_decodes_handle() {
+        let response = [[0x55; 20].to_vec(), 0_u32.to_le_bytes().to_vec()].concat();
+        let (handle, revision) =
+            parse_connect2_response(&response).expect("response should decode");
+        assert_eq!(handle, [0x55; 20]);
+        assert_eq!(
+            revision,
+            SamrServerRevision {
+                revision: 2,
+                supported_features: 0,
+            }
+        );
+    }
+
+    #[test]
     fn enumerate_domains_request_encodes_handle_and_context() {
         assert_eq!(
             encode_enumerate_domains_request([0x42; 20], 7, u32::MAX),
@@ -997,9 +1167,11 @@ mod tests {
         writer.write_u32(array_ref);
         writer.write_u32(2);
         writer.write_u32(0);
-        writer.write_rpc_unicode_string("Builtin");
+        writer.write_unicode_string_header("Builtin");
         writer.write_u32(0);
-        writer.write_rpc_unicode_string("DESKTOP");
+        writer.write_unicode_string_header("DESKTOP");
+        writer.write_deferred_unicode_string("Builtin");
+        writer.write_deferred_unicode_string("DESKTOP");
         writer.write_u32(2);
         writer.write_u32(0);
 
@@ -1014,6 +1186,35 @@ mod tests {
                 SamrDomain {
                     relative_id: 0,
                     name: "DESKTOP".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn enumerate_domains_response_decodes_standalone_samba_fixture() {
+        let response = vec![
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00,
+            0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x18, 0x00,
+            0x08, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x0e, 0x00, 0x0c, 0x00,
+            0x02, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00,
+            0x42, 0x00, 0x31, 0x00, 0x30, 0x00, 0x34, 0x00, 0x46, 0x00, 0x44, 0x00, 0x37, 0x00,
+            0x36, 0x00, 0x34, 0x00, 0x39, 0x00, 0x38, 0x00, 0x36, 0x00, 0x07, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x42, 0x00, 0x75, 0x00, 0x69, 0x00,
+            0x6c, 0x00, 0x74, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+
+        assert_eq!(
+            parse_enumerate_domains_response(&response).expect("response should decode"),
+            vec![
+                SamrDomain {
+                    relative_id: 0,
+                    name: "B104FD764986".to_owned(),
+                },
+                SamrDomain {
+                    relative_id: 1,
+                    name: "Builtin".to_owned(),
                 },
             ]
         );
@@ -1124,9 +1325,11 @@ mod tests {
         writer.write_u32(array_ref);
         writer.write_u32(2);
         writer.write_u32(500);
-        writer.write_rpc_unicode_string("Administrator");
+        writer.write_unicode_string_header("Administrator");
         writer.write_u32(501);
-        writer.write_rpc_unicode_string("Guest");
+        writer.write_unicode_string_header("Guest");
+        writer.write_deferred_unicode_string("Administrator");
+        writer.write_deferred_unicode_string("Guest");
         writer.write_u32(2);
         writer.write_u32(0);
 

@@ -113,8 +113,8 @@ Validated now:
   encrypted share I/O, named pipes, RPC, DFS, Kerberos core auth, Kerberos file
   CLI workflows, Kerberos `smbexec`, Kerberos `psexec`, `smbexec`, and `psexec`
 - Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
-  named pipes, encrypted RPC, standalone `lsarpc` policy-open/close, and
-  Kerberos core auth
+  named pipes, encrypted RPC, standalone `lsarpc` policy-open/close,
+  standalone `samr` domain enumeration, and Kerberos core auth
 
 Still in progress on this track:
 
