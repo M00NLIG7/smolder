@@ -113,6 +113,21 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
         users.iter().any(|user| user.name.eq_ignore_ascii_case("smolder")),
         "Samba AD SAMR user enumeration should include the fixture user"
     );
+    let fixture_user = users
+        .iter()
+        .find(|user| user.name.eq_ignore_ascii_case("smolder"))
+        .expect("Samba AD SAMR enumeration should include the fixture user")
+        .clone();
+    let mut user = domain
+        .open_user(fixture_user.relative_id)
+        .await
+        .expect("should open the fixture user by RID");
+    let user_info = user
+        .query_account_name()
+        .await
+        .expect("SamrQueryInformationUser should succeed");
+    assert_eq!(user_info.account_name, fixture_user.name);
+    let domain = user.close().await.expect("samr user close should succeed");
 
     let rpc = domain.close().await.expect("samr domain close should succeed");
     let connection = rpc

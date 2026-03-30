@@ -130,6 +130,7 @@ pub mod prelude {
     pub use crate::rpc::PipeRpcClient;
     pub use crate::samr::{
         SamrClient, SamrDomain, SamrDomainClient, SamrServerRevision, SamrSid, SamrUser,
+        SamrUserClient, SamrUserInfo,
         DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
     };
     pub use crate::srvsvc::{ServerInfo101, ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};

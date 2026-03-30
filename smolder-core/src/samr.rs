@@ -23,11 +23,15 @@ const SAMR_LOOKUP_DOMAIN_OPNUM: u16 = 5;
 const SAMR_ENUMERATE_DOMAINS_OPNUM: u16 = 6;
 const SAMR_OPEN_DOMAIN_OPNUM: u16 = 7;
 const SAMR_ENUMERATE_USERS_OPNUM: u16 = 13;
+const SAMR_OPEN_USER_OPNUM: u16 = 34;
+const SAMR_QUERY_INFORMATION_USER_OPNUM: u16 = 36;
 const SAM_SERVER_CONNECT: u32 = 0x0000_0001;
 const SAM_SERVER_ENUMERATE_DOMAINS: u32 = 0x0000_0010;
 const SAM_SERVER_LOOKUP_DOMAIN: u32 = 0x0000_0020;
 const DOMAIN_LIST_ACCOUNTS: u32 = 0x0000_0100;
 const DOMAIN_LOOKUP: u32 = 0x0000_0200;
+const USER_READ_GENERAL: u32 = 0x0000_0001;
+const USER_ACCOUNT_NAME_INFORMATION_CLASS: u32 = 7;
 
 /// Default SAM server access mask used by the typed client.
 pub const DEFAULT_SERVER_ACCESS: u32 =
@@ -73,6 +77,13 @@ pub struct SamrUser {
     pub name: String,
 }
 
+/// Typed user information returned by `SamrQueryInformationUser`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamrUserInfo {
+    /// Account name returned by the server.
+    pub account_name: String,
+}
+
 /// Typed `samr` domain client over an already-open domain handle.
 #[derive(Debug)]
 pub struct SamrDomainClient<T = TokioTcpTransport> {
@@ -80,6 +91,19 @@ pub struct SamrDomainClient<T = TokioTcpTransport> {
     context_id: u16,
     server_handle: [u8; 20],
     domain_handle: [u8; 20],
+    domain_name: String,
+    domain_sid: SamrSid,
+}
+
+/// Typed `samr` user client over an already-open user handle.
+#[derive(Debug)]
+pub struct SamrUserClient<T = TokioTcpTransport> {
+    rpc: PipeRpcClient<T>,
+    context_id: u16,
+    server_handle: [u8; 20],
+    domain_handle: [u8; 20],
+    user_handle: [u8; 20],
+    relative_id: u32,
     domain_name: String,
     domain_sid: SamrSid,
 }
@@ -127,6 +151,32 @@ impl<T> SamrDomainClient<T> {
     }
 
     /// Returns the opened domain SID.
+    #[must_use]
+    pub fn domain_sid(&self) -> &SamrSid {
+        &self.domain_sid
+    }
+
+    /// Returns the underlying RPC transport.
+    #[must_use]
+    pub fn rpc(&self) -> &PipeRpcClient<T> {
+        &self.rpc
+    }
+}
+
+impl<T> SamrUserClient<T> {
+    /// Returns the opened user RID.
+    #[must_use]
+    pub fn relative_id(&self) -> u32 {
+        self.relative_id
+    }
+
+    /// Returns the name of the currently-open domain.
+    #[must_use]
+    pub fn domain_name(&self) -> &str {
+        &self.domain_name
+    }
+
+    /// Returns the SID of the currently-open domain.
     #[must_use]
     pub fn domain_sid(&self) -> &SamrSid {
         &self.domain_sid
@@ -250,6 +300,29 @@ where
         parse_enumerate_users_response(&response)
     }
 
+    /// Opens a user handle by RID and consumes the domain-scoped client.
+    pub async fn open_user(mut self, relative_id: u32) -> Result<SamrUserClient<T>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_OPEN_USER_OPNUM,
+                encode_open_user_request(self.domain_handle, USER_READ_GENERAL, relative_id),
+            )
+            .await?;
+        let user_handle = parse_open_user_response(&response)?;
+        Ok(SamrUserClient {
+            rpc: self.rpc,
+            context_id: self.context_id,
+            server_handle: self.server_handle,
+            domain_handle: self.domain_handle,
+            user_handle,
+            relative_id,
+            domain_name: self.domain_name,
+            domain_sid: self.domain_sid,
+        })
+    }
+
     /// Closes the domain handle, then the server handle, and returns the underlying RPC transport.
     pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
         let response = self
@@ -272,6 +345,48 @@ where
             .await?;
         parse_close_handle_response(&response)?;
         Ok(self.rpc)
+    }
+}
+
+impl<T> SamrUserClient<T>
+where
+    T: crate::transport::Transport + Send,
+{
+    /// Queries `UserAccountNameInformation` for the current user handle.
+    pub async fn query_account_name(&mut self) -> Result<SamrUserInfo, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_QUERY_INFORMATION_USER_OPNUM,
+                encode_query_user_request(
+                    self.user_handle,
+                    USER_ACCOUNT_NAME_INFORMATION_CLASS,
+                ),
+            )
+            .await?;
+        parse_query_account_name_response(&response)
+    }
+
+    /// Closes the user handle and returns the domain-scoped client.
+    pub async fn close(mut self) -> Result<SamrDomainClient<T>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_CLOSE_HANDLE_OPNUM,
+                encode_close_handle_request(self.user_handle),
+            )
+            .await?;
+        parse_close_handle_response(&response)?;
+        Ok(SamrDomainClient {
+            rpc: self.rpc,
+            context_id: self.context_id,
+            server_handle: self.server_handle,
+            domain_handle: self.domain_handle,
+            domain_name: self.domain_name,
+            domain_sid: self.domain_sid,
+        })
     }
 }
 
@@ -413,6 +528,62 @@ fn encode_enumerate_users_request(
     bytes.extend_from_slice(&user_account_control.to_le_bytes());
     bytes.extend_from_slice(&preferred_maximum_length.to_le_bytes());
     bytes
+}
+
+fn encode_open_user_request(
+    domain_handle: [u8; 20],
+    desired_access: u32,
+    relative_id: u32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(28);
+    bytes.extend_from_slice(&domain_handle);
+    bytes.extend_from_slice(&desired_access.to_le_bytes());
+    bytes.extend_from_slice(&relative_id.to_le_bytes());
+    bytes
+}
+
+fn parse_open_user_response(response: &[u8]) -> Result<[u8; 20], CoreError> {
+    if response.len() < 24 {
+        return Err(CoreError::InvalidResponse(
+            "SamrOpenUser response was too short",
+        ));
+    }
+    let mut user_handle = [0_u8; 20];
+    user_handle.copy_from_slice(&response[..20]);
+    let status = u32::from_le_bytes(response[20..24].try_into().expect("status slice"));
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrOpenUser",
+            code: status,
+        });
+    }
+    Ok(user_handle)
+}
+
+fn encode_query_user_request(user_handle: [u8; 20], info_class: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(24);
+    bytes.extend_from_slice(&user_handle);
+    bytes.extend_from_slice(&info_class.to_le_bytes());
+    bytes
+}
+
+fn parse_query_account_name_response(response: &[u8]) -> Result<SamrUserInfo, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let buffer_referent = reader.read_u32("UserInformationReferent")?;
+    if buffer_referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "SamrQueryInformationUser did not return account-name data",
+        ));
+    }
+    let account_name = reader.read_rpc_unicode_string("AccountName")?;
+    let status = reader.read_u32("SamrQueryInformationUserStatus")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrQueryInformationUser",
+            code: status,
+        });
+    }
+    Ok(SamrUserInfo { account_name })
 }
 
 fn parse_enumerate_users_response(response: &[u8]) -> Result<Vec<SamrUser>, CoreError> {
@@ -708,10 +879,12 @@ mod tests {
     use super::{
         encode_close_handle_request, encode_connect5_request, encode_enumerate_domains_request,
         encode_enumerate_users_request, encode_lookup_domain_request, encode_open_domain_request,
-        parse_close_handle_response, parse_connect5_response, parse_enumerate_domains_response,
+        encode_open_user_request, encode_query_user_request, parse_close_handle_response,
+        parse_connect5_response, parse_enumerate_domains_response,
         parse_enumerate_users_response, parse_lookup_domain_response, parse_open_domain_response,
-        SamrDomain, SamrServerRevision, SamrSid, SamrUser, DEFAULT_DOMAIN_ACCESS,
-        DEFAULT_SERVER_ACCESS,
+        parse_open_user_response, parse_query_account_name_response, SamrDomain,
+        SamrServerRevision, SamrSid, SamrUser, SamrUserInfo, DEFAULT_DOMAIN_ACCESS,
+        DEFAULT_SERVER_ACCESS, USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
     };
     use crate::error::CoreError;
 
@@ -969,6 +1142,59 @@ mod tests {
                     name: "Guest".to_owned(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn open_user_request_encodes_handle_access_and_rid() {
+        assert_eq!(
+            encode_open_user_request([0x12; 20], USER_READ_GENERAL, 500),
+            [
+                [0x12; 20].to_vec(),
+                USER_READ_GENERAL.to_le_bytes().to_vec(),
+                500_u32.to_le_bytes().to_vec(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn open_user_response_decodes_handle() {
+        let response = [[0x66; 20].to_vec(), 0_u32.to_le_bytes().to_vec()].concat();
+        assert_eq!(
+            parse_open_user_response(&response).expect("response should decode"),
+            [0x66; 20]
+        );
+    }
+
+    #[test]
+    fn query_user_request_encodes_handle_and_info_class() {
+        assert_eq!(
+            encode_query_user_request([0x22; 20], USER_ACCOUNT_NAME_INFORMATION_CLASS),
+            [
+                [0x22; 20].to_vec(),
+                (USER_ACCOUNT_NAME_INFORMATION_CLASS as u32)
+                    .to_le_bytes()
+                    .to_vec(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn query_account_name_response_decodes_value() {
+        let mut writer = ResponseWriter::new();
+        let buffer_ref = writer.next_referent();
+        writer.write_u32(buffer_ref);
+        writer.write_rpc_unicode_string("Administrator");
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_query_account_name_response(&writer.into_bytes())
+                .expect("response should decode"),
+            SamrUserInfo {
+                account_name: "Administrator".to_owned(),
+            }
         );
     }
 }

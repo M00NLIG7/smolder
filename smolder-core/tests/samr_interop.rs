@@ -110,6 +110,20 @@ async fn enumerates_windows_samr_domains_when_configured() {
         !users.is_empty(),
         "account-domain SAMR user enumeration should not be empty"
     );
+    let first_user = users
+        .first()
+        .expect("enumerated account-domain users should include at least one entry")
+        .clone();
+    let mut user = domain
+        .open_user(first_user.relative_id)
+        .await
+        .expect("should open the first enumerated user by RID");
+    let user_info = user
+        .query_account_name()
+        .await
+        .expect("SamrQueryInformationUser should succeed");
+    assert_eq!(user_info.account_name, first_user.name);
+    let domain = user.close().await.expect("samr user close should succeed");
 
     let rpc = domain.close().await.expect("samr domain close should succeed");
     let connection = rpc
