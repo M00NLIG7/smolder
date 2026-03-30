@@ -1139,7 +1139,7 @@ fn normalize_pipe_name(pipe_name: &str) -> Result<String, CoreError> {
         return Err(CoreError::PathInvalid("pipe name must not be empty"));
     }
 
-    Ok(format!(r"\\{trimmed}"))
+    Ok(trimmed.to_owned())
 }
 
 fn desired_access_mask(options: &OpenOptions) -> u32 {
@@ -1472,11 +1472,11 @@ mod tests {
     fn normalize_pipe_name_rejects_invalid_values() {
         assert_eq!(
             normalize_pipe_name("srvsvc").expect("pipe should normalize"),
-            r"\\srvsvc"
+            "srvsvc"
         );
         assert_eq!(
             normalize_pipe_name(r"\\PIPE\\srvsvc").expect("pipe should normalize"),
-            r"\\srvsvc"
+            "srvsvc"
         );
         assert!(normalize_pipe_name("").is_err());
         assert!(normalize_pipe_name("\0bad").is_err());
