@@ -11,10 +11,10 @@ use smolder_proto::rpc::SyntaxId;
 use smolder_proto::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
 use smolder_proto::smb::smb2::{
     CloseRequest, CompressionCapabilities, CreateDisposition, CreateOptions, CreateRequest,
-    Dialect, DispositionInformation, EchoResponse, FileAttributes, FileBasicInformation, FileId,
-    FileInfoClass, FileStandardInformation, FlushRequest, GlobalCapabilities, QueryInfoRequest,
-    ReadRequest, SessionId, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, TreeId,
-    WriteRequest,
+    Dialect, DirectoryInformationEntry, DispositionInformation, EchoResponse, FileAttributes,
+    FileBasicInformation, FileId, FileInfoClass, FileStandardInformation, FlushRequest,
+    GlobalCapabilities, QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest, ReadRequest,
+    SessionId, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, TreeId, WriteRequest,
 };
 
 use crate::auth::NtlmCredentials;
@@ -42,11 +42,13 @@ const FILE_READ_EA: u32 = 0x0000_0008;
 const FILE_WRITE_EA: u32 = 0x0000_0010;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+const FILE_LIST_DIRECTORY: u32 = 0x0000_0001;
 const DELETE: u32 = 0x0001_0000;
 const READ_CONTROL: u32 = 0x0002_0000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const WINDOWS_TICK: u64 = 10_000_000;
 const SEC_TO_UNIX_EPOCH: u64 = 11_644_473_600;
+const DIRECTORY_QUERY_BUFFER_SIZE: u32 = 64 * 1024;
 
 #[derive(Debug, Clone)]
 enum BuilderAuth {
@@ -772,6 +774,65 @@ where
         self.stat(path).await
     }
 
+    /// Enumerates one directory on the current tree and returns the visible entries.
+    ///
+    /// The returned list filters out the `.` and `..` placeholders so embedders
+    /// get the entries they usually expect from a high-level client facade.
+    pub async fn list(&mut self, path: &str) -> Result<Vec<DirectoryEntry>, CoreError> {
+        let normalized_path = normalize_share_path(path)?;
+        let mut create_request = CreateRequest::from_path(&normalized_path);
+        create_request.desired_access = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+        create_request.share_access = ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE;
+        create_request.create_disposition = CreateDisposition::Open;
+        create_request.create_options = CreateOptions::DIRECTORY_FILE;
+        let response = self.connection.create(&create_request).await?;
+        let file_id = response.file_id;
+
+        let list_result = async {
+            let mut request =
+                QueryDirectoryRequest::for_pattern(file_id, "*", DIRECTORY_QUERY_BUFFER_SIZE);
+            let mut entries = Vec::new();
+
+            loop {
+                let response = self.connection.query_directory(&request).await?;
+                let batch = response
+                    .directory_entries()
+                    .map_err(CoreError::from)?
+                    .into_iter()
+                    .filter(|entry| entry.file_name != "." && entry.file_name != "..")
+                    .map(directory_entry_from_info)
+                    .collect::<Vec<_>>();
+                if batch.is_empty() {
+                    break;
+                }
+                entries.extend(batch);
+                request.flags = QueryDirectoryFlags::empty();
+                request.file_name.clear();
+            }
+
+            Ok(entries)
+        }
+        .await;
+
+        let close_result = self
+            .connection
+            .close(&CloseRequest { flags: 0, file_id })
+            .await;
+        match (list_result, close_result) {
+            (Ok(entries), Ok(_)) => Ok(entries),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Enumerates one directory on the current tree.
+    ///
+    /// This is an alias for [`Share::list`] that matches the common filesystem
+    /// naming convention used by embedders.
+    pub async fn read_dir(&mut self, path: &str) -> Result<Vec<DirectoryEntry>, CoreError> {
+        self.list(path).await
+    }
+
     /// Removes a file from the current tree by marking it delete-pending and closing it.
     pub async fn remove(&mut self, path: &str) -> Result<(), CoreError> {
         let normalized_path = normalize_share_path(path)?;
@@ -998,6 +1059,31 @@ impl FileMetadata {
     #[must_use]
     pub fn is_file(&self) -> bool {
         !self.is_directory()
+    }
+}
+
+/// One directory entry returned by the high-level share facade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    /// File name relative to the queried directory.
+    pub name: String,
+    /// Server-provided resume index for the entry.
+    pub file_index: u32,
+    /// High-level metadata derived from the SMB directory record.
+    pub metadata: FileMetadata,
+}
+
+impl DirectoryEntry {
+    /// Returns true when the entry is a directory.
+    #[must_use]
+    pub fn is_directory(&self) -> bool {
+        self.metadata.is_directory()
+    }
+
+    /// Returns true when the entry is a regular file.
+    #[must_use]
+    pub fn is_file(&self) -> bool {
+        self.metadata.is_file()
     }
 }
 
@@ -1277,6 +1363,23 @@ fn metadata_from_info(
     }
 }
 
+fn directory_entry_from_info(entry: DirectoryInformationEntry) -> DirectoryEntry {
+    DirectoryEntry {
+        name: entry.file_name,
+        file_index: entry.file_index,
+        metadata: FileMetadata {
+            size: entry.end_of_file,
+            allocation_size: entry.allocation_size,
+            attributes: entry.file_attributes,
+            created: system_time_from_windows_ticks(entry.creation_time),
+            accessed: system_time_from_windows_ticks(entry.last_access_time),
+            written: system_time_from_windows_ticks(entry.last_write_time),
+            changed: system_time_from_windows_ticks(entry.change_time),
+            delete_pending: false,
+        },
+    }
+}
+
 fn system_time_from_windows_ticks(value: u64) -> Option<SystemTime> {
     if value == 0 {
         return None;
@@ -1295,9 +1398,9 @@ mod tests {
     use smolder_proto::smb::smb2::{
         CloseResponse, Command, CreateDisposition, CreateResponse, Dialect, FileAttributes, FileId,
         FlushResponse, GlobalCapabilities, Header, MessageId, NegotiateRequest, NegotiateResponse,
-        OplockLevel, QueryInfoResponse, SessionFlags, SessionSetupResponse, ShareFlags, ShareType,
-        SigningMode, TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeId,
-        WriteResponse,
+        OplockLevel, QueryDirectoryResponse, QueryInfoResponse, SessionFlags, SessionSetupResponse,
+        ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectRequest,
+        TreeConnectResponse, TreeId, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
 
@@ -1362,6 +1465,39 @@ mod tests {
         SessionMessage::new(packet)
             .encode()
             .expect("response should frame")
+    }
+
+    fn directory_entries_buffer(entries: &[(u32, FileAttributes, u64, &str)]) -> Vec<u8> {
+        let mut buffer = Vec::new();
+
+        for (index, (file_index, attributes, size, name)) in entries.iter().enumerate() {
+            let name_bytes = name
+                .encode_utf16()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>();
+            let entry_len = (64 + name_bytes.len() + 7) & !7;
+            let next_entry_offset = if index + 1 == entries.len() {
+                0
+            } else {
+                entry_len as u32
+            };
+
+            buffer.extend_from_slice(&next_entry_offset.to_le_bytes());
+            buffer.extend_from_slice(&file_index.to_le_bytes());
+            buffer.extend_from_slice(&1_u64.to_le_bytes());
+            buffer.extend_from_slice(&2_u64.to_le_bytes());
+            buffer.extend_from_slice(&3_u64.to_le_bytes());
+            buffer.extend_from_slice(&4_u64.to_le_bytes());
+            buffer.extend_from_slice(&size.to_le_bytes());
+            buffer.extend_from_slice(&size.to_le_bytes());
+            buffer.extend_from_slice(&attributes.bits().to_le_bytes());
+            buffer.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(&name_bytes);
+            let padding = entry_len - 64 - name_bytes.len();
+            buffer.resize(buffer.len() + padding, 0);
+        }
+
+        buffer
     }
 
     async fn build_share(reads: Vec<Vec<u8>>) -> Share<ScriptedTransport> {
@@ -1931,5 +2067,90 @@ mod tests {
         assert_eq!(metadata.allocation_size, 7);
         assert!(metadata.delete_pending);
         assert!(metadata.is_file());
+    }
+
+    #[tokio::test]
+    async fn share_list_decodes_directory_entries_and_filters_dot_entries() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::DIRECTORY,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_id: FileId {
+                persistent: 10,
+                volatile: 20,
+            },
+            create_contexts: Vec::new(),
+        };
+        let first_page = QueryDirectoryResponse {
+            output_buffer: directory_entries_buffer(&[
+                (1, FileAttributes::DIRECTORY, 0, "."),
+                (2, FileAttributes::ARCHIVE, 5, "notes.txt"),
+            ]),
+        };
+        let second_page = QueryDirectoryResponse {
+            output_buffer: directory_entries_buffer(&[
+                (3, FileAttributes::DIRECTORY, 0, ".."),
+                (4, FileAttributes::DIRECTORY, 0, "nested"),
+            ]),
+        };
+
+        let mut share = build_share(vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::QueryDirectory,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                first_page.encode(),
+            ),
+            response_frame(
+                Command::QueryDirectory,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                second_page.encode(),
+            ),
+            response_frame(
+                Command::QueryDirectory,
+                NtStatus::NO_MORE_FILES.to_u32(),
+                6,
+                11,
+                7,
+                Vec::new(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                7,
+                11,
+                7,
+                CloseResponse {
+                    flags: 0,
+                    allocation_size: 0,
+                    end_of_file: 0,
+                    file_attributes: FileAttributes::DIRECTORY,
+                }
+                .encode(),
+            ),
+        ])
+        .await;
+
+        let entries = share.list("\\").await.expect("list should succeed");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "notes.txt");
+        assert!(entries[0].is_file());
+        assert_eq!(entries[0].metadata.size, 5);
+        assert_eq!(entries[1].name, "nested");
+        assert!(entries[1].is_directory());
     }
 }

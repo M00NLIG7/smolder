@@ -16,7 +16,7 @@ For most users, the supported starting surface is:
 
 - `smolder_core::prelude`
 - `smolder_core::facade::{Client, ClientBuilder}`
-- `smolder_core::facade::{Session, Share, File, OpenOptions, FileMetadata}`
+- `smolder_core::facade::{Session, Share, File, OpenOptions, FileMetadata, DirectoryEntry}`
 - `smolder_core::client::Connection`
 - `smolder_core::pipe::{SmbSessionConfig, NamedPipe, PipeAccess, connect_tree}`
 - `smolder_core::rpc::PipeRpcClient`
@@ -38,8 +38,9 @@ For the `0.2.x` line, the preferred split is:
 - use `facade::Client` when you want an embedded SMB client that gets you to an
   authenticated session or tree connection quickly
 - use `facade::Share` and `facade::File` when you want routine file reads,
-  writes, stats, deletes, and durable/resilient opens without driving raw
-  `CREATE` / `READ` / `WRITE` / `QUERY_INFO` calls yourself
+  writes, stats, deletes, directory listing, and durable/resilient opens
+  without driving raw `CREATE` / `READ` / `WRITE` / `QUERY_INFO` /
+  `QUERY_DIRECTORY` calls yourself
 - use `client::Connection` directly when you need full typestate control or are
   implementing new high-level flows inside Smolder itself
 

@@ -46,6 +46,7 @@
 //! The fastest supported entry points are:
 //!
 //! - `cargo run -p smolder-smb-core --example client_session_connect`
+//! - `cargo run -p smolder-smb-core --example client_share_list`
 //! - `cargo run -p smolder-smb-core --example client_file_roundtrip`
 //! - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
 //! - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
@@ -126,7 +127,7 @@ pub mod prelude {
     pub use crate::dfs::{resolve_unc_path, DfsReferral, UncPath};
     pub use crate::error::CoreError;
     pub use crate::facade::{
-        Client, ClientBuilder, File, FileMetadata, OpenOptions, Session, Share,
+        Client, ClientBuilder, DirectoryEntry, File, FileMetadata, OpenOptions, Session, Share,
     };
     pub use crate::lsarpc::{LsaDomainInfo, LsaSid, LsarpcClient, DEFAULT_POLICY_ACCESS};
     pub use crate::pipe::{
