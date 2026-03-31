@@ -190,7 +190,7 @@ Required environment:
 
 ```bash
 export SMOLDER_WINDOWS_HOST=127.0.0.1
-export SMOLDER_WINDOWS_PORT=445
+export SMOLDER_WINDOWS_PORT=1445
 export SMOLDER_WINDOWS_USERNAME='<windows-username>'
 export SMOLDER_WINDOWS_PASSWORD='<windows-password>'
 export SMOLDER_PSEXEC_SERVICE_BINARY=target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe
@@ -226,7 +226,7 @@ cross build -p smolder-psexecsvc --target aarch64-pc-windows-gnullvm --release -
 The standalone CLI flow for the same interactive path is:
 
 ```bash
-target/debug/smolder psexec smb://127.0.0.1 \
+target/debug/smolder psexec smb://127.0.0.1:1445 \
   --interactive \
   --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \
   --username "$SMOLDER_WINDOWS_USERNAME" \
@@ -236,7 +236,7 @@ target/debug/smolder psexec smb://127.0.0.1 \
 To start `powershell.exe` directly instead of the default `cmd.exe` shell:
 
 ```bash
-target/debug/smolder psexec smb://127.0.0.1 \
+target/debug/smolder psexec smb://127.0.0.1:1445 \
   --interactive \
   --command powershell.exe \
   --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \

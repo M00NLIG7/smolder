@@ -8,14 +8,14 @@ It uses:
 
 - the local Samba AD fixture in
   [docker/samba-ad/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba-ad/compose.yaml)
-- Tiny11 as the SMB target on `127.0.0.1:445`
+- Tiny11 as the SMB target on `127.0.0.1:1445`
 - the generic core Kerberos test in
   [kerberos_interop.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/tests/kerberos_interop.rs)
 
 The important detail is that the SMB transport target and the Kerberos target
 host are different:
 
-- transport target: `127.0.0.1:445`
+- transport target: `127.0.0.1:1445`
 - Kerberos/SPN target: `DESKTOP-PTNJUS5.lab.example`
 
 That keeps the VirtualBox NAT-forwarded SMB transport simple while still using
@@ -23,7 +23,7 @@ the correct `cifs/<hostname>` SPN.
 
 ## Prerequisites
 
-- Tiny11 reachable on host port `445`
+- Tiny11 reachable on host port `1445`
 - working Windows credentials:
   - username from `SMOLDER_WINDOWS_USERNAME`
   - password from `SMOLDER_WINDOWS_PASSWORD`
@@ -75,9 +75,9 @@ cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --
 followed by Kerberos-enabled CLI smoke commands:
 
 ```bash
-target/debug/smolder-ls smb://127.0.0.1/IPC$ --kerberos ...
-target/debug/smolder smbexec smb://127.0.0.1 --kerberos --command whoami ...
-target/debug/smolder psexec smb://127.0.0.1 --kerberos --command whoami ...
+target/debug/smolder-ls smb://127.0.0.1:1445/IPC$ --kerberos ...
+target/debug/smolder smbexec smb://127.0.0.1:1445 --kerberos --command whoami ...
+target/debug/smolder psexec smb://127.0.0.1:1445 --kerberos --command whoami ...
 ```
 
 Before the `smbexec` smoke, the wrapper re-applies local `Administrators`

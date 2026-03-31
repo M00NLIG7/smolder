@@ -8,6 +8,7 @@ compose_file="docker/samba-ad/compose.yaml"
 vm_name="${SMOLDER_WINDOWS_VM:-Tiny11}"
 windows_host="${SMOLDER_WINDOWS_HOST:-127.0.0.1}"
 windows_port="${SMOLDER_WINDOWS_PORT:-445}"
+windows_target="smb://${windows_host}:${windows_port}"
 guest_blob_path="${SMOLDER_WINDOWS_ODJ_GUEST_PATH:-C:\\Windows\\Temp\\tiny11-odj.txt}"
 host_blob_path="${SMOLDER_WINDOWS_ODJ_HOST_PATH:-/tmp/tiny11-odj.txt}"
 ad_domain="${SMOLDER_AD_DOMAIN:-LAB.EXAMPLE}"
@@ -58,7 +59,7 @@ done
 guest_hostname=""
 for _attempt in $(seq 1 24); do
   if guest_hostname="$(
-    target/debug/psexec "smb://${windows_host}" \
+    target/debug/psexec "${windows_target}" \
       --command "cmd /c hostname" \
       --username "${windows_username}" \
       --password "${windows_password}" 2>/dev/null | tr -d '\r\n'
@@ -110,12 +111,12 @@ if [[ "${copy_succeeded}" -ne 1 ]]; then
   exit 1
 fi
 
-target/debug/psexec "smb://${windows_host}" \
+target/debug/psexec "${windows_target}" \
   --command "cmd /c djoin /requestODJ /loadfile ${guest_blob_path} /windowspath C:\\Windows /localos" \
   --username "${windows_username}" \
   --password "${windows_password}"
 
-target/debug/psexec "smb://${windows_host}" \
+target/debug/psexec "${windows_target}" \
   --command "shutdown /r /t 0 /f" \
   --username "${windows_username}" \
   --password "${windows_password}" >/dev/null || true
@@ -127,7 +128,7 @@ done
 domain_line=""
 for _attempt in $(seq 1 24); do
   if domain_line="$(
-    target/debug/psexec "smb://${windows_host}" \
+    target/debug/psexec "${windows_target}" \
       --command "cmd /c systeminfo | findstr /B /C:\"Domain\"" \
       --username "${windows_username}" \
       --password "${windows_password}" 2>/dev/null | tr -d '\r'
@@ -147,7 +148,7 @@ if [[ "${domain_line}" != *"lab.example"* ]]; then
   exit 1
 fi
 
-if ! target/debug/psexec "smb://${windows_host}" \
+if ! target/debug/psexec "${windows_target}" \
   --command "cmd /c net localgroup Administrators \"${windows_domain_admin_member}\" /add" \
   --username "${windows_username}" \
   --password "${windows_password}" >/dev/null 2>&1; then

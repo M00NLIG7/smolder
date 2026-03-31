@@ -8,7 +8,7 @@ This workflow is intended for a self-hosted runner on the same machine that can:
 
 - access the local Tiny11 VirtualBox VM
 - run `VBoxManage`
-- reach the host-side SMB port forward at `127.0.0.1:445`
+- reach the host-side SMB port forward at `127.0.0.1:1445`
 
 ## Prerequisites
 
@@ -79,6 +79,12 @@ scripts/ensure-tiny11-smb-forward.sh
 ```
 
 That helper is also invoked by the workflow itself before the release gate runs.
+With `SMOLDER_WINDOWS_USERNAME` and `SMOLDER_WINDOWS_PASSWORD` set, it now also:
+
+- waits briefly for Tiny11 to bring SMB up on its own before touching the guest
+- best-effort enables the guest `File and Printer Sharing` firewall group
+- best-effort ensures `LanmanServer` is running
+- waits for `127.0.0.1:1445` to accept connections before the gate starts
 
 ## Workflow Dispatch
 

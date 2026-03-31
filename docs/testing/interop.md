@@ -313,8 +313,8 @@ cargo test -p smolder --test windows_dfs -- --nocapture
 Remote execution smoke checks:
 
 ```bash
-target/debug/smolder smbexec smb://127.0.0.1 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
-target/debug/smolder psexec smb://127.0.0.1 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
+target/debug/smolder smbexec smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
+target/debug/smolder psexec smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
 ```
 
 ### Samba

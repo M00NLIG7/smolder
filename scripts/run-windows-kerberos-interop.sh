@@ -33,7 +33,7 @@ until docker compose -f docker/samba-ad/compose.yaml exec -T files1 wbinfo -t >/
 done
 
 export SMOLDER_KERBEROS_HOST="${SMOLDER_KERBEROS_HOST:-127.0.0.1}"
-export SMOLDER_KERBEROS_PORT="${SMOLDER_KERBEROS_PORT:-445}"
+export SMOLDER_KERBEROS_PORT="${SMOLDER_KERBEROS_PORT:-1445}"
 export SMOLDER_KERBEROS_USERNAME="${SMOLDER_KERBEROS_USERNAME:-smolder@LAB.EXAMPLE}"
 export SMOLDER_KERBEROS_PASSWORD="${SMOLDER_KERBEROS_PASSWORD:-Passw0rd!}"
 export SMOLDER_KERBEROS_SHARE="${SMOLDER_KERBEROS_SHARE:-IPC$}"
@@ -71,6 +71,11 @@ if [[ "${SMOLDER_KERBEROS_PORT}" != "445" ]]; then
 fi
 target_url="${target_url}/${SMOLDER_KERBEROS_SHARE}"
 
+rpc_target="smb://${SMOLDER_KERBEROS_HOST}"
+if [[ "${SMOLDER_KERBEROS_PORT}" != "445" ]]; then
+  rpc_target="${rpc_target}:${SMOLDER_KERBEROS_PORT}"
+fi
+
 target/debug/smolder-ls "${target_url}" \
   --kerberos \
   --username "${SMOLDER_KERBEROS_USERNAME}" \
@@ -79,14 +84,14 @@ target/debug/smolder-ls "${target_url}" \
   --realm "${SMOLDER_KERBEROS_REALM}" \
   --kdc-url "${SMOLDER_KERBEROS_KDC_URL}" >/dev/null
 
-if ! target/debug/smolder psexec "smb://${SMOLDER_KERBEROS_HOST}" \
+if ! target/debug/smolder psexec "${rpc_target}" \
   --command "cmd /c net localgroup Administrators \"${windows_domain_admin_member}\" /add" \
   --username "${SMOLDER_WINDOWS_USERNAME}" \
   --password "${SMOLDER_WINDOWS_PASSWORD}" >/dev/null 2>&1; then
   :
 fi
 
-target/debug/smolder smbexec "smb://${SMOLDER_KERBEROS_HOST}" \
+target/debug/smolder smbexec "${rpc_target}" \
   --command whoami \
   --kerberos \
   --username "${SMOLDER_KERBEROS_USERNAME}" \
@@ -95,7 +100,7 @@ target/debug/smolder smbexec "smb://${SMOLDER_KERBEROS_HOST}" \
   --realm "${SMOLDER_KERBEROS_REALM}" \
   --kdc-url "${SMOLDER_KERBEROS_KDC_URL}" >/dev/null
 
-target/debug/smolder psexec "smb://${SMOLDER_KERBEROS_HOST}" \
+target/debug/smolder psexec "${rpc_target}" \
   --command whoami \
   --kerberos \
   --username "${SMOLDER_KERBEROS_USERNAME}" \

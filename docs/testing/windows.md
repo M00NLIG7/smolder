@@ -22,7 +22,7 @@ Current local fixture assumptions:
 
 - VM: `Tiny11`
 - Guest host: `DESKTOP-PTNJUS5`
-- Port forward: host `127.0.0.1:445` -> guest `445`
+- Port forward: host `127.0.0.1:1445` -> guest `445`
 - Windows test credentials: set `SMOLDER_WINDOWS_USERNAME` and
   `SMOLDER_WINDOWS_PASSWORD` for your local VM account
 - Encrypted share: `SMOLDERENC`
@@ -35,7 +35,7 @@ Current local fixture assumptions:
 Ensure the NAT rule exists:
 
 ```bash
-VBoxManage controlvm Tiny11 natpf1 "smb445,tcp,,445,,445"
+VBoxManage controlvm Tiny11 natpf1 "smb-local,tcp,,1445,,445"
 ```
 
 ## Environment
@@ -44,6 +44,7 @@ Minimum environment:
 
 ```bash
 export SMOLDER_WINDOWS_HOST=127.0.0.1
+export SMOLDER_WINDOWS_PORT=1445
 export SMOLDER_WINDOWS_USERNAME='<windows-username>'
 export SMOLDER_WINDOWS_PASSWORD='<windows-password>'
 ```
@@ -52,6 +53,7 @@ Recommended full environment:
 
 ```bash
 export SMOLDER_WINDOWS_HOST=127.0.0.1
+export SMOLDER_WINDOWS_PORT=1445
 export SMOLDER_WINDOWS_USERNAME='<windows-username>'
 export SMOLDER_WINDOWS_PASSWORD='<windows-password>'
 export SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC
@@ -110,7 +112,7 @@ That wrapper drives the existing
 [kerberos_interop.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/tests/kerberos_interop.rs)
 test with the Windows-specific defaults:
 
-- SMB transport: `127.0.0.1:445`
+- SMB transport: `127.0.0.1:1445`
 - Kerberos target host: `DESKTOP-PTNJUS5.lab.example`
 - Share: `IPC$`
 - Realm: `LAB.EXAMPLE`
@@ -138,6 +140,6 @@ When the fixture is healthy:
 - GitHub Actions covers the Samba-backed subset automatically.
 - The repository now includes an optional self-hosted workflow at [interop-windows-self-hosted.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-windows-self-hosted.yml).
 - That workflow expects a self-hosted runner labeled `smolder-windows-gate`, local access to the Tiny11 fixture, `VBoxManage`, and repository secrets `SMOLDER_WINDOWS_USERNAME` / `SMOLDER_WINDOWS_PASSWORD`.
-- The workflow uses [ensure-tiny11-smb-forward.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/ensure-tiny11-smb-forward.sh) to verify the `127.0.0.1:445` NAT forward before running the release gate.
+- The workflow uses [ensure-tiny11-smb-forward.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/ensure-tiny11-smb-forward.sh) to verify the `127.0.0.1:1445` NAT forward, wait for Tiny11 SMB readiness, and then attempt guest-side service/firewall recovery on a best-effort basis before the release gate starts.
 - Runner bootstrap and GitHub secret setup are documented in [windows-runner.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-runner.md).
 - If the self-hosted runner is unavailable, the local `scripts/run-windows-release-gate.sh` path remains the fallback.

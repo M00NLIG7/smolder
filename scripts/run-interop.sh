@@ -153,14 +153,17 @@ run_windows_remote_exec() {
   require_env SMOLDER_WINDOWS_USERNAME
   require_env SMOLDER_WINDOWS_PASSWORD
 
+  local windows_port="${SMOLDER_WINDOWS_PORT:-445}"
+  local windows_target="smb://${SMOLDER_WINDOWS_HOST}:${windows_port}"
+
   run_cmd cargo build -p smolder --bin smbexec --bin psexec
   run_cmd target/debug/smbexec \
-    "smb://${SMOLDER_WINDOWS_HOST}" \
+    "${windows_target}" \
     --command whoami \
     --username "${SMOLDER_WINDOWS_USERNAME}" \
     --password "${SMOLDER_WINDOWS_PASSWORD}"
   run_cmd target/debug/psexec \
-    "smb://${SMOLDER_WINDOWS_HOST}" \
+    "${windows_target}" \
     --command whoami \
     --username "${SMOLDER_WINDOWS_USERNAME}" \
     --password "${SMOLDER_WINDOWS_PASSWORD}"

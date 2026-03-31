@@ -314,9 +314,6 @@ fn parse_share_enum_level1_response(response: &[u8]) -> Result<Vec<ShareInfo1>, 
             } else {
                 String::new()
             };
-        }
-
-        for entry in &mut entries {
             entry.remark = if entry.remark_referent != 0 {
                 Some(reader.read_wide_string("shi1_remark")?)
             } else {
@@ -525,7 +522,7 @@ impl<'a> NdrReader<'a> {
         let max_count = self.read_u32(field)? as usize;
         let offset = self.read_u32(field)? as usize;
         let actual_count = self.read_u32(field)? as usize;
-        if offset != 0 || actual_count == 0 || max_count < actual_count {
+        if offset > max_count || actual_count > max_count.saturating_sub(offset) {
             return Err(CoreError::InvalidResponse(field));
         }
 
@@ -535,10 +532,9 @@ impl<'a> NdrReader<'a> {
         }
         self.align(4, field)?;
 
-        if code_units.last().copied() != Some(0) {
-            return Err(CoreError::InvalidResponse(field));
+        if code_units.last().copied() == Some(0) {
+            code_units.pop();
         }
-        code_units.pop();
         String::from_utf16(&code_units)
             .map_err(|_| CoreError::InvalidResponse("failed to decode srvsvc UTF-16 string"))
     }
@@ -718,8 +714,8 @@ mod tests {
         writer.write_u32(0);
 
         writer.write_wide_string("Docs");
-        writer.write_wide_string("IPC$");
         writer.write_wide_string("Documentation");
+        writer.write_wide_string("IPC$");
         writer.write_u32(2);
         writer.write_u32(0);
 
@@ -737,6 +733,39 @@ mod tests {
                     remark: None,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn parse_share_enum_level1_response_accepts_empty_remarks() {
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(1);
+        writer.write_u32(1);
+        writer.write_u32(1);
+        let array_referent = writer.next_referent();
+        writer.write_u32(array_referent);
+        writer.write_u32(1);
+
+        let docs_name = writer.next_referent();
+        let docs_remark = writer.next_referent();
+        writer.write_u32(docs_name);
+        writer.write_u32(0);
+        writer.write_u32(docs_remark);
+
+        writer.write_wide_string("Docs");
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(1);
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_share_enum_level1_response(&writer.into_bytes()).expect("response should decode"),
+            vec![ShareInfo1 {
+                name: "Docs".to_owned(),
+                share_type: 0,
+                remark: Some(String::new()),
+            }]
         );
     }
 
