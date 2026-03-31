@@ -87,6 +87,9 @@ Required when the `quic` feature or QUIC transport logic changed:
 - a manual QUIC replay against a real Windows Server target:
   - [run-windows-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-quic-interop.sh)
   - [windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md)
+- optional Samba QUIC replay on a Linux host with `quic.ko`:
+  - [run-samba-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-samba-quic-interop.sh)
+  - [samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md)
 
 ### For DFS changes
 
@@ -114,7 +117,7 @@ If the service payload changed too:
 | --- | --- |
 | `smolder-proto` packet/codecs only | Samba interop workflow |
 | `smolder-core` auth/session/transport | Samba interop workflow + Windows release gate |
-| `smolder-core` QUIC transport | `cargo test -p smolder-smb-core --features quic --lib` + Windows QUIC manual lane |
+| `smolder-core` QUIC transport | `cargo test -p smolder-smb-core --features quic --lib` + Windows QUIC manual lane, plus Samba QUIC when a Linux QUIC host is available |
 | `smolder-core` pipes/RPC | Samba interop workflow + Windows release gate |
 | `smolder-tools` file facade / CLI | Samba interop workflow + Windows release gate when Windows behavior could differ |
 | `smolder-tools` DFS | Samba interop workflow + Windows tools gate with DFS root configured |

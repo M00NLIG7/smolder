@@ -294,6 +294,8 @@ Runner bootstrap and secret setup are documented in
 For the full manual Tiny11 pass, including remote execution smoke checks, use
 [run-windows-release-gate.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-release-gate.sh)
 and [docs/testing/windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
+For Samba-side SMB over QUIC on a Linux host with kernel QUIC support, use
+[docs/testing/samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md).
 For merge/release policy, required gate selection, and failure triage, use
 [docs/testing/release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
 For the formal `0.2.x` support scope and guarantees behind those gates, use

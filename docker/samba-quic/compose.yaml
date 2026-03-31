@@ -1,0 +1,18 @@
+services:
+  samba-quic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: smolder-samba-quic
+    environment:
+      SERVER_NAME: files.lab.example
+      WORKGROUP: WORKGROUP
+      USERNAME: smolder
+      PASSWORD: smolderpass
+      SHARE_NAME: share
+    ports:
+      - "1445:445/tcp"
+      - "1443:443/udp"
+    volumes:
+      - ./share:/srv/share
+      - ./certs:/var/lib/samba/private/tls

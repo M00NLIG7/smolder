@@ -13,6 +13,8 @@ The standalone Samba RPC fixture is documented in
 [samba-rpc.md](/Users/cmagana/Projects/smolder/docs/testing/samba-rpc.md).
 The AD-backed Samba Kerberos fixture is documented in
 [samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md).
+The Linux-host-only Samba QUIC fixture is documented in
+[samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md).
 The Tiny11 / Windows release-style gate is documented in
 [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
 The Windows Kerberos member flow is documented in
@@ -97,6 +99,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Samba | encrypted `srvsvc` RPC call over `IPC$` | `samba_rpc_encryption.rs` |
+| `smolder-core` | Samba | manual QUIC tree connect and file roundtrip lane for a Linux host with `quic.ko` | `samba_quic.rs` via `run-samba-quic-interop.sh` |
 | `smolder-core` | Samba | typed `lsarpc` primary/account-domain queries against standalone `IPC$` with `rpcclient` preflight | `samba_lsarpc_interop.rs` via `run-samba-rpc-interop.sh` |
 | `smolder-core` | Samba | typed `samr` bind plus domain enumeration against standalone `samr` with `rpcclient` preflight | `samba_samr_standalone_interop.rs` via `run-samba-rpc-interop.sh` |
 | `smolder-tools` | Windows | durable reconnect helper | `windows_reconnect.rs` |
