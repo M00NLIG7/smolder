@@ -3,7 +3,7 @@ set -euo pipefail
 
 vm_name="${SMOLDER_WINDOWS_QUIC_VM:-SmolderServer2025}"
 iso_path="${SMOLDER_WINDOWS_QUIC_ISO:-${1:-}}"
-ostype="${SMOLDER_WINDOWS_QUIC_OSTYPE:-Windows2022_64}"
+ostype="${SMOLDER_WINDOWS_QUIC_OSTYPE:-Windows2025_64}"
 cpus="${SMOLDER_WINDOWS_QUIC_CPUS:-4}"
 memory_mb="${SMOLDER_WINDOWS_QUIC_MEMORY_MB:-8192}"
 disk_mb="${SMOLDER_WINDOWS_QUIC_DISK_MB:-131072}"
