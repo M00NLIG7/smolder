@@ -25,6 +25,9 @@ Microsoft reference:
 - <https://learn.microsoft.com/en-us/windows-server/storage/file-server/smb-over-quic>
 - <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/1dfacde4-b5c7-4494-8a14-a09d3ab4cc83>
 
+If you need to create a local Windows Server 2025 fixture from scratch, use
+[windows-quic-provisioning.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic-provisioning.md).
+
 ## Environment
 
 Required:
