@@ -29,8 +29,7 @@ const SAMR_QUERY_INFORMATION_USER_OPNUM: u16 = 36;
 const SAM_SERVER_CONNECT: u32 = 0x0000_0001;
 const SAM_SERVER_ENUMERATE_DOMAINS: u32 = 0x0000_0010;
 const SAM_SERVER_LOOKUP_DOMAIN: u32 = 0x0000_0020;
-const DOMAIN_LIST_ACCOUNTS: u32 = 0x0000_0100;
-const DOMAIN_LOOKUP: u32 = 0x0000_0200;
+const MAXIMUM_ALLOWED_ACCESS: u32 = 0x0200_0000;
 const USER_READ_GENERAL: u32 = 0x0000_0001;
 const USER_ACCOUNT_NAME_INFORMATION_CLASS: u32 = 7;
 
@@ -38,7 +37,7 @@ const USER_ACCOUNT_NAME_INFORMATION_CLASS: u32 = 7;
 pub const DEFAULT_SERVER_ACCESS: u32 =
     SAM_SERVER_CONNECT | SAM_SERVER_ENUMERATE_DOMAINS | SAM_SERVER_LOOKUP_DOMAIN;
 /// Default domain access mask used by the typed client.
-pub const DEFAULT_DOMAIN_ACCESS: u32 = DOMAIN_LIST_ACCOUNTS | DOMAIN_LOOKUP;
+pub const DEFAULT_DOMAIN_ACCESS: u32 = MAXIMUM_ALLOWED_ACCESS;
 
 /// Revision/capability info returned by `SamrConnect5`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,7 +538,7 @@ fn parse_lookup_domain_response(response: &[u8]) -> Result<SamrSid, CoreError> {
             "SamrLookupDomainInSamServer did not return a SID",
         ));
     }
-    let sid = reader.read_sid("DomainSid")?;
+    let sid = reader.read_lookup_domain_sid("DomainSid")?;
     let status = reader.read_u32("SamrLookupDomainInSamServerStatus")?;
     if status != 0 {
         return Err(CoreError::RemoteOperation {
@@ -558,6 +557,7 @@ fn encode_open_domain_request(
     let mut writer = NdrWriter::new();
     writer.write_bytes(&server_handle);
     writer.write_u32(desired_access);
+    writer.write_u32(domain_sid.sub_authorities.len() as u32);
     writer.write_sid(domain_sid);
     writer.into_bytes()
 }
@@ -637,6 +637,12 @@ fn parse_query_account_name_response(response: &[u8]) -> Result<SamrUserInfo, Co
     if buffer_referent == 0 {
         return Err(CoreError::InvalidResponse(
             "SamrQueryInformationUser did not return account-name data",
+        ));
+    }
+    let info_class = reader.read_u32("UserInformationClass")?;
+    if info_class != USER_ACCOUNT_NAME_INFORMATION_CLASS {
+        return Err(CoreError::InvalidResponse(
+            "SamrQueryInformationUser returned an unexpected information class",
         ));
     }
     let account_name = reader.read_rpc_unicode_string("AccountName")?;
@@ -907,11 +913,17 @@ impl<'a> NdrReader<'a> {
         }
         self.align(4, field)?;
         let max_count = self.read_u32(field)? as usize;
-        if max_count * 2 < length || maximum_length < length {
+        let offset = self.read_u32(field)? as usize;
+        let actual_count = self.read_u32(field)? as usize;
+        if offset != 0
+            || actual_count > max_count
+            || actual_count * 2 < length
+            || maximum_length < length
+        {
             return Err(CoreError::InvalidResponse(field));
         }
-        let mut code_units = Vec::with_capacity(max_count);
-        for _ in 0..max_count {
+        let mut code_units = Vec::with_capacity(actual_count);
+        for _ in 0..actual_count {
             code_units.push(self.read_u16(field)?);
         }
         self.align(4, field)?;
@@ -940,6 +952,15 @@ impl<'a> NdrReader<'a> {
             identifier_authority,
             sub_authorities,
         })
+    }
+
+    fn read_lookup_domain_sid(&mut self, field: &'static str) -> Result<SamrSid, CoreError> {
+        let sub_authority_count = self.read_u32(field)? as usize;
+        let sid = self.read_sid(field)?;
+        if sid.sub_authorities.len() != sub_authority_count {
+            return Err(CoreError::InvalidResponse(field));
+        }
+        Ok(sid)
     }
 }
 
@@ -973,10 +994,11 @@ impl NdrWriter {
         self.write_u32(1);
         self.align(4);
         self.write_u32(encoded.len() as u32);
+        self.write_u32(0);
+        self.write_u32(encoded.len() as u32);
         for code_unit in encoded {
             self.write_u16(code_unit);
         }
-        self.align(4);
     }
 
     fn write_sid(&mut self, sid: &SamrSid) {
@@ -1047,6 +1069,8 @@ mod tests {
             let referent = self.next_referent();
             self.write_u32(referent);
             self.align(4);
+            self.write_u32(encoded.len() as u32);
+            self.write_u32(0);
             self.write_u32(encoded.len() as u32);
             for code_unit in encoded {
                 self.write_u16(code_unit);
@@ -1243,8 +1267,9 @@ mod tests {
                 14_u16.to_le_bytes().to_vec(),
                 1_u32.to_le_bytes().to_vec(),
                 7_u32.to_le_bytes().to_vec(),
+                0_u32.to_le_bytes().to_vec(),
+                7_u32.to_le_bytes().to_vec(),
                 b"B\0u\0i\0l\0t\0i\0n\0".to_vec(),
-                0_u16.to_le_bytes().to_vec(),
             ]
             .concat()
         );
@@ -1254,6 +1279,7 @@ mod tests {
     fn lookup_domain_response_decodes_sid() {
         let response = [
             1_u32.to_le_bytes().to_vec(),
+            2_u32.to_le_bytes().to_vec(),
             vec![1, 2, 0, 0, 0, 0, 0, 5],
             32_u32.to_le_bytes().to_vec(),
             544_u32.to_le_bytes().to_vec(),
@@ -1283,6 +1309,7 @@ mod tests {
             [
                 [0x41; 20].to_vec(),
                 DEFAULT_DOMAIN_ACCESS.to_le_bytes().to_vec(),
+                2_u32.to_le_bytes().to_vec(),
                 vec![1, 2, 0, 0, 0, 0, 0, 5],
                 32_u32.to_le_bytes().to_vec(),
                 544_u32.to_le_bytes().to_vec(),
@@ -1389,6 +1416,7 @@ mod tests {
         let mut writer = ResponseWriter::new();
         let buffer_ref = writer.next_referent();
         writer.write_u32(buffer_ref);
+        writer.write_u32(USER_ACCOUNT_NAME_INFORMATION_CLASS);
         writer.write_rpc_unicode_string("Administrator");
         writer.write_u32(0);
 

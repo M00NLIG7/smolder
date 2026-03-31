@@ -148,7 +148,7 @@ Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 - GitHub Actions runs the Samba-backed subset through `scripts/run-interop.sh --samba --core --tools`.
 - GitHub Actions can also run the Windows gate through the self-hosted `interop-windows-self-hosted.yml` workflow when a runner labeled `smolder-windows-gate` is available.
 - Tiny11 / Windows still depends on the local VM fixture, local credentials, and the current VirtualBox port-forward setup.
-- The standalone Samba RPC fixture is local-only today and currently proves `lsarpc` open-policy/close plus `samr` bind/domain enumeration. Domain-open and user-query `SAMR` flows still need follow-up work.
+- The standalone Samba RPC fixture is local-only today and currently proves `lsarpc` open-policy/close plus the deeper standalone `samr` flow: bind, domain enumeration, `SamrOpenDomain`, user enumeration, `SamrOpenUser`, and `SamrQueryInformationUser` account-name lookup.
 
 ## Core Commands
 

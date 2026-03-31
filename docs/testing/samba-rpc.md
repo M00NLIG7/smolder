@@ -67,9 +67,7 @@ Today that test proves:
 - `\\PIPE\\samr` access against the standalone Samba fixture
 - typed `SamrClient` bind with the current `SamrConnect2` fallback path
 - `SamrEnumerateDomainsInSamServer` against the standalone server
-
-## Follow-Up Scope
-
-The remaining standalone `SAMR` gap is deeper domain-scoped work such as
-`SamrOpenDomain` and user enumeration/query flows. Those still need follow-up
-client work and are intentionally not claimed by this fixture yet.
+- `SamrOpenDomain` against the local server domain
+- `SamrEnumerateUsersInDomain` against the opened domain
+- `SamrOpenUser` for the fixture user
+- `SamrQueryInformationUser` account-name lookup for that user

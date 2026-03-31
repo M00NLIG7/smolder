@@ -25,6 +25,14 @@ and the versioning/MSRV rules are defined in
 - Extended the high-level `smolder-smb-core` facade with share/file operations,
   including `OpenOptions`, `File`, metadata queries, and a compile-checked
   `client_file_roundtrip` example.
+- Added deeper standalone Samba `SAMR` coverage to `smolder-smb-core`,
+  including domain open, user enumeration, user open, and account-name query
+  flows over `\\PIPE\\samr`.
+
+### Fixed
+
+- Fixed `SAMR` NDR encoding and decoding for lookup-domain, open-domain, and
+  account-name query paths against standalone Samba fixtures.
 
 ### Release Notes Flow
 

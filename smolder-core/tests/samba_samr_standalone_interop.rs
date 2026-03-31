@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use smolder_core::prelude::{Client, NtlmCredentials, SamrClient};
+use smolder_core::prelude::{Client, NtlmCredentials};
 use tokio::sync::Mutex;
 
 fn optional_env(name: &str) -> Option<String> {
@@ -52,7 +52,7 @@ fn samba_lock() -> &'static Mutex<()> {
 }
 
 #[tokio::test]
-async fn enumerates_standalone_samba_samr_domains_when_configured() {
+async fn enumerates_standalone_samba_samr_users_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaSamrStandaloneConfig::from_env() else {
         eprintln!("skipping live standalone Samba SAMR test: SMOLDER_SAMBA_HOST must be set");
@@ -93,8 +93,37 @@ async fn enumerates_standalone_samba_samr_domains_when_configured() {
             .any(|domain| !domain.name.eq_ignore_ascii_case("Builtin")),
         "standalone Samba SAMR enumeration should include the local server domain"
     );
+    let account_domain = domains
+        .iter()
+        .find(|domain| !domain.name.eq_ignore_ascii_case("Builtin"))
+        .expect("standalone Samba SAMR enumeration should include the local server domain")
+        .name
+        .clone();
+    let mut domain = samr
+        .open_domain(&account_domain)
+        .await
+        .expect("SamrOpenDomain should succeed for the local server domain");
+    let users = domain
+        .enumerate_users(0)
+        .await
+        .expect("SamrEnumerateUsersInDomain should succeed");
+    let fixture_user = users
+        .iter()
+        .find(|user| user.name.eq_ignore_ascii_case("smolder"))
+        .expect("standalone Samba SAMR enumeration should include the fixture user")
+        .clone();
+    let mut user = domain
+        .open_user(fixture_user.relative_id)
+        .await
+        .expect("SamrOpenUser should succeed for the fixture user");
+    let user_info = user
+        .query_account_name()
+        .await
+        .expect("SamrQueryInformationUser should return the account name");
+    assert_eq!(user_info.account_name, fixture_user.name);
+    let domain = user.close().await.expect("samr user close should succeed");
 
-    let connection = close_samr(samr)
+    let connection = close_domain(domain)
         .await
         .into_pipe()
         .close()
@@ -107,6 +136,8 @@ async fn enumerates_standalone_samba_samr_domains_when_configured() {
     connection.logoff().await.expect("logoff should succeed");
 }
 
-async fn close_samr(samr: SamrClient) -> smolder_core::rpc::PipeRpcClient {
-    samr.close().await.expect("server close should succeed")
+async fn close_domain(
+    domain: smolder_core::prelude::SamrDomainClient,
+) -> smolder_core::rpc::PipeRpcClient {
+    domain.close().await.expect("domain close should succeed")
 }
