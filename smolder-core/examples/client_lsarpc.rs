@@ -1,5 +1,5 @@
 use smolder_core::auth::NtlmCredentials;
-use smolder_core::prelude::Client;
+use smolder_core::prelude::{Client, LOOKUP_POLICY_ACCESS};
 
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     std::env::var(name)
@@ -22,6 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = required_env("SMOLDER_LSARPC_HOST")?;
     let username = required_env("SMOLDER_LSARPC_USERNAME")?;
     let password = required_env("SMOLDER_LSARPC_PASSWORD")?;
+    let lookup_name = username.clone();
     let port = optional_env("SMOLDER_LSARPC_PORT")
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(445);
@@ -38,12 +39,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_port(port)
         .with_ntlm_credentials(credentials)
         .build()?;
-    let mut lsarpc = client.connect_lsarpc().await?;
+    let mut lsarpc = client
+        .connect_lsarpc_with_access(LOOKUP_POLICY_ACCESS)
+        .await?;
 
     let account_domain = lsarpc.account_domain_info().await?;
     println!("account domain: {}", account_domain.name);
     if let Some(sid) = account_domain.sid {
         println!("account domain SID revision: {}", sid.revision);
+    }
+    let qualified_lookup_name = format!(r"{}\{}", account_domain.name, lookup_name);
+    if let Some(translated) = lsarpc.lookup_name(&qualified_lookup_name).await? {
+        println!("lookup use: {:?}", translated.sid_name_use);
+        if let Some(sid) = translated.sid {
+            println!("lookup SID revision: {}", sid.revision);
+        }
     }
 
     let primary_domain = lsarpc.primary_domain_info().await?;

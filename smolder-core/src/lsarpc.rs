@@ -18,18 +18,27 @@ const LSARPC_SYNTAX: SyntaxId = SyntaxId::new(
 );
 const LSARPC_CONTEXT_ID: u16 = 0;
 const LSAR_CLOSE_OPNUM: u16 = 0;
+const LSAR_LOOKUP_NAMES2_OPNUM: u16 = 58;
 const LSAR_QUERY_INFORMATION_POLICY_OPNUM: u16 = 7;
 const LSAR_OPEN_POLICY2_OPNUM: u16 = 44;
 const LSAR_QUERY_INFORMATION_POLICY2_OPNUM: u16 = 46;
+const LSAP_LOOKUP_WKSTA: u32 = 1;
+const LSAP_LOOKUP_CLIENT_REVISION_2: u32 = 2;
 const POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS: u32 = 6;
 const POLICY_DNS_DOMAIN_INFORMATION_CLASS: u32 = 12;
 const POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS: u32 = 3;
 const POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS: u32 = 5;
 const POLICY_VIEW_LOCAL_INFORMATION: u32 = 0x0000_0001;
+const POLICY_LOOKUP_NAMES: u32 = 0x0000_0800;
 const RPC_S_OP_RANGE_ERROR: u32 = 0x1c01_0002;
+const STATUS_SOME_NOT_MAPPED: u32 = 0x0000_0107;
+const STATUS_NONE_MAPPED: u32 = 0xc000_0073;
 
 /// Default policy access mask used by the typed LSARPC client.
 pub const DEFAULT_POLICY_ACCESS: u32 = POLICY_VIEW_LOCAL_INFORMATION;
+
+/// Policy access mask that supports the default policy queries plus name/SID translation.
+pub const LOOKUP_POLICY_ACCESS: u32 = DEFAULT_POLICY_ACCESS | POLICY_LOOKUP_NAMES;
 
 /// Minimal LSA SID representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +91,66 @@ pub struct LsaDnsDomainInfo {
     /// Optional domain GUID.
     pub domain_guid: Option<LsaGuid>,
     /// Optional domain SID.
+    pub sid: Option<LsaSid>,
+}
+
+/// `SID_NAME_USE` values returned by LSARPC lookup operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsaSidNameUse {
+    /// User account SID.
+    User,
+    /// Group SID.
+    Group,
+    /// Domain SID.
+    Domain,
+    /// Alias SID.
+    Alias,
+    /// Well-known group SID.
+    WellKnownGroup,
+    /// Deleted account SID.
+    DeletedAccount,
+    /// Invalid SID translation.
+    Invalid,
+    /// Unknown SID translation.
+    Unknown,
+    /// Computer account SID.
+    Computer,
+    /// Mandatory label SID.
+    Label,
+    /// An implementation-specific or newer SID name use.
+    Other(u32),
+}
+
+impl LsaSidNameUse {
+    fn from_raw(value: u32) -> Self {
+        match value {
+            1 => Self::User,
+            2 => Self::Group,
+            3 => Self::Domain,
+            4 => Self::Alias,
+            5 => Self::WellKnownGroup,
+            6 => Self::DeletedAccount,
+            7 => Self::Invalid,
+            8 => Self::Unknown,
+            9 => Self::Computer,
+            10 => Self::Label,
+            other => Self::Other(other),
+        }
+    }
+}
+
+/// Decoded result of a name-to-SID LSARPC translation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LsaTranslatedSid {
+    /// The translated name-use category.
+    pub sid_name_use: LsaSidNameUse,
+    /// The relative identifier returned by LSARPC, if any.
+    pub relative_id: Option<u32>,
+    /// Translation flags returned by the server.
+    pub flags: u32,
+    /// The referenced domain that owns the translated RID, if present.
+    pub domain: Option<LsaDomainInfo>,
+    /// The fully reconstructed SID when the response provided enough data.
     pub sid: Option<LsaSid>,
 }
 
@@ -194,6 +263,31 @@ where
         parse_server_role_response(&response)
     }
 
+    /// Looks up a single security principal name and returns its translated SID information.
+    ///
+    /// This operation requires a policy handle opened with [`LOOKUP_POLICY_ACCESS`]
+    /// or another access mask that includes `POLICY_LOOKUP_NAMES`.
+    pub async fn lookup_name(&mut self, name: &str) -> Result<Option<LsaTranslatedSid>, CoreError> {
+        let mut results = self.lookup_names(&[name]).await?;
+        Ok(results.pop())
+    }
+
+    /// Looks up a batch of security principal names and returns translated SID information.
+    ///
+    /// This operation requires a policy handle opened with [`LOOKUP_POLICY_ACCESS`]
+    /// or another access mask that includes `POLICY_LOOKUP_NAMES`.
+    pub async fn lookup_names(
+        &mut self,
+        names: &[impl AsRef<str>],
+    ) -> Result<Vec<LsaTranslatedSid>, CoreError> {
+        let request = encode_lookup_names_request(self.policy_handle, names)?;
+        let response = self
+            .rpc
+            .call(self.context_id, LSAR_LOOKUP_NAMES2_OPNUM, request)
+            .await?;
+        parse_lookup_names_response(&response)
+    }
+
     /// Closes the policy handle and returns the underlying RPC transport.
     pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
         let response = self
@@ -280,6 +374,66 @@ fn encode_query_policy_request(policy_handle: [u8; 20], info_class: u32) -> Vec<
     bytes.extend_from_slice(&policy_handle);
     bytes.extend_from_slice(&info_class.to_le_bytes());
     bytes
+}
+
+fn encode_lookup_names_request(
+    policy_handle: [u8; 20],
+    names: &[impl AsRef<str>],
+) -> Result<Vec<u8>, CoreError> {
+    if names.is_empty() || names.len() > 1000 {
+        return Err(CoreError::PathInvalid(
+            "LsarLookupNames2 requires between 1 and 1000 names",
+        ));
+    }
+
+    let encoded_names = names
+        .iter()
+        .map(|name| {
+            let name = name.as_ref();
+            if name.is_empty() || name.contains('\0') {
+                return Err(CoreError::PathInvalid(
+                    "LSARPC lookup names must be non-empty UTF-16 strings without NULs",
+                ));
+            }
+
+            let units = name.encode_utf16().collect::<Vec<_>>();
+            let length = units.len() * 2;
+            Ok((units, length))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&policy_handle);
+    bytes.extend_from_slice(&(encoded_names.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(encoded_names.len() as u32).to_le_bytes());
+
+    for (index, (_, length)) in encoded_names.iter().enumerate() {
+        bytes.extend_from_slice(&(*length as u16).to_le_bytes());
+        bytes.extend_from_slice(&(*length as u16).to_le_bytes());
+        bytes.extend_from_slice(&((index as u32) + 1).to_le_bytes());
+    }
+
+    for (units, _) in &encoded_names {
+        bytes.extend_from_slice(&(units.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&(units.len() as u32).to_le_bytes());
+        for unit in units {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+    }
+
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&LSAP_LOOKUP_WKSTA.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&LSAP_LOOKUP_CLIENT_REVISION_2.to_le_bytes());
+    Ok(bytes)
 }
 
 fn parse_primary_domain_info_response(response: &[u8]) -> Result<LsaDomainInfo, CoreError> {
@@ -419,6 +573,166 @@ fn parse_server_role_response(response: &[u8]) -> Result<LsaServerRole, CoreErro
     })
 }
 
+fn parse_lookup_names_response(response: &[u8]) -> Result<Vec<LsaTranslatedSid>, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let referenced_domains_referent = reader.read_u32("ReferencedDomains")?;
+    let referenced_domain_stubs = if referenced_domains_referent == 0 {
+        Vec::new()
+    } else {
+        parse_referenced_domain_headers(&mut reader)?
+    };
+    let referenced_domains = parse_referenced_domains(&mut reader, referenced_domain_stubs)?;
+
+    let entries = reader.read_u32("TranslatedSids.Entries")? as usize;
+    let sids_referent = reader.read_u32("TranslatedSids.Sids")?;
+    let translated_entries = if sids_referent == 0 {
+        if entries != 0 {
+            return Err(CoreError::InvalidResponse(
+                "LsarLookupNames omitted the translated SID buffer",
+            ));
+        }
+        Vec::new()
+    } else {
+        let max_count = reader.read_u32("TranslatedSids.MaxCount")? as usize;
+        if max_count < entries {
+            return Err(CoreError::InvalidResponse(
+                "LsarLookupNames translated SID count was smaller than entries",
+            ));
+        }
+
+        let mut translated = Vec::with_capacity(entries);
+        for _ in 0..entries {
+            translated.push((
+                LsaSidNameUse::from_raw(reader.read_u32("SidNameUse")?),
+                reader.read_u32("RelativeId")?,
+                reader.read_i32("DomainIndex")?,
+                reader.read_u32("Flags")?,
+            ));
+        }
+        translated
+    };
+
+    let _ = reader.read_u32("MappedCount")?;
+    let status = reader.read_u32("LsarLookupNamesStatus")?;
+    let translated = translated_entries
+        .into_iter()
+        .map(|(sid_name_use, relative_id, domain_index, flags)| {
+            build_translated_sid(
+                sid_name_use,
+                relative_id,
+                domain_index,
+                flags,
+                &referenced_domains,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match status {
+        0 | STATUS_SOME_NOT_MAPPED => Ok(translated),
+        STATUS_NONE_MAPPED => Ok(Vec::new()),
+        code => Err(CoreError::RemoteOperation {
+            operation: "LsarLookupNames2",
+            code,
+        }),
+    }
+}
+
+fn parse_referenced_domain_headers(
+    reader: &mut NdrReader<'_>,
+) -> Result<Vec<(UnicodeStringHeader, u32)>, CoreError> {
+    let entries = reader.read_u32("ReferencedDomains.Entries")? as usize;
+    let domains_referent = reader.read_u32("ReferencedDomains.Domains")?;
+    let _max_entries = reader.read_u32("ReferencedDomains.MaxEntries")? as usize;
+    if domains_referent == 0 {
+        if entries == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(CoreError::InvalidResponse(
+            "LsarLookupNames referenced domains omitted the domain buffer",
+        ));
+    }
+
+    let max_count = reader.read_u32("ReferencedDomains.MaxCount")? as usize;
+    if max_count < entries {
+        return Err(CoreError::InvalidResponse(
+            "LsarLookupNames referenced domain count was smaller than entries",
+        ));
+    }
+
+    (0..entries)
+        .map(|_| {
+            let name_header = reader.read_unicode_string_header("ReferencedDomainName")?;
+            let sid_referent = reader.read_u32("ReferencedDomainSid")?;
+            Ok((name_header, sid_referent))
+        })
+        .collect()
+}
+
+fn parse_referenced_domains(
+    reader: &mut NdrReader<'_>,
+    domains: Vec<(UnicodeStringHeader, u32)>,
+) -> Result<Vec<LsaDomainInfo>, CoreError> {
+    domains
+        .into_iter()
+        .map(|(name_header, sid_referent)| {
+            let name = reader.read_deferred_unicode_string(name_header, "ReferencedDomainName")?;
+            let sid = if sid_referent == 0 {
+                None
+            } else {
+                Some(reader.read_sid("ReferencedDomainSid")?)
+            };
+            Ok(LsaDomainInfo { name, sid })
+        })
+        .collect()
+}
+
+fn build_translated_sid(
+    sid_name_use: LsaSidNameUse,
+    relative_id: u32,
+    domain_index: i32,
+    flags: u32,
+    referenced_domains: &[LsaDomainInfo],
+) -> Result<LsaTranslatedSid, CoreError> {
+    let domain = if domain_index >= 0 {
+        Some(
+            referenced_domains
+                .get(domain_index as usize)
+                .cloned()
+                .ok_or(CoreError::InvalidResponse(
+                    "LsarLookupNames returned an out-of-range domain index",
+                ))?,
+        )
+    } else {
+        None
+    };
+
+    let sid = match (&sid_name_use, &domain) {
+        (LsaSidNameUse::Domain, Some(domain)) => domain.sid.clone(),
+        (_, Some(domain)) => domain
+            .sid
+            .as_ref()
+            .map(|sid| sid_with_rid(sid, relative_id)),
+        _ => None,
+    };
+
+    Ok(LsaTranslatedSid {
+        sid_name_use,
+        relative_id: Some(relative_id),
+        flags,
+        domain,
+        sid,
+    })
+}
+
+fn sid_with_rid(sid: &LsaSid, relative_id: u32) -> LsaSid {
+    let mut sub_authorities = sid.sub_authorities.clone();
+    sub_authorities.push(relative_id);
+    LsaSid {
+        revision: sid.revision,
+        identifier_authority: sid.identifier_authority,
+        sub_authorities,
+    }
+}
+
 fn encode_close_handle_request(handle: [u8; 20]) -> Vec<u8> {
     handle.to_vec()
 }
@@ -508,6 +822,10 @@ impl<'a> NdrReader<'a> {
         );
         self.offset += 4;
         Ok(value)
+    }
+
+    fn read_i32(&mut self, field: &'static str) -> Result<i32, CoreError> {
+        self.read_u32(field).map(|value| value as i32)
     }
 
     fn read_u16(&mut self, field: &'static str) -> Result<u16, CoreError> {
@@ -649,14 +967,16 @@ impl<'a> NdrReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_close_handle_request, encode_open_policy2_request, encode_query_policy_request,
+        DEFAULT_POLICY_ACCESS, LOOKUP_POLICY_ACCESS, LsaDnsDomainInfo, LsaDomainInfo, LsaGuid,
+        LsaServerRole, LsaSid, LsaSidNameUse, LsaTranslatedSid,
+        POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS, POLICY_DNS_DOMAIN_INFORMATION_CLASS,
+        POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS, POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS,
+        RPC_S_OP_RANGE_ERROR, STATUS_NONE_MAPPED, encode_close_handle_request,
+        encode_lookup_names_request, encode_open_policy2_request, encode_query_policy_request,
         parse_account_domain_info_response, parse_close_handle_response,
-        parse_dns_domain_info_response, parse_open_policy2_response,
+        parse_dns_domain_info_response, parse_lookup_names_response, parse_open_policy2_response,
         parse_primary_domain_info_response, parse_server_role_response,
-        should_retry_legacy_policy_query, LsaDnsDomainInfo, LsaDomainInfo, LsaGuid, LsaServerRole,
-        LsaSid, DEFAULT_POLICY_ACCESS, POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS,
-        POLICY_DNS_DOMAIN_INFORMATION_CLASS, POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS,
-        POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS, RPC_S_OP_RANGE_ERROR,
+        should_retry_legacy_policy_query,
     };
     use crate::error::CoreError;
 
@@ -826,7 +1146,9 @@ mod tests {
         let handle = parse_open_policy2_response(&response).expect("handle should decode");
         assert_eq!(
             handle,
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+            [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ]
         );
     }
 
@@ -836,6 +1158,40 @@ mod tests {
         assert_eq!(request.len(), 24);
         assert_eq!(&request[0..20], &[0x55; 20]);
         assert_eq!(&request[20..24], &12_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn lookup_names_request_encodes_handle_names_and_lookup_level() {
+        let request = encode_lookup_names_request([0x55; 20], &["Administrator"])
+            .expect("request should encode");
+        assert_eq!(&request[0..20], &[0x55; 20]);
+        assert_eq!(&request[20..24], &1_u32.to_le_bytes());
+        assert_eq!(&request[24..28], &1_u32.to_le_bytes());
+        assert_eq!(
+            &request[request.len() - 20..request.len() - 16],
+            &1_u32.to_le_bytes(),
+            "lookup level should be LSAP_LOOKUP_WKSTA"
+        );
+        assert_eq!(
+            &request[request.len() - 16..request.len() - 12],
+            &1_u32.to_le_bytes(),
+            "mapped count should include a non-null pointer referent"
+        );
+        assert_eq!(
+            &request[request.len() - 12..request.len() - 8],
+            &0_u32.to_le_bytes(),
+            "mapped count should start at zero"
+        );
+        assert_eq!(
+            &request[request.len() - 8..request.len() - 4],
+            &0_u32.to_le_bytes(),
+            "lookup options should default to zero"
+        );
+        assert_eq!(
+            &request[request.len() - 4..],
+            &2_u32.to_le_bytes(),
+            "client revision should default to revision 2"
+        );
     }
 
     #[test]
@@ -1014,6 +1370,71 @@ mod tests {
     }
 
     #[test]
+    fn parse_lookup_names_response_decodes_referenced_domain_and_sid() {
+        let domain_sid = LsaSid {
+            revision: 1,
+            identifier_authority: [0, 0, 0, 0, 0, 5],
+            sub_authorities: vec![21, 42],
+        };
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(1);
+        writer.write_u32(1);
+        let domains_ref = writer.take_referent();
+        writer.write_u32(domains_ref);
+        writer.write_u32(32);
+        writer.write_u32(1);
+        writer.write_varying_unicode_string_header("WORKGROUP");
+        writer.write_sid_pointer_with_conformant_count(Some(&domain_sid));
+
+        let mut response = writer.head;
+        response.extend_from_slice(&writer.deferred);
+        response.extend_from_slice(&1_u32.to_le_bytes());
+        response.extend_from_slice(&1_u32.to_le_bytes());
+        response.extend_from_slice(&1_u32.to_le_bytes());
+        response.extend_from_slice(&4_u32.to_le_bytes());
+        response.extend_from_slice(&544_u32.to_le_bytes());
+        response.extend_from_slice(&0_i32.to_le_bytes());
+        response.extend_from_slice(&0_u32.to_le_bytes());
+        response.extend_from_slice(&1_u32.to_le_bytes());
+        response.extend_from_slice(&0_u32.to_le_bytes());
+
+        assert_eq!(
+            parse_lookup_names_response(&response).expect("response should decode"),
+            vec![LsaTranslatedSid {
+                sid_name_use: LsaSidNameUse::Alias,
+                relative_id: Some(544),
+                flags: 0,
+                domain: Some(LsaDomainInfo {
+                    name: "WORKGROUP".to_owned(),
+                    sid: Some(domain_sid.clone()),
+                }),
+                sid: Some(LsaSid {
+                    revision: 1,
+                    identifier_authority: [0, 0, 0, 0, 0, 5],
+                    sub_authorities: vec![21, 42, 544],
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_lookup_names_response_accepts_none_mapped_status() {
+        let response = [
+            0_u32.to_le_bytes().as_slice(),
+            0_u32.to_le_bytes().as_slice(),
+            0_u32.to_le_bytes().as_slice(),
+            0_u32.to_le_bytes().as_slice(),
+            STATUS_NONE_MAPPED.to_le_bytes().as_slice(),
+        ]
+        .concat();
+        assert!(
+            parse_lookup_names_response(&response)
+                .expect("none-mapped should still decode")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn parse_server_role_response_decodes_primary_and_unknown_roles() {
         let primary_response = [
             1_u32.to_le_bytes().as_slice(),
@@ -1086,5 +1507,10 @@ mod tests {
                 code: 5,
             }
         ));
+    }
+
+    #[test]
+    fn lookup_policy_access_includes_query_and_lookup_bits() {
+        assert_eq!(LOOKUP_POLICY_ACCESS, DEFAULT_POLICY_ACCESS | 0x0000_0800);
     }
 }

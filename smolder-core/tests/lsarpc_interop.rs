@@ -1,6 +1,6 @@
 use smolder_core::auth::NtlmCredentials;
 use smolder_core::lsarpc::LsaServerRole;
-use smolder_core::prelude::{Client, CoreError, LsarpcClient, DEFAULT_POLICY_ACCESS};
+use smolder_core::prelude::{Client, CoreError, LOOKUP_POLICY_ACCESS, LsarpcClient};
 use smolder_proto::smb::status::NtStatus;
 
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
@@ -28,6 +28,7 @@ async fn queries_account_domain_info_when_configured() {
         eprintln!("skipping live LSARPC test: SMOLDER_WINDOWS_PASSWORD not set");
         return;
     };
+    let lookup_name = username.clone();
 
     let port = optional_env("SMOLDER_WINDOWS_PORT")
         .and_then(|value| value.parse::<u16>().ok())
@@ -46,7 +47,7 @@ async fn queries_account_domain_info_when_configured() {
         .build()
         .expect("client should build");
     let mut lsarpc = match client
-        .connect_lsarpc_with_access(DEFAULT_POLICY_ACCESS)
+        .connect_lsarpc_with_access(LOOKUP_POLICY_ACCESS)
         .await
     {
         Ok(lsarpc) => lsarpc,
@@ -61,7 +62,7 @@ async fn queries_account_domain_info_when_configured() {
     };
     assert_eq!(
         lsarpc.desired_access(),
-        DEFAULT_POLICY_ACCESS,
+        LOOKUP_POLICY_ACCESS,
         "typed Windows LSARPC client should retain its requested policy access"
     );
 
@@ -76,6 +77,24 @@ async fn queries_account_domain_info_when_configured() {
     assert!(
         account_domain.sid.is_some(),
         "account domain SID should be present"
+    );
+    let qualified_lookup_name = format!(r"{}\{}", account_domain.name, lookup_name);
+    let translated_account_domain = lsarpc
+        .lookup_name(&qualified_lookup_name)
+        .await
+        .expect("user lookup should succeed")
+        .expect("the configured Windows user should translate to a SID");
+    assert_eq!(
+        translated_account_domain
+            .domain
+            .as_ref()
+            .and_then(|domain| domain.sid.clone()),
+        account_domain.sid,
+        "LSARPC lookup should report the same account domain SID"
+    );
+    assert!(
+        translated_account_domain.sid.is_some(),
+        "LSARPC lookup should reconstruct a full user SID"
     );
 
     let primary_domain = lsarpc

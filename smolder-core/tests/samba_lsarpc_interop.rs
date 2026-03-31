@@ -1,12 +1,13 @@
 use std::sync::OnceLock;
 
 use smolder_core::lsarpc::LsaServerRole;
-use smolder_core::prelude::{Client, LsarpcClient, NtlmCredentials, DEFAULT_POLICY_ACCESS};
+use smolder_core::prelude::{Client, LOOKUP_POLICY_ACCESS, LsarpcClient, NtlmCredentials};
 use smolder_proto::smb::status::NtStatus;
 use tokio::sync::Mutex;
 
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
 const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
+const STATUS_INVALID_INFO_CLASS: u32 = 0xc000_0003;
 
 fn optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -63,6 +64,7 @@ async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
         return;
     };
 
+    let lookup_name = config.username.clone();
     let credentials = config.credentials();
     let client = Client::builder(config.host)
         .with_port(config.port)
@@ -70,12 +72,12 @@ async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
         .build()
         .expect("client builder should succeed");
     let mut lsarpc = client
-        .connect_lsarpc_with_access(DEFAULT_POLICY_ACCESS)
+        .connect_lsarpc_with_access(LOOKUP_POLICY_ACCESS)
         .await
         .expect("should bind and open lsarpc on Samba");
     assert_eq!(
         lsarpc.desired_access(),
-        DEFAULT_POLICY_ACCESS,
+        LOOKUP_POLICY_ACCESS,
         "typed Samba LSARPC client should retain its requested policy access"
     );
     let primary_domain = lsarpc
@@ -97,6 +99,26 @@ async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
     assert!(
         account_domain.sid.is_some(),
         "standalone Samba account domain information should include a SID"
+    );
+    let qualified_lookup_name = format!(r"{}\{}", account_domain.name, lookup_name);
+    let translated_account_domain = lsarpc
+        .lookup_name(&qualified_lookup_name)
+        .await
+        .expect("user lookup should succeed on standalone Samba")
+        .expect("the configured Samba user should translate to a SID");
+    assert_eq!(
+        translated_account_domain
+            .domain
+            .as_ref()
+            .and_then(|domain| domain.sid.clone()),
+        account_domain.sid,
+        "LSARPC lookup should report the same account domain SID: {:?}",
+        translated_account_domain
+    );
+    assert!(
+        translated_account_domain.sid.is_some(),
+        "LSARPC lookup should reconstruct a full user SID: {:?}",
+        translated_account_domain
     );
 
     let dns_domain = match lsarpc.dns_domain_info().await {
@@ -156,6 +178,7 @@ fn is_unsupported_policy_query_error(error: &smolder_core::prelude::CoreError) -
         error,
         smolder_core::prelude::CoreError::RemoteOperation { code, .. }
             if *code == STATUS_INVALID_PARAMETER
+                || *code == STATUS_INVALID_INFO_CLASS
                 || *code == STATUS_NOT_SUPPORTED
                 || *code == NtStatus::OBJECT_NAME_NOT_FOUND.0
     )
