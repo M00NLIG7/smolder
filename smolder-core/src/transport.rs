@@ -308,42 +308,32 @@ fn quic_connection_error_to_io(error: quinn::ConnectionError) -> std::io::Error 
 }
 
 #[cfg(feature = "quic")]
-fn quic_read_exact_error_to_io(error: quinn::ReadExactError) -> std::io::Error {
-    match error {
-        quinn::ReadExactError::FinishedEarly(_) => {
-            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, error.to_string())
-        }
-        quinn::ReadExactError::ReadError(error) => std::io::Error::from(error),
-    }
+fn quic_read_error_to_io(error: quinn::ReadError) -> std::io::Error {
+    std::io::Error::other(error.to_string())
 }
 
 #[cfg(feature = "quic")]
 #[async_trait]
-impl Transport for QuicTransport {
-    async fn send(&mut self, frame: &[u8]) -> std::io::Result<()> {
-        self.send.write_all(frame).await?;
+impl SmbTransport for QuicTransport {
+    async fn send_message(&mut self, message: &[u8]) -> std::io::Result<()> {
+        self.send.write_all(message).await?;
         self.send.flush().await?;
         Ok(())
     }
 
-    async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
-        let mut header = [0_u8; 4];
-        self.recv
-            .read_exact(&mut header)
+    async fn recv_message(&mut self) -> std::io::Result<Vec<u8>> {
+        let chunk = self
+            .recv
+            .read_chunk(usize::MAX, true)
             .await
-            .map_err(quic_read_exact_error_to_io)?;
-        let payload_len =
-            (usize::from(header[1]) << 16) | (usize::from(header[2]) << 8) | usize::from(header[3]);
-        let mut payload = vec![0; payload_len];
-        self.recv
-            .read_exact(&mut payload)
-            .await
-            .map_err(quic_read_exact_error_to_io)?;
-
-        let mut frame = Vec::with_capacity(header.len() + payload_len);
-        frame.extend_from_slice(&header);
-        frame.extend_from_slice(&payload);
-        Ok(frame)
+            .map_err(quic_read_error_to_io)?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "SMB over QUIC stream closed before a response arrived",
+                )
+            })?;
+        Ok(chunk.bytes.to_vec())
     }
 }
 

@@ -34,7 +34,7 @@ use crate::samr::SamrClient;
 use crate::srvsvc::SrvsvcClient;
 #[cfg(feature = "quic")]
 use crate::transport::QuicTransport;
-use crate::transport::{TokioTcpTransport, Transport, TransportProtocol, TransportTarget};
+use crate::transport::{SmbTransport, TokioTcpTransport, TransportProtocol, TransportTarget};
 const MAX_IO_CHUNK_SIZE: usize = u16::MAX as usize;
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
@@ -383,7 +383,7 @@ pub struct Session<T = TokioTcpTransport> {
 
 impl<T> Session<T>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     /// Returns the target SMB server for this session.
     #[must_use]
@@ -525,7 +525,7 @@ pub struct Share<T = TokioTcpTransport> {
 
 impl<T> Share<T>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     /// Returns the target SMB server for this tree connection.
     #[must_use]
@@ -1157,7 +1157,7 @@ pub struct File<T = TokioTcpTransport> {
 
 impl<T> File<T>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     /// Returns the file path relative to the connected share.
     #[must_use]

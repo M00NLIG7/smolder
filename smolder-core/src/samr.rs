@@ -191,7 +191,7 @@ impl<T> SamrUserClient<T> {
 
 impl<T> SamrClient<T>
 where
-    T: crate::transport::Transport + Send,
+    T: crate::transport::SmbTransport + Send,
 {
     /// Performs the default `samr` bind and `SamrConnect5`.
     pub async fn bind(mut rpc: PipeRpcClient<T>) -> Result<Self, CoreError> {
@@ -251,7 +251,10 @@ where
     }
 
     /// Opens a domain handle by name and consumes the server-scoped client.
-    pub async fn open_domain(mut self, domain_name: &str) -> Result<SamrDomainClient<T>, CoreError> {
+    pub async fn open_domain(
+        mut self,
+        domain_name: &str,
+    ) -> Result<SamrDomainClient<T>, CoreError> {
         let domain_sid = self.lookup_domain_sid(domain_name).await?;
         let response = self
             .rpc
@@ -289,7 +292,7 @@ where
 
 impl<T> SamrDomainClient<T>
 where
-    T: crate::transport::Transport + Send,
+    T: crate::transport::SmbTransport + Send,
 {
     /// Enumerates users in the currently-open domain.
     pub async fn enumerate_users(
@@ -362,7 +365,7 @@ where
 
 impl<T> SamrUserClient<T>
 where
-    T: crate::transport::Transport + Send,
+    T: crate::transport::SmbTransport + Send,
 {
     /// Queries `UserAccountNameInformation` for the current user handle.
     pub async fn query_account_name(&mut self) -> Result<SamrUserInfo, CoreError> {
@@ -371,10 +374,7 @@ where
             .call(
                 self.context_id,
                 SAMR_QUERY_INFORMATION_USER_OPNUM,
-                encode_query_user_request(
-                    self.user_handle,
-                    USER_ACCOUNT_NAME_INFORMATION_CLASS,
-                ),
+                encode_query_user_request(self.user_handle, USER_ACCOUNT_NAME_INFORMATION_CLASS),
             )
             .await?;
         parse_query_account_name_response(&response)
@@ -487,7 +487,9 @@ fn parse_connect2_response(response: &[u8]) -> Result<([u8; 20], SamrServerRevis
 fn parse_connect_response(response: &[u8]) -> Result<([u8; 20], SamrServerRevision), CoreError> {
     match parse_connect5_response(response) {
         Ok(parsed) => Ok(parsed),
-        Err(CoreError::InvalidResponse(_)) if response.len() >= 24 => parse_connect2_response(response),
+        Err(CoreError::InvalidResponse(_)) if response.len() >= 24 => {
+            parse_connect2_response(response)
+        }
         Err(error) => Err(error),
     }
 }
@@ -1027,11 +1029,11 @@ mod tests {
         encode_enumerate_domains_request, encode_enumerate_users_request,
         encode_lookup_domain_request, encode_open_domain_request, encode_open_user_request,
         encode_query_user_request, parse_close_handle_response, parse_connect2_response,
-        parse_connect5_response, parse_enumerate_domains_response,
-        parse_enumerate_users_response, parse_lookup_domain_response, parse_open_domain_response,
-        parse_open_user_response, parse_query_account_name_response, SamrDomain,
-        SamrServerRevision, SamrSid, SamrUser, SamrUserInfo, DEFAULT_DOMAIN_ACCESS,
-        DEFAULT_SERVER_ACCESS, USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
+        parse_connect5_response, parse_enumerate_domains_response, parse_enumerate_users_response,
+        parse_lookup_domain_response, parse_open_domain_response, parse_open_user_response,
+        parse_query_account_name_response, SamrDomain, SamrServerRevision, SamrSid, SamrUser,
+        SamrUserInfo, DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
+        USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
     };
     use crate::error::CoreError;
 
@@ -1175,8 +1177,12 @@ mod tests {
     fn enumerate_domains_request_encodes_handle_and_context() {
         assert_eq!(
             encode_enumerate_domains_request([0x42; 20], 7, u32::MAX),
-            [[0x42; 20].to_vec(), 7_u32.to_le_bytes().to_vec(), u32::MAX.to_le_bytes().to_vec()]
-                .concat()
+            [
+                [0x42; 20].to_vec(),
+                7_u32.to_le_bytes().to_vec(),
+                u32::MAX.to_le_bytes().to_vec()
+            ]
+            .concat()
         );
     }
 
@@ -1200,8 +1206,7 @@ mod tests {
         writer.write_u32(0);
 
         assert_eq!(
-            parse_enumerate_domains_response(&writer.into_bytes())
-                .expect("response should decode"),
+            parse_enumerate_domains_response(&writer.into_bytes()).expect("response should decode"),
             vec![
                 SamrDomain {
                     relative_id: 0,
@@ -1253,7 +1258,8 @@ mod tests {
     fn close_handle_response_checks_status() {
         let mut response = vec![0_u8; 24];
         response[20..24].copy_from_slice(&5_u32.to_le_bytes());
-        let error = parse_close_handle_response(&response).expect_err("non-zero status should fail");
+        let error =
+            parse_close_handle_response(&response).expect_err("non-zero status should fail");
         assert!(matches!(error, CoreError::RemoteOperation { .. }));
     }
 

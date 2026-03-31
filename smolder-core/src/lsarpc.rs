@@ -86,7 +86,7 @@ impl<T> LsarpcClient<T> {
 
 impl<T> LsarpcClient<T>
 where
-    T: crate::transport::Transport + Send,
+    T: crate::transport::SmbTransport + Send,
 {
     /// Performs the default `lsarpc` bind and `LsarOpenPolicy2`.
     pub async fn bind(mut rpc: PipeRpcClient<T>) -> Result<Self, CoreError> {
@@ -282,7 +282,9 @@ fn encode_close_handle_request(handle: [u8; 20]) -> Vec<u8> {
 
 fn parse_close_handle_response(response: &[u8]) -> Result<(), CoreError> {
     if response.len() < 24 {
-        return Err(CoreError::InvalidResponse("LsarClose response was too short"));
+        return Err(CoreError::InvalidResponse(
+            "LsarClose response was too short",
+        ));
     }
     let status = u32::from_le_bytes(response[20..24].try_into().expect("status slice"));
     if status != 0 {
@@ -558,7 +560,8 @@ mod tests {
                     self.deferred.push(sid.sub_authorities.len() as u8);
                     self.deferred.extend_from_slice(&sid.identifier_authority);
                     for sub_authority in &sid.sub_authorities {
-                        self.deferred.extend_from_slice(&sub_authority.to_le_bytes());
+                        self.deferred
+                            .extend_from_slice(&sub_authority.to_le_bytes());
                     }
                 }
                 None => self.write_u32(0),
@@ -577,7 +580,8 @@ mod tests {
                     self.deferred.push(sid.sub_authorities.len() as u8);
                     self.deferred.extend_from_slice(&sid.identifier_authority);
                     for sub_authority in &sid.sub_authorities {
-                        self.deferred.extend_from_slice(&sub_authority.to_le_bytes());
+                        self.deferred
+                            .extend_from_slice(&sub_authority.to_le_bytes());
                     }
                 }
                 None => self.write_u32(0),
@@ -763,11 +767,7 @@ mod tests {
 
     #[test]
     fn parse_close_handle_response_checks_status() {
-        let response = [
-            [0_u8; 20].as_slice(),
-            0_u32.to_le_bytes().as_slice(),
-        ]
-        .concat();
+        let response = [[0_u8; 20].as_slice(), 0_u32.to_le_bytes().as_slice()].concat();
         parse_close_handle_response(&response).expect("close should succeed");
     }
 
@@ -798,13 +798,17 @@ mod tests {
 
     #[test]
     fn op_range_rpc_fault_retries_with_legacy_policy_query() {
-        assert!(should_retry_legacy_policy_query(&CoreError::RemoteOperation {
-            operation: "rpc_fault",
-            code: RPC_S_OP_RANGE_ERROR,
-        }));
-        assert!(!should_retry_legacy_policy_query(&CoreError::RemoteOperation {
-            operation: "rpc_fault",
-            code: 5,
-        }));
+        assert!(should_retry_legacy_policy_query(
+            &CoreError::RemoteOperation {
+                operation: "rpc_fault",
+                code: RPC_S_OP_RANGE_ERROR,
+            }
+        ));
+        assert!(!should_retry_legacy_policy_query(
+            &CoreError::RemoteOperation {
+                operation: "rpc_fault",
+                code: 5,
+            }
+        ));
     }
 }

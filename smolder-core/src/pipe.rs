@@ -26,7 +26,7 @@ use crate::client::{Authenticated, Connection, TreeConnected};
 use crate::error::CoreError;
 #[cfg(feature = "quic")]
 use crate::transport::QuicTransport;
-use crate::transport::{TokioTcpTransport, Transport, TransportProtocol, TransportTarget};
+use crate::transport::{SmbTransport, TokioTcpTransport, TransportProtocol, TransportTarget};
 
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
@@ -322,7 +322,7 @@ impl NamedPipe<QuicTransport> {
 
 impl<T> NamedPipe<T>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     /// Connects using an already-created transport, tree-connects to the target share,
     /// and opens the requested named pipe.
@@ -679,7 +679,7 @@ fn is_named_pipe_broken_read(error: &CoreError) -> bool {
 
 impl<T> AsyncRead for NamedPipe<T>
 where
-    T: Transport + Send + 'static,
+    T: SmbTransport + Send + 'static,
 {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -750,7 +750,7 @@ where
 
 impl<T> AsyncWrite for NamedPipe<T>
 where
-    T: Transport + Send + 'static,
+    T: SmbTransport + Send + 'static,
 {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -893,7 +893,7 @@ pub async fn connect_session_with_transport<T>(
     config: &SmbSessionConfig,
 ) -> Result<Connection<T, Authenticated>, CoreError>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     let request = NegotiateRequest {
         security_mode: config.signing_mode,
@@ -961,7 +961,7 @@ pub async fn connect_tree_with_transport<T>(
     share: &str,
 ) -> Result<Connection<T, TreeConnected>, CoreError>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     let connection = connect_session_with_transport(transport, config).await?;
     let unc = format!(r"\\{}\{}", config.server(), normalize_share_name(share)?);

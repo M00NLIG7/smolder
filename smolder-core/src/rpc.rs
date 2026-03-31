@@ -67,7 +67,7 @@ impl<T> PipeRpcClient<T> {
 
 impl<T> PipeRpcClient<T>
 where
-    T: crate::transport::Transport + Send,
+    T: crate::transport::SmbTransport + Send,
 {
     /// Sends a bind PDU and returns the raw bind acknowledgement.
     pub async fn bind(

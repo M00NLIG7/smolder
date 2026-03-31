@@ -128,7 +128,7 @@ impl<T> SrvsvcClient<T> {
 
 impl<T> SrvsvcClient<T>
 where
-    T: crate::transport::Transport + Send,
+    T: crate::transport::SmbTransport + Send,
 {
     /// Performs the default `srvsvc` bind on a named-pipe RPC transport.
     pub async fn bind(mut rpc: PipeRpcClient<T>) -> Result<Self, CoreError> {
@@ -140,7 +140,11 @@ where
     pub async fn remote_tod(&mut self) -> Result<TimeOfDayInfo, CoreError> {
         let response = self
             .rpc
-            .call(self.context_id, NETR_REMOTE_TOD_OPNUM, encode_remote_tod_request())
+            .call(
+                self.context_id,
+                NETR_REMOTE_TOD_OPNUM,
+                encode_remote_tod_request(),
+            )
             .await?;
         parse_remote_tod_response(&response)
     }
@@ -584,8 +588,8 @@ mod tests {
         encode_remote_tod_request, encode_server_get_info_level101_request,
         encode_share_enum_level1_request, encode_share_get_info_level2_request,
         parse_remote_tod_response, parse_server_get_info_level101_response,
-        parse_share_enum_level1_response, parse_share_get_info_level2_response, ShareInfo1,
-        ShareInfo2, ServerInfo101, TimeOfDayInfo,
+        parse_share_enum_level1_response, parse_share_get_info_level2_response, ServerInfo101,
+        ShareInfo1, ShareInfo2, TimeOfDayInfo,
     };
     use crate::error::CoreError;
 
@@ -720,8 +724,7 @@ mod tests {
         writer.write_u32(0);
 
         assert_eq!(
-            parse_share_enum_level1_response(&writer.into_bytes())
-                .expect("response should decode"),
+            parse_share_enum_level1_response(&writer.into_bytes()).expect("response should decode"),
             vec![
                 ShareInfo1 {
                     name: "Docs".to_owned(),
