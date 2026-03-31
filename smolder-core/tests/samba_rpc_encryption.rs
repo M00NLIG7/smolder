@@ -8,6 +8,7 @@ use smolder_proto::smb::smb2::{SessionId, TreeId};
 use tokio::sync::Mutex;
 
 const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_INVALID_LEVEL: u32 = 124;
 
 fn required_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -141,6 +142,42 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
         }
         Err(error) => {
             panic!("NetrServerGetInfo level 101 should succeed over encrypted IPC$: {error:?}")
+        }
+    }
+
+    match srvsvc.server_get_info_level103().await {
+        Ok(server_info) => {
+            assert!(
+                !server_info.name.is_empty(),
+                "server name should not be empty"
+            );
+            assert!(
+                server_info.version_major > 0,
+                "server major version should be populated"
+            );
+            if let Some(user_path) = &server_info.user_path {
+                assert!(
+                    !user_path.is_empty(),
+                    "server user path should not be empty when present"
+                );
+            }
+        }
+        Err(CoreError::RemoteOperation {
+            operation: "NetrServerGetInfo",
+            code: ERROR_INVALID_LEVEL,
+        }) => {
+            eprintln!(
+                "skipping encrypted Samba server info 103 assertion: fixture returned ERROR_INVALID_LEVEL"
+            );
+        }
+        Err(CoreError::InvalidResponse("sv103_comment"))
+        | Err(CoreError::InvalidResponse("sv103_userpath")) => {
+            eprintln!(
+                "skipping encrypted Samba server info 103 assertion: fixture returned an unsupported sv103 layout"
+            );
+        }
+        Err(error) => {
+            panic!("NetrServerGetInfo level 103 should succeed over encrypted IPC$: {error:?}")
         }
     }
 

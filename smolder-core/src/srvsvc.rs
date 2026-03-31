@@ -91,6 +91,39 @@ pub struct ServerInfo101 {
     pub comment: Option<String>,
 }
 
+/// Decoded `SERVER_INFO_103` fields returned by `NetrServerGetInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerInfo103 {
+    /// Raw platform identifier.
+    pub platform_id: u32,
+    /// Server name returned by the endpoint.
+    pub name: String,
+    /// Server major version.
+    pub version_major: u32,
+    /// Server minor version.
+    pub version_minor: u32,
+    /// Raw server-type bitfield.
+    pub server_type: u32,
+    /// Optional server comment/description.
+    pub comment: Option<String>,
+    /// Maximum number of users supported by the server.
+    pub users: u32,
+    /// Automatic disconnect time in minutes.
+    pub disconnect_minutes: i32,
+    /// Whether the server is hidden from browser listings.
+    pub hidden: bool,
+    /// Browser announce interval in seconds.
+    pub announce: u32,
+    /// Browser announce delta in milliseconds.
+    pub announce_delta: u32,
+    /// Number of licenses currently reported by the server.
+    pub licenses: u32,
+    /// Optional user path returned by the server.
+    pub user_path: Option<String>,
+    /// Raw capability bitfield.
+    pub capabilities: u32,
+}
+
 /// Decoded `SESSION_INFO_10` entry returned by `NetrSessionEnum` level 10.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo10 {
@@ -217,6 +250,19 @@ where
             .await?;
         parse_server_get_info_level101_response(&response)
     }
+
+    /// Calls `NetrServerGetInfo` at information level 103.
+    pub async fn server_get_info_level103(&mut self) -> Result<ServerInfo103, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                NETR_SERVER_GET_INFO_OPNUM,
+                encode_server_get_info_level103_request(),
+            )
+            .await?;
+        parse_server_get_info_level103_response(&response)
+    }
 }
 
 fn encode_remote_tod_request() -> Vec<u8> {
@@ -267,6 +313,13 @@ fn encode_server_get_info_level101_request() -> Vec<u8> {
     let mut writer = NdrWriter::new();
     writer.write_u32(0);
     writer.write_u32(101);
+    writer.into_bytes()
+}
+
+fn encode_server_get_info_level103_request() -> Vec<u8> {
+    let mut writer = NdrWriter::new();
+    writer.write_u32(0);
+    writer.write_u32(103);
     writer.into_bytes()
 }
 
@@ -585,6 +638,80 @@ fn parse_server_get_info_level101_response(response: &[u8]) -> Result<ServerInfo
     })
 }
 
+fn parse_server_get_info_level103_response(response: &[u8]) -> Result<ServerInfo103, CoreError> {
+    if response.len() == 8 {
+        return Err(CoreError::RemoteOperation {
+            operation: "NetrServerGetInfo",
+            code: u32::from_le_bytes(response[4..8].try_into().expect("status slice")),
+        });
+    }
+    let mut reader = NdrReader::new(response);
+    let info_referent = reader.read_u32("ServerInfo103")?;
+    if info_referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "NetrServerGetInfo did not return a SERVER_INFO_103 buffer",
+        ));
+    }
+
+    let platform_id = reader.read_u32("sv103_platform_id")?;
+    let name_referent = reader.read_u32("sv103_name")?;
+    let version_major = reader.read_u32("sv103_version_major")?;
+    let version_minor = reader.read_u32("sv103_version_minor")?;
+    let server_type = reader.read_u32("sv103_type")?;
+    let comment_referent = reader.read_u32("sv103_comment")?;
+    let users = reader.read_u32("sv103_users")?;
+    let disconnect_minutes = reader.read_i32("sv103_disc")?;
+    let hidden = reader.read_u32("sv103_hidden")? != 0;
+    let announce = reader.read_u32("sv103_announce")?;
+    let announce_delta = reader.read_u32("sv103_anndelta")?;
+    let licenses = reader.read_u32("sv103_licenses")?;
+    let userpath_referent = reader.read_u32("sv103_userpath")?;
+    let capabilities = reader.read_u32("sv103_capabilities")?;
+
+    let name = if name_referent != 0 {
+        reader.read_wide_string("sv103_name")?
+    } else {
+        return Err(CoreError::InvalidResponse(
+            "NetrServerGetInfo did not return a server name",
+        ));
+    };
+    let comment = if comment_referent != 0 {
+        Some(reader.read_wide_string("sv103_comment")?)
+    } else {
+        None
+    };
+    let user_path = if userpath_referent != 0 {
+        Some(reader.read_wide_string("sv103_userpath")?)
+    } else {
+        None
+    };
+
+    let status = reader.read_u32("NetrServerGetInfoStatus")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "NetrServerGetInfo",
+            code: status,
+        });
+    }
+
+    Ok(ServerInfo103 {
+        platform_id,
+        name,
+        version_major,
+        version_minor,
+        server_type,
+        comment,
+        users,
+        disconnect_minutes,
+        hidden,
+        announce,
+        announce_delta,
+        licenses,
+        user_path,
+        capabilities,
+    })
+}
+
 #[derive(Debug)]
 struct ShareInfo1Stub {
     name_referent: u32,
@@ -654,6 +781,20 @@ impl<'a> NdrReader<'a> {
         Ok(value)
     }
 
+    fn read_i32(&mut self, field: &'static str) -> Result<i32, CoreError> {
+        self.align(4, field)?;
+        if self.remaining() < 4 {
+            return Err(CoreError::InvalidResponse(field));
+        }
+        let value = i32::from_le_bytes(
+            self.bytes[self.offset..self.offset + 4]
+                .try_into()
+                .expect("i32 slice should decode"),
+        );
+        self.offset += 4;
+        Ok(value)
+    }
+
     fn read_wide_string(&mut self, field: &'static str) -> Result<String, CoreError> {
         self.align(4, field)?;
         let max_count = self.read_u32(field)? as usize;
@@ -719,12 +860,14 @@ impl NdrWriter {
 mod tests {
     use super::{
         encode_remote_tod_request, encode_server_get_info_level101_request,
+        encode_server_get_info_level103_request,
         encode_session_enum_level10_request,
         encode_share_enum_level1_request, encode_share_get_info_level2_request,
         parse_remote_tod_response, parse_server_get_info_level101_response,
+        parse_server_get_info_level103_response,
         parse_session_enum_level10_response, parse_share_enum_level1_response,
         parse_share_get_info_level2_response, ServerInfo101, SessionInfo10, ShareInfo1,
-        ShareInfo2, TimeOfDayInfo,
+        ShareInfo2, ServerInfo103, TimeOfDayInfo,
     };
     use crate::error::CoreError;
 
@@ -746,6 +889,11 @@ mod tests {
         }
 
         fn write_u32(&mut self, value: u32) {
+            self.align(4);
+            self.bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        fn write_i32(&mut self, value: i32) {
             self.align(4);
             self.bytes.extend_from_slice(&value.to_le_bytes());
         }
@@ -1038,6 +1186,14 @@ mod tests {
     }
 
     #[test]
+    fn server_get_info_level103_request_uses_null_server_and_expected_level() {
+        assert_eq!(
+            encode_server_get_info_level103_request(),
+            [0_u32.to_le_bytes(), 103_u32.to_le_bytes()].concat()
+        );
+    }
+
+    #[test]
     fn parse_server_get_info_level101_response_decodes_entry() {
         let mut writer = ResponseWriter::new();
         let info_ref = writer.next_referent();
@@ -1064,6 +1220,55 @@ mod tests {
                 version_minor: 3,
                 server_type: 0x0000_0002,
                 comment: Some("Samba file server".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_server_get_info_level103_response_decodes_entry() {
+        let mut writer = ResponseWriter::new();
+        let info_ref = writer.next_referent();
+        let name_ref = writer.next_referent();
+        let comment_ref = writer.next_referent();
+        let userpath_ref = writer.next_referent();
+        writer.write_u32(info_ref);
+        writer.write_u32(501);
+        writer.write_u32(name_ref);
+        writer.write_u32(10);
+        writer.write_u32(0);
+        writer.write_u32(0x0000_0002);
+        writer.write_u32(comment_ref);
+        writer.write_u32(250);
+        writer.write_i32(-15);
+        writer.write_u32(1);
+        writer.write_u32(60);
+        writer.write_u32(5);
+        writer.write_u32(0);
+        writer.write_u32(userpath_ref);
+        writer.write_u32(0x0000_0003);
+        writer.write_wide_string("files1");
+        writer.write_wide_string("Samba file server");
+        writer.write_wide_string(r"C:\Users");
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_server_get_info_level103_response(&writer.into_bytes())
+                .expect("response should decode"),
+            ServerInfo103 {
+                platform_id: 501,
+                name: "files1".to_owned(),
+                version_major: 10,
+                version_minor: 0,
+                server_type: 0x0000_0002,
+                comment: Some("Samba file server".to_owned()),
+                users: 250,
+                disconnect_minutes: -15,
+                hidden: true,
+                announce: 60,
+                announce_delta: 5,
+                licenses: 0,
+                user_path: Some(r"C:\Users".to_owned()),
+                capabilities: 0x0000_0003,
             }
         );
     }

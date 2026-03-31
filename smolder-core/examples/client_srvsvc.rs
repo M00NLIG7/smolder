@@ -36,15 +36,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = client.connect().await?;
     let mut srvsvc = session.connect_srvsvc().await?;
 
-    let server = srvsvc.server_get_info_level101().await?;
+    let server = srvsvc.server_get_info_level103().await?;
     let shares = srvsvc.share_enum_level1().await?;
 
     println!(
-        "server={} version={}.{} shares={}",
+        "server={} version={}.{} shares={} capabilities=0x{:08x}",
         server.name,
         server.version_major,
         server.version_minor,
-        shares.len()
+        shares.len(),
+        server.capabilities
     );
 
     let connection = srvsvc.into_rpc().into_pipe().close().await?;
