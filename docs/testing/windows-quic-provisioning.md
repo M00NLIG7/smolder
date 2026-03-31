@@ -28,6 +28,14 @@ Evaluation Center offers a current ISO and VHD. Sources:
 - a Windows Server 2025 ISO already downloaded locally
 - enough disk for a new VM
 
+This specific VirtualBox flow assumes a host that can run the x64 Windows
+Server evaluation ISO directly. On this Apple Silicon / ARM host, VirtualBox
+cannot launch that guest. In that case, use:
+
+- an x86_64 host for the VirtualBox path, or
+- a different local emulation/virtualization stack that can run x64 Windows
+  Server on ARM, which is outside the scope of this repo automation
+
 This repo does not download the ISO for you. Microsoft currently requires
 registration for the evaluation media.
 

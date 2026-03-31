@@ -22,6 +22,13 @@ require_cmd() {
 
 require_cmd VBoxManage
 
+host_arch="$(uname -m)"
+if [[ "$host_arch" == "arm64" ]]; then
+  printf 'VirtualBox on this ARM host cannot run the x64 Windows Server evaluation ISO.\n' >&2
+  printf 'Use an x86_64 host, or provide a separate emulation/virtualization path outside this script.\n' >&2
+  exit 1
+fi
+
 if [[ -z "$iso_path" ]]; then
   printf 'usage: %s /path/to/windows-server-2025.iso\n' "${0##*/}" >&2
   printf 'or set SMOLDER_WINDOWS_QUIC_ISO\n' >&2
