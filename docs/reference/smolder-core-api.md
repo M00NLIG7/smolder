@@ -28,7 +28,7 @@ For most users, the supported starting surface is:
   integration is using
 - `smolder_core::dfs::{UncPath, DfsReferral, resolve_unc_path}`
 - `smolder_core::error::CoreError`
-- `smolder_core::transport::{Transport, TokioTcpTransport}`
+- `smolder_core::transport::{Transport, TokioTcpTransport, TransportProtocol, TransportTarget}`
 
 These are the APIs new examples, docs, and downstream integrations should
 prefer.
@@ -43,6 +43,8 @@ For the `0.3.x` line, the preferred split is:
   `QUERY_INFO` / `QUERY_DIRECTORY` / `SET_INFO` calls yourself
 - use `client::Connection` directly when you need full typestate control or are
   implementing new high-level flows inside Smolder itself
+- use `transport::TransportTarget` when you want the facade to remain the main
+  API while selecting Direct TCP, NetBIOS session service, or QUIC
 
 ## Public But Expert-Oriented
 

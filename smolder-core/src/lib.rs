@@ -46,6 +46,7 @@
 //! The fastest supported entry points are:
 //!
 //! - `cargo run -p smolder-smb-core --example client_session_connect`
+//! - `cargo run -p smolder-smb-core --example client_netbios_session_connect`
 //! - `cargo run -p smolder-smb-core --example client_share_list`
 //! - `cargo run -p smolder-smb-core --example client_file_roundtrip`
 //! - `cargo run -p smolder-smb-core --example ntlm_tree_connect`

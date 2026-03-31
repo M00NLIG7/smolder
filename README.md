@@ -18,6 +18,7 @@ For library-first usage, `smolder-smb-core` now ships compile-checked examples
 for:
 
 - high-level client session/share connect
+- high-level NetBIOS session/share connect
 - high-level share listing
 - high-level file roundtrip
 - typed `srvsvc` RPC
