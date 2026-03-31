@@ -66,7 +66,7 @@ async fn enumerates_standalone_samba_samr_users_when_configured() {
         .build()
         .expect("client builder should succeed");
 
-    let samr = client
+    let mut samr = client
         .connect()
         .await
         .expect("session connect should succeed")
@@ -141,7 +141,7 @@ async fn enumerates_standalone_samba_samr_users_when_configured() {
         .expect("tree disconnect should succeed");
     connection.logoff().await.expect("logoff should succeed");
 
-    let mut samr = client
+    let samr = client
         .connect()
         .await
         .expect("session connect should succeed")
