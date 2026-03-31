@@ -1,6 +1,7 @@
 //! Async transports used by the SMB client.
 
 use async_trait::async_trait;
+use smolder_proto::smb::netbios::SessionMessage;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
@@ -69,6 +70,9 @@ impl TransportTarget {
 }
 
 /// Abstracts framed SMB request and response transport.
+///
+/// This is the compatibility layer for transports that carry RFC1002 session
+/// messages, such as classic SMB over TCP on port `445`.
 #[async_trait]
 pub trait Transport {
     /// Writes a fully framed RFC1002 session message.
@@ -76,6 +80,41 @@ pub trait Transport {
 
     /// Reads a fully framed RFC1002 session message.
     async fn recv(&mut self) -> std::io::Result<Vec<u8>>;
+}
+
+/// Abstracts raw SMB message transport independent of RFC1002 framing.
+///
+/// Modern transports such as SMB over QUIC carry SMB messages directly rather
+/// than RFC1002 session frames. Existing framed transports automatically adapt
+/// through the blanket implementation below.
+#[async_trait]
+pub trait SmbTransport {
+    /// Writes a raw SMB message or transform payload.
+    async fn send_message(&mut self, message: &[u8]) -> std::io::Result<()>;
+
+    /// Reads a raw SMB message or transform payload.
+    async fn recv_message(&mut self) -> std::io::Result<Vec<u8>>;
+}
+
+#[async_trait]
+impl<T> SmbTransport for T
+where
+    T: Transport + Send,
+{
+    async fn send_message(&mut self, message: &[u8]) -> std::io::Result<()> {
+        let frame = SessionMessage::encode_payload(message).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        self.send(&frame).await
+    }
+
+    async fn recv_message(&mut self) -> std::io::Result<Vec<u8>> {
+        let frame = self.recv().await?;
+        let message = SessionMessage::decode(&frame).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        Ok(message.payload)
+    }
 }
 
 /// `tokio` TCP transport for SMB over port 445.

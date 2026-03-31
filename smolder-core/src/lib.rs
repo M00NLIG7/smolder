@@ -70,7 +70,8 @@
 //!   [`pipe::NamedPipe`] for `IPC$` and named-pipe transport
 //! - [`rpc::PipeRpcClient`] for reusable DCE/RPC over SMB named pipes
 //! - [`auth`] credential/authenticator types and [`error::CoreError`]
-//! - [`transport::Transport`] when embedding the client over a custom transport
+//! - [`transport::SmbTransport`] or [`transport::Transport`] when embedding the
+//!   client over a custom transport
 //!
 //! Lower-level signing, preauth, and raw crypto helpers remain available for
 //! expert users, but they are not the recommended starting surface. The repo's
@@ -137,7 +138,9 @@ pub mod prelude {
         DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
     };
     pub use crate::srvsvc::{ServerInfo101, ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};
-    pub use crate::transport::{TokioTcpTransport, Transport, TransportProtocol, TransportTarget};
+    pub use crate::transport::{
+        SmbTransport, TokioTcpTransport, Transport, TransportProtocol, TransportTarget,
+    };
 }
 
 pub mod transport;

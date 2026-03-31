@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256, Sha512};
 use smolder_proto::smb::compression::{
     CompressionCapabilityFlags, CompressionTransformHeader, COMPRESSION_TRANSFORM_PROTOCOL_ID,
 };
-use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
     AsyncId, ChangeNotifyRequest, ChangeNotifyResponse, CipherId, CloseRequest, CloseResponse,
     Command, CompressionCapabilities, CreateContext, CreateRequest, CreateResponse, Dialect,
@@ -37,7 +36,7 @@ use crate::auth::AuthProvider;
 use crate::compression::CompressionState;
 use crate::crypto::{derive_encryption_keys, EncryptionState};
 use crate::error::CoreError;
-use crate::transport::Transport;
+use crate::transport::SmbTransport;
 
 /// Connected to a transport but no SMB negotiation has been performed.
 #[derive(Debug, Clone, Copy, Default)]
@@ -598,7 +597,7 @@ impl<T, State> Connection<T, State> {
 
 impl<T> Connection<T, Connected>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     /// Performs `NEGOTIATE` and transitions into the negotiated state.
     pub async fn negotiate(
@@ -644,7 +643,7 @@ where
 
 impl<T> Connection<T, Negotiated>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     /// Performs a multi-step authenticated `SESSION_SETUP` exchange.
     pub async fn authenticate<A>(
@@ -858,7 +857,7 @@ where
 
 impl<T> Connection<T, Authenticated>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     /// Returns the active session identifier.
     #[must_use]
@@ -1003,7 +1002,7 @@ where
 
 impl<T> Connection<T, TreeConnected>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     /// Executes a raw compound request on the active tree.
     pub async fn compound_raw(
@@ -1359,7 +1358,7 @@ where
 
 impl<T, State> Connection<T, State>
 where
-    T: Transport + Send,
+    T: SmbTransport + Send,
 {
     async fn transact_compound_raw(
         &mut self,
@@ -1371,7 +1370,7 @@ where
             .iter()
             .flat_map(|packet| packet.iter().copied())
             .collect::<Vec<_>>();
-        let frame = encode_session_frame(&payload, &context)?;
+        let message = encode_transport_payload(&payload, &context)?;
         let first_command = requests[0].command;
         let last_command = requests[requests.len() - 1].command;
 
@@ -1382,7 +1381,7 @@ where
             "sending compound smb request"
         );
         self.transport
-            .send(&frame)
+            .send_message(&message)
             .instrument(trace_span!(
                 "smb_send_compound",
                 first_command = ?first_command,
@@ -1391,9 +1390,9 @@ where
             ))
             .await?;
 
-        let response_frame = self
+        let response_message = self
             .transport
-            .recv()
+            .recv_message()
             .instrument(trace_span!(
                 "smb_recv_compound",
                 first_command = ?first_command,
@@ -1402,7 +1401,7 @@ where
             ))
             .await?;
         let (response_payload, encrypted_response) =
-            decode_session_payload(&response_frame, &context)?;
+            decode_transport_payload(&response_message, &context)?;
         let response_packets = split_compound_packets(&response_payload)?;
         if response_packets.len() != requests.len() {
             return Err(CoreError::InvalidResponse(
@@ -1531,24 +1530,24 @@ where
         {
             signing.sign_packet(&mut packet)?;
         }
-        let frame = encode_session_frame(&packet, &context)?;
+        let message = encode_transport_payload(&packet, &context)?;
         self.commit_message_ids(1)?;
 
         trace!(?command, message_id = message_id.0, "sending smb request");
         self.transport
-            .send(&frame)
+            .send_message(&message)
             .instrument(trace_span!("smb_send", ?command, message_id = message_id.0))
             .await?;
 
         let mut pending_async_id = None;
         loop {
-            let response_frame = self
+            let response_message = self
                 .transport
-                .recv()
+                .recv_message()
                 .instrument(trace_span!("smb_recv", ?command, message_id = message_id.0))
                 .await?;
             let (response_payload, encrypted_response) =
-                decode_session_payload(&response_frame, &context)?;
+                decode_transport_payload(&response_message, &context)?;
             if response_payload.len() < Header::LEN {
                 return Err(CoreError::InvalidResponse(
                     "response shorter than SMB2 header",
@@ -1799,7 +1798,10 @@ fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreError> {
     Ok(packets)
 }
 
-fn encode_session_frame(payload: &[u8], context: &RequestContext) -> Result<Vec<u8>, CoreError> {
+fn encode_transport_payload(
+    payload: &[u8],
+    context: &RequestContext,
+) -> Result<Vec<u8>, CoreError> {
     let session_payload = if context.compress_outbound {
         context
             .compression
@@ -1824,22 +1826,21 @@ fn encode_session_frame(payload: &[u8], context: &RequestContext) -> Result<Vec<
     } else {
         session_payload
     };
-    SessionMessage::encode_payload(&session_payload).map_err(CoreError::from)
+    Ok(session_payload)
 }
 
-fn decode_session_payload(
-    frame: &[u8],
+fn decode_transport_payload(
+    payload: &[u8],
     context: &RequestContext,
 ) -> Result<(Vec<u8>, bool), CoreError> {
-    let frame = SessionMessage::decode(frame)?;
-    if frame.payload.starts_with(&TRANSFORM_PROTOCOL_ID) {
+    if payload.starts_with(&TRANSFORM_PROTOCOL_ID) {
         let encryption = context
             .encryption
             .as_deref()
             .ok_or(CoreError::InvalidResponse(
                 "received encrypted SMB response but no encryption state is available",
             ))?;
-        let transform = TransformHeader::decode(&frame.payload)?;
+        let transform = TransformHeader::decode(payload)?;
         if transform.session_id != context.session_id.0 {
             return Err(CoreError::InvalidResponse(
                 "encrypted SMB response session id did not match the active session",
@@ -1858,7 +1859,7 @@ fn decode_session_payload(
         }
         return Ok((decrypted, true));
     }
-    if frame.payload.starts_with(&COMPRESSION_TRANSFORM_PROTOCOL_ID) {
+    if payload.starts_with(&COMPRESSION_TRANSFORM_PROTOCOL_ID) {
         if context.should_encrypt() {
             return Err(CoreError::InvalidResponse(
                 "session required encryption but the SMB response was only compressed",
@@ -1870,7 +1871,7 @@ fn decode_session_payload(
             .ok_or(CoreError::InvalidResponse(
                 "received compressed SMB response but no compression state is available",
             ))?;
-        let transform = CompressionTransformHeader::decode(&frame.payload)?;
+        let transform = CompressionTransformHeader::decode(payload)?;
         return Ok((compression.decompress_message(&transform)?, false));
     }
     if context.should_encrypt() {
@@ -1878,7 +1879,7 @@ fn decode_session_payload(
             "session required encryption but the SMB response was not encrypted",
         ));
     }
-    Ok((frame.payload, false))
+    Ok((payload.to_vec(), false))
 }
 
 fn durable_create_request(
