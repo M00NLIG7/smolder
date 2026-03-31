@@ -206,6 +206,10 @@ impl Transport for TokioTcpTransport {
 }
 
 /// `quinn` QUIC transport for SMB over QUIC.
+///
+/// SMB over QUIC still carries the same 1-byte zero + 3-byte length message
+/// framing used by Direct TCP; only the underlying transport changes from TCP
+/// to QUIC.
 #[cfg(feature = "quic")]
 pub struct QuicTransport {
     _endpoint: Endpoint,
@@ -313,27 +317,43 @@ fn quic_read_error_to_io(error: quinn::ReadError) -> std::io::Error {
 }
 
 #[cfg(feature = "quic")]
+fn quic_read_exact_error_to_io(error: quinn::ReadExactError) -> std::io::Error {
+    match error {
+        quinn::ReadExactError::FinishedEarly(bytes_read) => std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("SMB over QUIC stream finished early after {bytes_read} bytes"),
+        ),
+        quinn::ReadExactError::ReadError(error) => quic_read_error_to_io(error),
+    }
+}
+
+#[cfg(feature = "quic")]
 #[async_trait]
-impl SmbTransport for QuicTransport {
-    async fn send_message(&mut self, message: &[u8]) -> std::io::Result<()> {
-        self.send.write_all(message).await?;
+impl Transport for QuicTransport {
+    async fn send(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        self.send.write_all(frame).await?;
         self.send.flush().await?;
         Ok(())
     }
 
-    async fn recv_message(&mut self) -> std::io::Result<Vec<u8>> {
-        let chunk = self
-            .recv
-            .read_chunk(usize::MAX, true)
+    async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
+        let mut header = [0_u8; 4];
+        self.recv
+            .read_exact(&mut header)
             .await
-            .map_err(quic_read_error_to_io)?
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "SMB over QUIC stream closed before a response arrived",
-                )
-            })?;
-        Ok(chunk.bytes.to_vec())
+            .map_err(quic_read_exact_error_to_io)?;
+        let payload_len =
+            (usize::from(header[1]) << 16) | (usize::from(header[2]) << 8) | usize::from(header[3]);
+        let mut payload = vec![0; payload_len];
+        self.recv
+            .read_exact(&mut payload)
+            .await
+            .map_err(quic_read_exact_error_to_io)?;
+
+        let mut frame = Vec::with_capacity(header.len() + payload_len);
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(&payload);
+        Ok(frame)
     }
 }
 
