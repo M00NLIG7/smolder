@@ -8,6 +8,10 @@ remains `smolder_tools`.
 It includes SMB file workflows, DFS-aware path handling, reconnect helpers,
 `smbexec`, and `psexec`.
 
+Its session-building path now rides on the `smolder-smb-core` client facade
+instead of reimplementing SMB negotiate/auth setup separately, so the published
+CLI and high-level library surfaces stay aligned with the core crate.
+
 Real-project readiness:
 
 - intended for direct CLI and high-level library use within the documented

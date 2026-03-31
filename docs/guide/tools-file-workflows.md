@@ -5,17 +5,17 @@ protocol orchestration.
 
 The intended entry points are:
 
-- [`SmbClientBuilder`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [`SmbClient`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [`Share`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [`RemoteFile`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [`ShareReconnectPlan`](/Users/cmagana/Projects/smolder/smolder-tools/src/reconnect.rs)
+- [`SmbClientBuilder`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [`SmbClient`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [`Share`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [`RemoteFile`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [`ShareReconnectPlan`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/reconnect.rs)
 
 ## Minimal File Roundtrip
 
 The shipped compile-checked version of this flow is:
 
-- [smolder-tools/examples/file_roundtrip.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/file_roundtrip.rs)
+- [smolder-tools/examples/file_roundtrip.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/examples/file_roundtrip.rs)
 
 ```rust
 use smolder_tools::prelude::SmbClientBuilder;
@@ -41,9 +41,9 @@ file.close().await?;
 
 Use the tools layer when you need:
 
-- DFS-aware path resolution with [`connect_share_path`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- higher-level share path fallback with [`share_path_auto`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- reconnect orchestration with [`ShareReconnectPlan`](/Users/cmagana/Projects/smolder/smolder-tools/src/reconnect.rs)
+- DFS-aware path resolution with [`connect_share_path`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- higher-level share path fallback with [`share_path_auto`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- reconnect orchestration with [`ShareReconnectPlan`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/reconnect.rs)
 
 That is the main difference from `smolder-smb-core`: the core crate gives you
 the reusable primitives, while `smolder` gives you the ergonomic workflow.
@@ -55,5 +55,5 @@ explicitly.
 
 That policy lives in:
 
-- [`smolder-tools/src/fs/implementation.rs`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+- [`smolder-tools/src/fs/implementation.rs`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)

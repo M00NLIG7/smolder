@@ -3,10 +3,10 @@
 This guide is the practical entry point for Smolder examples.
 
 For task-oriented usage notes beyond the shipped example files, use the
-[cookbook](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md).
+[cookbook](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/cookbook.md).
 
 For a tiny standalone binary crate instead of an example target, use
-[demos/smolder-core-demo](/Users/cmagana/Projects/smolder/demos/smolder-core-demo).
+[demos/smolder-core-demo](https://github.com/M00NLIG7/smolder/tree/main/demos/smolder-core-demo).
 
 It focuses on examples that are:
 
@@ -15,16 +15,16 @@ It focuses on examples that are:
 - backed by real interop where possible
 
 The support contract for these examples lives in
-[support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
+[support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
 
 ## Core Library Examples
 
 `smolder-smb-core` currently ships these compile-checked examples:
 
-- [core_file_roundtrip.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/core_file_roundtrip.rs)
-- [ntlm_tree_connect.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/ntlm_tree_connect.rs)
-- [named_pipe_rpc_bind.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/named_pipe_rpc_bind.rs)
-- [kerberos_tree_connect.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/kerberos_tree_connect.rs)
+- [core_file_roundtrip.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/core_file_roundtrip.rs)
+- [ntlm_tree_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/ntlm_tree_connect.rs)
+- [named_pipe_rpc_bind.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/named_pipe_rpc_bind.rs)
+- [kerberos_tree_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/kerberos_tree_connect.rs)
 
 Build them with:
 
@@ -67,7 +67,7 @@ cargo run -p smolder-smb-core --example core_file_roundtrip
 For a minimal copy-and-adapt binary crate built directly on
 `smolder-smb-core`, use:
 
-- [demos/smolder-core-demo](/Users/cmagana/Projects/smolder/demos/smolder-core-demo)
+- [demos/smolder-core-demo](https://github.com/M00NLIG7/smolder/tree/main/demos/smolder-core-demo)
 
 Build it:
 
@@ -85,9 +85,9 @@ cargo run -p smolder-core-demo
 
 `smolder` now ships these compile-checked examples:
 
-- [file_roundtrip.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/file_roundtrip.rs)
-- [interactive_psexec.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/interactive_psexec.rs)
-- [kerberos_share_list.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/kerberos_share_list.rs) with `--features kerberos`
+- [file_roundtrip.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/examples/file_roundtrip.rs)
+- [interactive_psexec.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/examples/interactive_psexec.rs)
+- [kerberos_share_list.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/examples/kerberos_share_list.rs) with `--features kerberos`
 
 Build them with:
 
@@ -105,11 +105,11 @@ cargo build -p smolder --example file_roundtrip
 
 This example shows the intended high-level SMB file workflow surface:
 
-- [`SmbClientBuilder`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [`Share::write`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [`Share::read`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [`Share::remove`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
-- [`Share::disconnect`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
+- [`SmbClientBuilder`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [`Share::write`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [`Share::read`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [`Share::remove`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
+- [`Share::disconnect`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
 
 Required environment:
 
@@ -138,9 +138,9 @@ cargo run -p smolder --example file_roundtrip
 This feature-gated example shows the high-level Kerberos builder path for
 `smolder`:
 
-- [`KerberosCredentials`](/Users/cmagana/Projects/smolder/smolder-core/src/auth/kerberos.rs)
-- [`KerberosTarget`](/Users/cmagana/Projects/smolder/smolder-core/src/auth/kerberos_spn.rs)
-- [`SmbClientBuilder::kerberos`](/Users/cmagana/Projects/smolder/smolder-tools/src/fs/implementation.rs)
+- [`KerberosCredentials`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/auth/kerberos.rs)
+- [`KerberosTarget`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/auth/kerberos_spn.rs)
+- [`SmbClientBuilder::kerberos`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/src/fs/implementation.rs)
 
 Build it explicitly:
 
@@ -253,5 +253,5 @@ target/debug/smolder psexec smb://127.0.0.1 \
   terminal-emulator replacement with polished nested-shell parity.
 - The no-helper `psexec` fallback remains the default one-shot execution path.
 - For repeatable validation, prefer the documented Windows gates in
-  [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md) and
-  [windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
+  [windows.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows.md) and
+  [windows-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-kerberos.md).

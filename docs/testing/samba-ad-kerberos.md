@@ -2,7 +2,7 @@
 
 This document describes the local fixture Smolder now uses for its Kerberos
 track: a Docker Compose topology that provides a real AD-backed SMB target for
-[kerberos_interop.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/kerberos_interop.rs).
+[kerberos_interop.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/tests/kerberos_interop.rs).
 
 The immediate goal is not "generic LDAP lab". The current goals are narrower:
 
@@ -18,7 +18,7 @@ used by the Tiny11 Windows member flow before the feature is wired into
 
 ## Why A Separate Fixture
 
-The current [docker/samba/compose.yaml](/Users/cmagana/Projects/smolder/docker/samba/compose.yaml)
+The current [docker/samba/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/compose.yaml)
 stack is a WORKGROUP-style Samba fixture. It is excellent for SMB2/3, signing,
 encryption, pipes, and RPC, but it is not an AD realm and therefore cannot
 exercise:
@@ -203,7 +203,7 @@ cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --
 cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect
 ```
 
-The repo harness at [scripts/run-kerberos-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-kerberos-interop.sh)
+The repo harness at [scripts/run-kerberos-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-kerberos-interop.sh)
 now drives two live gates:
 
 1. host-side password-backed Kerberos against `files1.lab.example:2445`

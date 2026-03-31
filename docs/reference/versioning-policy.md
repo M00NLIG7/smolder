@@ -9,7 +9,7 @@ workspace crates:
 - `smolder-psexecsvc`
 
 It is the release-discipline companion to
-[support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
+[support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
 
 ## Current MSRV
 
@@ -88,7 +88,7 @@ For the published `0.2.x` line, treat these as breaking even before `1.0`:
 - raising the MSRV
 - changing CLI behavior in a way that breaks documented workflows
 - narrowing the supported target/auth/encryption matrix from
-  [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+  [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)
 
 ## Feature-Flag Policy
 
@@ -106,11 +106,11 @@ new APIs rather than churn on the existing stable path.
 Before release:
 
 - the required gates from
-  [release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md) must be
+  [release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md) must be
   green
 - if the release changes compatibility, update:
   - this file
-  - [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+  - [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)
   - release notes / changelog
 
 ## Practical Rule

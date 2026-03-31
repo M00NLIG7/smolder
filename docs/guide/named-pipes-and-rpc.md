@@ -5,10 +5,10 @@ Smolder treats `IPC$` and named pipes as first-class library primitives in
 
 The intended entry points are:
 
-- [`connect_tree`](/Users/cmagana/Projects/smolder/smolder-core/src/pipe.rs)
-- [`NamedPipe`](/Users/cmagana/Projects/smolder/smolder-core/src/pipe.rs)
-- [`PipeAccess`](/Users/cmagana/Projects/smolder/smolder-core/src/pipe.rs)
-- [`PipeRpcClient`](/Users/cmagana/Projects/smolder/smolder-core/src/rpc.rs)
+- [`connect_tree`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/pipe.rs)
+- [`NamedPipe`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/pipe.rs)
+- [`PipeAccess`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/pipe.rs)
+- [`PipeRpcClient`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/rpc.rs)
 
 ## Minimal Pipe RPC Bind
 
@@ -48,11 +48,11 @@ let _ = connection.logoff().await?;
 ```
 
 For a shipped example, see
-[named_pipe_rpc_bind.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/named_pipe_rpc_bind.rs).
+[named_pipe_rpc_bind.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/named_pipe_rpc_bind.rs).
 
 ## Stream Traits
 
-[`NamedPipe`](/Users/cmagana/Projects/smolder/smolder-core/src/pipe.rs) also
+[`NamedPipe`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/pipe.rs) also
 implements `tokio::io::AsyncRead` and `AsyncWrite`.
 
 That means you can:
@@ -63,6 +63,6 @@ That means you can:
 
 ## Related APIs
 
-- [`pipe.rs`](/Users/cmagana/Projects/smolder/smolder-core/src/pipe.rs)
-- [`rpc.rs`](/Users/cmagana/Projects/smolder/smolder-core/src/rpc.rs)
-- [`smolder-proto/src/rpc/mod.rs`](/Users/cmagana/Projects/smolder/smolder-proto/src/rpc/mod.rs)
+- [`pipe.rs`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/pipe.rs)
+- [`rpc.rs`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/rpc.rs)
+- [`smolder-proto/src/rpc/mod.rs`](https://github.com/M00NLIG7/smolder/blob/main/smolder-proto/src/rpc/mod.rs)

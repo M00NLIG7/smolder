@@ -1,7 +1,7 @@
 # Windows Server QUIC Provisioning
 
 This is the practical fixture setup for the live SMB over QUIC lane in
-[windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md).
+[windows-quic.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-quic.md).
 
 Use it when you want a local VirtualBox target instead of a preexisting Windows
 Server deployment.
@@ -75,7 +75,7 @@ Install Windows Server 2025 with Desktop Experience.
 ## Guest Setup
 
 Once the OS is installed, copy
-[configure-windows-quic-server.ps1](/Users/cmagana/Projects/smolder/scripts/configure-windows-quic-server.ps1)
+[configure-windows-quic-server.ps1](https://github.com/M00NLIG7/smolder/blob/main/scripts/configure-windows-quic-server.ps1)
 into the guest and run it from an elevated PowerShell session:
 
 ```powershell

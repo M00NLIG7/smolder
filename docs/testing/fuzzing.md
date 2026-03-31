@@ -7,7 +7,7 @@ The goal of this layer is narrow:
 - hit decode-heavy packet surfaces with libFuzzer
 - keep the harness separate from the main workspace
 - complement, not replace, the property tests in
-  [property_codecs.rs](/Users/cmagana/Projects/smolder/smolder-proto/tests/property_codecs.rs)
+  [property_codecs.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-proto/tests/property_codecs.rs)
 
 ## Install
 
@@ -17,7 +17,7 @@ cargo install cargo-fuzz
 
 ## Targets
 
-The fuzz workspace lives in [fuzz/Cargo.toml](/Users/cmagana/Projects/smolder/fuzz/Cargo.toml).
+The fuzz workspace lives in [fuzz/Cargo.toml](https://github.com/M00NLIG7/smolder/blob/main/fuzz/Cargo.toml).
 
 Current targets:
 

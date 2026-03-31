@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["M00NLIG7"]
-description = "SMB/RPC protocol, transport, and session primitives for Smolder"
+description = "Typed SMB2/3 and RPC client primitives with auth, compression, QUIC, and RPC support"
 repository = "https://github.com/M00NLIG7/smolder"
 documentation = "https://docs.rs/smolder-smb-core"
 license = "MIT"
@@ -18,7 +18,7 @@ path = "src/lib.rs"
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["kerberos"]
+features = ["kerberos", "quic"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [[example]]

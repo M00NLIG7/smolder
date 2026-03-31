@@ -19,7 +19,7 @@ It exists to answer a different question than the AD-backed fixture:
 - Container: `smolder-samba`
 
 The fixture is backed by
-[compose.yaml](/Users/cmagana/Projects/smolder/docker/samba/compose.yaml).
+[compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/compose.yaml).
 
 ## Preflight
 
@@ -50,7 +50,7 @@ That command:
 
 The current Rust-side gate is:
 
-- [samba_lsarpc_interop.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/samba_lsarpc_interop.rs)
+- [samba_lsarpc_interop.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/tests/samba_lsarpc_interop.rs)
 
 Today that test proves:
 
@@ -60,7 +60,7 @@ Today that test proves:
 
 The same harness now also includes:
 
-- [samba_samr_standalone_interop.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/samba_samr_standalone_interop.rs)
+- [samba_samr_standalone_interop.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/tests/samba_samr_standalone_interop.rs)
 
 Today that test proves:
 

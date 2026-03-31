@@ -14,7 +14,7 @@ especially for:
 
 This document does not cover SMB over QUIC. That requires a dedicated Windows
 Server target and is documented separately in
-[windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md).
+[windows-quic.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-quic.md).
 
 ## Fixture
 
@@ -29,8 +29,8 @@ Current local fixture assumptions:
 - Global SMB encryption: `Set-SmbServerConfiguration -EncryptData $true`
 - Optional DFS namespace root: `SMOLDER_WINDOWS_DFS_ROOT`
 - Optional local Kerberos realm: `LAB.EXAMPLE` via
-  [samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md)
-  and [windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md)
+  [samba-ad-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-ad-kerberos.md)
+  and [windows-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-kerberos.md)
 
 Ensure the NAT rule exists:
 
@@ -107,7 +107,7 @@ scripts/run-windows-kerberos-interop.sh
 ```
 
 That wrapper drives the existing
-[kerberos_interop.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/kerberos_interop.rs)
+[kerberos_interop.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/tests/kerberos_interop.rs)
 test with the Windows-specific defaults:
 
 - SMB transport: `127.0.0.1:445`
@@ -136,8 +136,8 @@ When the fixture is healthy:
 ## Relationship To CI
 
 - GitHub Actions covers the Samba-backed subset automatically.
-- The repository now includes an optional self-hosted workflow at [interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml).
+- The repository now includes an optional self-hosted workflow at [interop-windows-self-hosted.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-windows-self-hosted.yml).
 - That workflow expects a self-hosted runner labeled `smolder-windows-gate`, local access to the Tiny11 fixture, `VBoxManage`, and repository secrets `SMOLDER_WINDOWS_USERNAME` / `SMOLDER_WINDOWS_PASSWORD`.
-- The workflow uses [ensure-tiny11-smb-forward.sh](/Users/cmagana/Projects/smolder/scripts/ensure-tiny11-smb-forward.sh) to verify the `127.0.0.1:445` NAT forward before running the release gate.
-- Runner bootstrap and GitHub secret setup are documented in [windows-runner.md](/Users/cmagana/Projects/smolder/docs/testing/windows-runner.md).
+- The workflow uses [ensure-tiny11-smb-forward.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/ensure-tiny11-smb-forward.sh) to verify the `127.0.0.1:445` NAT forward before running the release gate.
+- Runner bootstrap and GitHub secret setup are documented in [windows-runner.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-runner.md).
 - If the self-hosted runner is unavailable, the local `scripts/run-windows-release-gate.sh` path remains the fallback.

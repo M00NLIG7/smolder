@@ -33,11 +33,9 @@ apt-get install -y \
   libtool \
   linux-headers-$(uname -r) \
   openssl \
-  pkg-config \
-  qemu-guest-agent
+  pkg-config
 
 systemctl enable --now docker
-systemctl enable --now qemu-guest-agent
 
 mkdir -p "$CERT_DIR" "$SHARE_DIR"
 if [[ ! -f "${CERT_DIR}/ca.pem" || ! -f "${CERT_DIR}/ca-key.pem" || ! -f "${CERT_DIR}/key.pem" || ! -f "${CERT_DIR}/cert.pem" ]]; then

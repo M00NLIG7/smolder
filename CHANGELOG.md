@@ -11,9 +11,9 @@ This changelog covers:
 - `smolder-psexecsvc`
 
 The support scope behind each release is defined in
-[docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md),
+[docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md),
 and the versioning/MSRV rules are defined in
-[docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md).
+[docs/reference/versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md).
 
 ## [Unreleased]
 
@@ -31,6 +31,9 @@ and the versioning/MSRV rules are defined in
 - Added deeper standalone Samba `LSARPC` coverage to `smolder-smb-core`,
   including primary-domain and account-domain policy queries over
   `\\PIPE\\lsarpc`.
+- Added a working local Apple Silicon Samba QUIC validation path through UTM,
+  including guest provisioning, Samba fixture setup, and live QUIC interop
+  coverage against the current `smolder-smb-core` QUIC lane.
 
 ### Fixed
 
@@ -42,6 +45,21 @@ and the versioning/MSRV rules are defined in
 - Fixed standalone Samba `LSARPC` compatibility by falling back from
   `LsarQueryInformationPolicy2` to the legacy query opnum and by decoding the
   union/string/SID layouts returned by the live fixture.
+- Fixed SMB over QUIC message handling so `smolder-smb-core` preserves the SMB
+  4-byte message framing over QUIC instead of treating QUIC as an unframed
+  byte stream.
+- Switched `smolder` high-level session setup onto the `smolder-smb-core`
+  client facade so the published tools layer no longer reimplements negotiate
+  and auth orchestration separately.
+
+### Docs
+
+- Updated crate docs and examples to prefer the embedded client facade,
+  including the NTLM, Kerberos, and named-pipe examples.
+- Replaced workstation-local absolute links in crate docs and repository docs
+  with GitHub/docs.rs-friendly links.
+- Updated the public README and crate metadata to reflect compression, typed
+  RPC clients, QUIC, and the current validated surface.
 
 ### Release Notes Flow
 

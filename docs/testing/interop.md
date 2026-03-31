@@ -6,36 +6,36 @@ This document is the current live interoperability matrix for `smolder-core` and
 Use it as the repeatable verification gate for protocol changes, transport
 changes, auth changes, pipe/RPC work, and tools-layer workflow changes.
 The higher-level support contract that this matrix backs is documented in
-[support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
+[support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
 
-Detailed Samba fixture notes still live in [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md).
+Detailed Samba fixture notes still live in [samba.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba.md).
 The standalone Samba RPC fixture is documented in
-[samba-rpc.md](/Users/cmagana/Projects/smolder/docs/testing/samba-rpc.md).
+[samba-rpc.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-rpc.md).
 The AD-backed Samba Kerberos fixture is documented in
-[samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md).
+[samba-ad-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-ad-kerberos.md).
 The Linux-host-only Samba QUIC fixture is documented in
-[samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md).
+[samba-quic.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic.md).
 The Apple Silicon UTM-backed Samba QUIC path is documented in
-[samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
+[samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 The Tiny11 / Windows release-style gate is documented in
-[windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
+[windows.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows.md).
 The Windows Kerberos member flow is documented in
-[windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
+[windows-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-kerberos.md).
 The dedicated Windows Server SMB over QUIC lane is documented in
-[windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md).
+[windows-quic.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-quic.md).
 
 For a single entrypoint instead of running each command manually, use
-[scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop.sh).
+[scripts/run-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-interop.sh).
 
 The repository also includes a GitHub Actions workflow at
-[interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml)
+[interop-samba.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-samba.yml)
 that runs the Samba-backed subset on hosted Linux runners, plus
-[interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml)
+[interop-windows-self-hosted.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-windows-self-hosted.yml)
 for an optional self-hosted Tiny11 gate.
 Self-hosted runner bootstrap is documented in
-[windows-runner.md](/Users/cmagana/Projects/smolder/docs/testing/windows-runner.md).
+[windows-runner.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-runner.md).
 Release policy and required gate selection live in
-[release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
+[release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md).
 
 ## Targets
 
@@ -156,7 +156,7 @@ Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 - GitHub Actions can also run the Windows gate through the self-hosted `interop-windows-self-hosted.yml` workflow when a runner labeled `smolder-windows-gate` is available.
 - Tiny11 / Windows still depends on the local VM fixture, local credentials, and the current VirtualBox port-forward setup.
 - The standalone Samba RPC fixture is local-only today and currently proves typed `lsarpc` policy queries plus the deeper standalone `samr` flow: bind, domain enumeration, `SamrOpenDomain`, user enumeration, `SamrOpenUser`, and `SamrQueryInformationUser` account-name lookup.
-- The SMB over QUIC lane is manual today and can be proven either against a dedicated Windows Server target through [run-windows-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-quic-interop.sh) or against the UTM-backed Linux Samba path in [samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
+- The SMB over QUIC lane is manual today and can be proven either against a dedicated Windows Server target through [run-windows-quic-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-windows-quic-interop.sh) or against the UTM-backed Linux Samba path in [samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 
 ## Core Commands
 

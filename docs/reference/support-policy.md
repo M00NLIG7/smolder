@@ -11,11 +11,11 @@ separate:
 - non-goals and explicitly unsupported scope
 
 The operational test commands that back this policy live in
-[docs/testing/interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md)
+[docs/testing/interop.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/interop.md)
 and
-[docs/testing/release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
+[docs/testing/release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md).
 MSRV and semver rules live in
-[versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md).
+[versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md).
 
 ## Versioning Direction
 
@@ -74,7 +74,7 @@ Supported:
 - feature-gated Kerberos auth/session setup
 
 Supported public entry points are documented in
-[smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
+[smolder-core-api.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md).
 
 Not in scope:
 
@@ -204,17 +204,17 @@ The policy is only as strong as the gates behind it.
 ### Required before release
 
 - Samba interop workflow green:
-  - [interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml)
+  - [interop-samba.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-samba.yml)
 - Windows release gate green:
-  - [run-windows-release-gate.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-release-gate.sh)
+  - [run-windows-release-gate.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-windows-release-gate.sh)
   - or the self-hosted workflow equivalent
 
 ### Required for Kerberos-affecting changes
 
 - Samba AD Kerberos gate green:
-  - [run-kerberos-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-kerberos-interop.sh)
+  - [run-kerberos-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-kerberos-interop.sh)
 - Windows Kerberos gate green:
-  - [run-windows-kerberos-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-kerberos-interop.sh)
+  - [run-windows-kerberos-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-windows-kerberos-interop.sh)
 
 ### Required for remote-exec-affecting changes
 
@@ -223,7 +223,7 @@ The policy is only as strong as the gates behind it.
   - `psexec ... whoami`
 
 The narrower change-to-gate mapping remains in
-[release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
+[release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md).
 
 ## Non-Goals for `0.2.x`
 

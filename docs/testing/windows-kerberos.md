@@ -7,10 +7,10 @@ Kerberos `smbexec` smoke path.
 It uses:
 
 - the local Samba AD fixture in
-  [docker/samba-ad/compose.yaml](/Users/cmagana/Projects/smolder/docker/samba-ad/compose.yaml)
+  [docker/samba-ad/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba-ad/compose.yaml)
 - Tiny11 as the SMB target on `127.0.0.1:445`
 - the generic core Kerberos test in
-  [kerberos_interop.rs](/Users/cmagana/Projects/smolder/smolder-core/tests/kerberos_interop.rs)
+  [kerberos_interop.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/tests/kerberos_interop.rs)
 
 The important detail is that the SMB transport target and the Kerberos target
 host are different:

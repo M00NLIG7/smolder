@@ -19,7 +19,7 @@
 //! - `SMOLDER_EXAMPLE_DOMAIN`
 //! - `SMOLDER_EXAMPLE_WORKSTATION`
 
-use smolder_core::prelude::{connect_tree, NtlmCredentials, SmbSessionConfig};
+use smolder_core::prelude::{Client, NtlmCredentials};
 
 fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name)
@@ -51,17 +51,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         credentials = credentials.with_workstation(workstation);
     }
 
-    let config = SmbSessionConfig::new(host, credentials).with_port(port);
-    let connection = connect_tree(&config, &share).await?;
+    let client = Client::builder(host)
+        .with_port(port)
+        .with_ntlm_credentials(credentials)
+        .build()?;
+    let share = client.connect_share(&share).await?;
 
     println!(
         "NTLM tree connect succeeded: share={} session={} tree={}",
-        share,
-        connection.session_id().0,
-        connection.tree_id().0
+        share.name(),
+        share.session_id().0,
+        share.tree_id().0
     );
 
-    let connection = connection.tree_disconnect().await?;
-    let _ = connection.logoff().await?;
+    share.logoff().await?;
     Ok(())
 }

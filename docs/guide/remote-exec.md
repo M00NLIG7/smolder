@@ -25,19 +25,19 @@ The interactive example is documented as:
 
 Use the shipped tools example:
 
-- [interactive_psexec.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/interactive_psexec.rs)
+- [interactive_psexec.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/examples/interactive_psexec.rs)
 
 or the direct CLI equivalent from:
 
-- [examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md)
+- [examples.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md)
 
 ## Validation And Policy
 
 The remote-exec validation story lives in:
 
-- [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md)
-- [windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md)
-- [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md)
+- [windows.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows.md)
+- [windows-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-kerberos.md)
+- [interop.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/interop.md)
 
 If a feature depends on shell behavior, SCM semantics, or execution UX, it
 should stay documented and implemented in the tools layer rather than being

@@ -65,7 +65,7 @@ cargo bench -p smolder-proto --bench decode_paths
 ## CI Smoke
 
 The repo now includes a compile-only GitHub Actions smoke workflow at
-[bench-smoke.yml](/Users/cmagana/Projects/smolder/.github/workflows/bench-smoke.yml).
+[bench-smoke.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/bench-smoke.yml).
 
 It runs:
 

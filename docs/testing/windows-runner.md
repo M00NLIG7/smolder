@@ -2,7 +2,7 @@
 
 Use this when you want GitHub Actions to run the Tiny11 / Windows interop gate
 automatically through
-[interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml).
+[interop-windows-self-hosted.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-windows-self-hosted.yml).
 
 This workflow is intended for a self-hosted runner on the same machine that can:
 

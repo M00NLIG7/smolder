@@ -55,10 +55,10 @@
 //!
 //! Supporting project docs:
 //!
-//! - [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md)
-//! - [docs/guide/cookbook.md](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md)
-//! - [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
-//! - [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
+//! - <https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md>
+//! - <https://github.com/M00NLIG7/smolder/blob/main/docs/guide/cookbook.md>
+//! - <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md>
+//! - <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md>
 //!
 //! # Public API Tiers
 //!
@@ -79,7 +79,7 @@
 //! Lower-level signing, preauth, and raw crypto helpers remain available for
 //! expert users, but they are not the recommended starting surface. The repo's
 //! API audit notes are in
-//! [docs/reference/smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
+//! <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md>.
 //!
 //! Copyright (c) 2025 M00NLIG7
 

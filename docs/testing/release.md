@@ -5,18 +5,18 @@ Use this checklist before merging high-risk SMB changes or cutting a release.
 This document is intentionally operational. The detailed fixture descriptions
 live in:
 
-- [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
-- [versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
-- [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md)
-- [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md)
-- [samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md)
-- [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md)
+- [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)
+- [versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md)
+- [CHANGELOG.md](https://github.com/M00NLIG7/smolder/blob/main/CHANGELOG.md)
+- [interop.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/interop.md)
+- [samba.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba.md)
+- [windows.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows.md)
 
 ## Release Notes Flow
 
 Before tagging a release:
 
-- update [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md)
+- update [CHANGELOG.md](https://github.com/M00NLIG7/smolder/blob/main/CHANGELOG.md)
 - move `Unreleased` notes into a dated version section
 - call out any support-policy or MSRV changes explicitly
 - summarize the actual validation gates that were run for that release
@@ -24,7 +24,7 @@ Before tagging a release:
 When cutting the GitHub release:
 
 - use the matching version section from
-  [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md) as the release
+  [CHANGELOG.md](https://github.com/M00NLIG7/smolder/blob/main/CHANGELOG.md) as the release
   body baseline
 - keep the release text user-facing rather than commit-by-commit
 - include any known fixture caveats only when they materially affect the
@@ -33,7 +33,7 @@ When cutting the GitHub release:
 After tagging:
 
 - recreate an empty `Unreleased` section in
-  [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md)
+  [CHANGELOG.md](https://github.com/M00NLIG7/smolder/blob/main/CHANGELOG.md)
 
 ## Baseline Rule
 
@@ -55,7 +55,7 @@ If a change touches any of these areas, run the appropriate gates before merge:
 Required:
 
 - GitHub Actions Samba interop workflow passes:
-  - [interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml)
+  - [interop-samba.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-samba.yml)
 
 Recommended local replay:
 
@@ -66,10 +66,10 @@ Recommended local replay:
 Required before release:
 
 - `scripts/run-windows-release-gate.sh`
-- or a green [interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml) run on the Tiny11 self-hosted runner
+- or a green [interop-windows-self-hosted.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-windows-self-hosted.yml) run on the Tiny11 self-hosted runner
 
 Runner bootstrap and secret setup live in
-[windows-runner.md](/Users/cmagana/Projects/smolder/docs/testing/windows-runner.md).
+[windows-runner.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-runner.md).
 
 This includes:
 
@@ -85,12 +85,12 @@ Required when the `quic` feature or QUIC transport logic changed:
 
 - `cargo test -p smolder-smb-core --features quic --lib`
 - a manual QUIC replay against a real Windows Server target:
-  - [run-windows-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-quic-interop.sh)
-  - [windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md)
+  - [run-windows-quic-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-windows-quic-interop.sh)
+  - [windows-quic.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-quic.md)
 - optional Samba QUIC replay on a Linux host with `quic.ko`:
-  - [run-samba-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-samba-quic-interop.sh)
-  - [samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md)
-  - [samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md)
+  - [run-samba-quic-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-samba-quic-interop.sh)
+  - [samba-quic.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic.md)
+  - [samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md)
 
 ### For DFS changes
 
@@ -148,7 +148,7 @@ Known fixture caveats that do not block release on their own:
 
 When a gate fails:
 
-1. Reproduce with the narrowest command from [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md).
+1. Reproduce with the narrowest command from [interop.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/interop.md).
 2. Decide whether the failure is:
    - a real protocol regression
    - a fixture limitation already documented

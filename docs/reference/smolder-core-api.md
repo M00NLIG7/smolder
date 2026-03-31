@@ -4,7 +4,7 @@ This document captures the intended public surface of `smolder-smb-core` as of
 the current `0.2.x` line.
 
 The broader release/support contract for the workspace lives in
-[support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
+[support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
 
 The goal is not "everything public in the crate is equally ergonomic." The goal
 is to make the recommended integration path explicit so downstream users build

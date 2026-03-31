@@ -96,10 +96,8 @@ users:
 package_update: true
 packages:
   - openssh-server
-  - qemu-guest-agent
 runcmd:
   - systemctl enable --now ssh
-  - systemctl enable --now qemu-guest-agent
 EOF
 
   rm -f "$SEED_ISO"

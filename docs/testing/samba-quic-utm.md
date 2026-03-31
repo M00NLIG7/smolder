@@ -1,7 +1,7 @@
 # Samba QUIC On UTM
 
 This is the Apple Silicon local path for the Samba SMB over QUIC lane in
-[samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md).
+[samba-quic.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic.md).
 
 Use it when Docker Desktop cannot host Samba QUIC because the underlying Linux
 VM does not expose the kernel QUIC socket path that Samba needs.
@@ -46,14 +46,14 @@ Official references:
 
 The UTM path uses three scripts:
 
-- [provision-samba-quic-utm.sh](/Users/cmagana/Projects/smolder/scripts/provision-samba-quic-utm.sh)
-- [configure-samba-quic-utm.sh](/Users/cmagana/Projects/smolder/scripts/configure-samba-quic-utm.sh)
-- [setup-samba-quic-guest.sh](/Users/cmagana/Projects/smolder/scripts/setup-samba-quic-guest.sh)
+- [provision-samba-quic-utm.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/provision-samba-quic-utm.sh)
+- [configure-samba-quic-utm.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/configure-samba-quic-utm.sh)
+- [setup-samba-quic-guest.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/setup-samba-quic-guest.sh)
 
 The current flow is:
 
 1. create a UTM QEMU VM from the Ubuntu ARM64 cloud image
-2. inject cloud-init with SSH access and guest agent startup
+2. inject cloud-init with SSH access
 3. forward host ports:
    - TCP `2422` -> guest `22`
    - TCP `2445` -> guest `445`
@@ -62,7 +62,7 @@ The current flow is:
 5. install Docker, `ktls-utils`, and QUIC build dependencies
 6. build and install `quic.ko`
 7. enable `tlshd`
-8. run the repo’s existing [docker/samba-quic](/Users/cmagana/Projects/smolder/docker/samba-quic)
+8. run the repo’s existing [docker/samba-quic](https://github.com/M00NLIG7/smolder/tree/main/docker/samba-quic)
    fixture inside the guest on guest ports `443/udp` and `445/tcp`
 
 ## Provision The VM

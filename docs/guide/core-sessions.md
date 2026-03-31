@@ -5,10 +5,10 @@ the higher-level file facade from `smolder`.
 
 The intended entry points are:
 
-- [`SmbSessionConfig`](/Users/cmagana/Projects/smolder/smolder-core/src/pipe.rs)
-- [`connect_tree`](/Users/cmagana/Projects/smolder/smolder-core/src/pipe.rs)
-- [`Connection`](/Users/cmagana/Projects/smolder/smolder-core/src/client.rs)
-- [`NtlmCredentials`](/Users/cmagana/Projects/smolder/smolder-core/src/auth/ntlm.rs)
+- [`SmbSessionConfig`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/pipe.rs)
+- [`connect_tree`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/pipe.rs)
+- [`Connection`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/client.rs)
+- [`NtlmCredentials`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/auth/ntlm.rs)
 
 ## Minimal NTLM Tree Connect
 
@@ -35,7 +35,7 @@ let _ = connection.logoff().await?;
 ```
 
 For a compile-checked version, see
-[ntlm_tree_connect.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/ntlm_tree_connect.rs).
+[ntlm_tree_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/ntlm_tree_connect.rs).
 
 ## When To Stay In Core
 
@@ -55,6 +55,6 @@ Move to `smolder` when you want:
 
 ## Related APIs
 
-- [`pipe.rs`](/Users/cmagana/Projects/smolder/smolder-core/src/pipe.rs)
-- [`client.rs`](/Users/cmagana/Projects/smolder/smolder-core/src/client.rs)
-- [`error.rs`](/Users/cmagana/Projects/smolder/smolder-core/src/error.rs)
+- [`pipe.rs`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/pipe.rs)
+- [`client.rs`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/client.rs)
+- [`error.rs`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/error.rs)

@@ -1,6 +1,6 @@
 # Smolder
 
-An SMB research toolkit in Rust. The current codebase is being rebuilt around a typed SMB2/3 protocol layer first, with transport, authentication, and higher-level tooling layered on top once the wire model is stable.
+A typed SMB2/3, DCE/RPC, and operator toolkit in Rust.
 
 ## Overview
 
@@ -18,21 +18,25 @@ For library-first usage, `smolder-smb-core` now ships compile-checked examples
 for:
 
 - high-level client session/share connect
+- high-level share listing
 - high-level file roundtrip
+- typed `srvsvc` RPC
+- typed `lsarpc` RPC
 - NTLM tree connect
 - named-pipe RPC bind
 - Kerberos tree connect
+- QUIC session connect
 
 The shared examples guide, including the high-level file roundtrip and
 interactive `psexec` tools examples, is in
-[docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md).
+[docs/guide/examples.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md).
 That guide also includes the feature-gated high-level Kerberos tools example.
 The repo also includes a tiny standalone reference client at
-[demos/smolder-core-demo](/Users/cmagana/Projects/smolder/demos/smolder-core-demo)
+[demos/smolder-core-demo](https://github.com/M00NLIG7/smolder/tree/main/demos/smolder-core-demo)
 for users who want a small copy-and-adapt binary crate instead of an example
 target.
 The task-oriented cookbook is in
-[docs/guide/cookbook.md](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md).
+[docs/guide/cookbook.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/cookbook.md).
 That guide now documents the stable interactive remote-exec path as direct
 `cmd.exe` or direct `powershell.exe` startup through the staged payload, not as
 a full nested-shell terminal emulator.
@@ -49,22 +53,22 @@ Published package names:
 Pick the crate by the layer you actually need:
 
 - need typed SMB/DCE-RPC codecs only:
-  [`smolder-proto`](/Users/cmagana/Projects/smolder/smolder-proto/README.md)
+  [`smolder-proto`](https://github.com/M00NLIG7/smolder/blob/main/smolder-proto/README.md)
 - need direct SMB/RPC client primitives:
-  [`smolder-smb-core`](/Users/cmagana/Projects/smolder/smolder-core/README.md)
+  [`smolder-smb-core`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/README.md)
 - need high-level file workflows or remote-exec tooling:
-  [`smolder`](/Users/cmagana/Projects/smolder/smolder-tools/README.md)
+  [`smolder`](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/README.md)
 - need the Windows `psexec` payload itself:
-  [`smolder-psexecsvc`](/Users/cmagana/Projects/smolder/smolder-psexecsvc/README.md)
+  [`smolder-psexecsvc`](https://github.com/M00NLIG7/smolder/blob/main/smolder-psexecsvc/README.md)
 
 If you are evaluating adoption, start with:
 
-- [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md)
-- [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
-- [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
+- [docs/guide/examples.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md)
+- [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)
+- [docs/reference/versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md)
 
 Release notes and published change summaries live in
-[CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md).
+[CHANGELOG.md](https://github.com/M00NLIG7/smolder/blob/main/CHANGELOG.md).
 
 ## Can I Use This In A Real Project?
 
@@ -80,9 +84,9 @@ The practical promise is:
 
 Read these together before depending on the crates in production:
 
-- [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
-- [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
-- [CHANGELOG.md](/Users/cmagana/Projects/smolder/CHANGELOG.md)
+- [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)
+- [docs/reference/versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md)
+- [CHANGELOG.md](https://github.com/M00NLIG7/smolder/blob/main/CHANGELOG.md)
 
 Boundary rule:
 
@@ -98,9 +102,10 @@ Implemented now:
   durable-handle create contexts, named-pipe/RPC packets, and SMB3 transform
   headers
 - `smolder-core`: SMB negotiate/session setup, NTLMv2/SPNEGO auth, signing,
-  SMB3 encryption, named pipes, DCE/RPC transport, DFS referral handling,
-  compound requests, durable/resilient reconnect primitives, a new embedded
-  client facade, and feature-gated Kerberos session-setup/auth primitives
+  SMB3 encryption, SMB compression, named pipes, DCE/RPC transport, DFS
+  referral handling, compound requests, durable/resilient reconnect
+  primitives, an embedded client facade, typed `srvsvc` / `lsarpc` / `samr`
+  clients, SMB over QUIC, and feature-gated Kerberos support
 - `smolder-tools`: high-level SMB file APIs, DFS-aware path resolution,
   reconnect helpers, CLI file workflows, feature-gated Kerberos file auth,
   `smbexec`, and `psexec`
@@ -114,59 +119,46 @@ Validated now:
   CLI workflows, Kerberos `smbexec`, Kerberos `psexec`, `smbexec`, and `psexec`
 - Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
   named pipes, encrypted RPC, standalone `lsarpc` policy queries,
-  standalone `samr` domain enumeration, and Kerberos core auth
+  standalone `samr` domain enumeration and user queries, SMB compression, SMB
+  over QUIC, and Kerberos core auth
 
-Still in progress on this track:
+Current priorities:
 
-- SMB1 compatibility
-- Fully automated Windows CI; the Tiny11 gate is still manual/self-hosted
-- Full Samba `selftest` parity
+- public Windows Server QUIC proof alongside the current Samba QUIC lane
+- full Samba `selftest` parity
+- stronger Windows automation; the Tiny11 gate is still manual/self-hosted
+- NetBIOS transport and additional embedders-first polish
+- SMB1 remains deferred behind the modern SMB2/3 library and tooling work
 
-## Future Tracks
-
-- The active next-track roadmap for "better general SMB library + better
-  security toolkit" work is in
-  [plans/library-and-security-roadmap.md](/Users/cmagana/Projects/smolder/plans/library-and-security-roadmap.md).
-  That track prioritizes:
-  - high-level `smolder-smb-core` client facade
-  - SMB compression
-  - `SRVSVC` / `SAMR` / `LSARPC`
-  - QUIC
-  - Samba `selftest`
-  - stronger Windows automation
-  SMB1 stays deferred until those milestones are complete or clearly blocked.
-
-- Kerberos in `smolder-core` is now in active implementation behind the
-  `kerberos` feature. The current slice covers mechanism-aware SPNEGO, a
+- Kerberos in `smolder-core` is implemented behind the `kerberos` feature. The
+  current slice covers mechanism-aware SPNEGO, a
   password-backed Kerberos authenticator that exports the SMB session key,
   plus a Unix ticket-cache and keytab backend behind `kerberos-gssapi`, and
   live Samba AD plus Windows domain-member interop in both core and
   Kerberos-enabled tools workflows, including `smbexec` and `psexec`.
-  The scoped plan is in
-  [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md).
   The Samba AD fixture and Windows member flow are documented in
-  [docs/testing/samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md)
+  [docs/testing/samba-ad-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-ad-kerberos.md)
   and
-  [docs/testing/windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
+  [docs/testing/windows-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-kerberos.md).
   The standalone Samba RPC fixture is documented in
-  [docs/testing/samba-rpc.md](/Users/cmagana/Projects/smolder/docs/testing/samba-rpc.md).
+  [docs/testing/samba-rpc.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-rpc.md).
   The default build remains static-friendlier because `kerberos-gssapi`
   no longer drags in Unix GSS/Kerberos libraries unless it is explicitly
   enabled.
 
 - `smolder-core` is moving into an API-stability and docs phase. The current
   public-surface notes are in
-  [docs/reference/smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
+  [docs/reference/smolder-core-api.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md).
   The formal `0.2.x` support contract is in
-  [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
+  [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
   MSRV and semver rules are in
-  [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md).
+  [docs/reference/versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md).
   The current wire-layer hardening entrypoints are documented in
-  [docs/testing/fuzzing.md](/Users/cmagana/Projects/smolder/docs/testing/fuzzing.md).
+  [docs/testing/fuzzing.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/fuzzing.md).
   The current perf harness is documented in
-  [docs/testing/benchmarks.md](/Users/cmagana/Projects/smolder/docs/testing/benchmarks.md),
+  [docs/testing/benchmarks.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/benchmarks.md),
   with a compile-only CI smoke workflow at
-  [bench-smoke.yml](/Users/cmagana/Projects/smolder/.github/workflows/bench-smoke.yml).
+  [bench-smoke.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/bench-smoke.yml).
 
 ## Quick Start
 
@@ -280,28 +272,28 @@ cargo test -p smolder-smb-core --test samba_rpc_encryption -- --nocapture
 ## Live Interop Matrix
 
 The current supported live matrix, target fixtures, and repeatable verification
-commands are documented in [docs/testing/interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md).
-Use [scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop.sh) for a single
+commands are documented in [docs/testing/interop.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/interop.md).
+Use [scripts/run-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-interop.sh) for a single
 entrypoint that fans out to the enabled Windows and Samba gates from the current
 environment. The Samba-backed subset is also wired into GitHub Actions via
-[interop-samba.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-samba.yml).
+[interop-samba.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-samba.yml).
 The Tiny11 / Windows gate can now run through the optional self-hosted workflow
-[interop-windows-self-hosted.yml](/Users/cmagana/Projects/smolder/.github/workflows/interop-windows-self-hosted.yml),
-which uses [ensure-tiny11-smb-forward.sh](/Users/cmagana/Projects/smolder/scripts/ensure-tiny11-smb-forward.sh)
+[interop-windows-self-hosted.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-windows-self-hosted.yml),
+which uses [ensure-tiny11-smb-forward.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/ensure-tiny11-smb-forward.sh)
 to verify the local VirtualBox port forward before running the release gate.
 Runner bootstrap and secret setup are documented in
-[windows-runner.md](/Users/cmagana/Projects/smolder/docs/testing/windows-runner.md).
+[windows-runner.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-runner.md).
 For the full manual Tiny11 pass, including remote execution smoke checks, use
-[run-windows-release-gate.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-release-gate.sh)
-and [docs/testing/windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
+[run-windows-release-gate.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-windows-release-gate.sh)
+and [docs/testing/windows.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows.md).
 For Samba-side SMB over QUIC on a Linux host with kernel QUIC support, use
-[docs/testing/samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md).
+[docs/testing/samba-quic.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic.md).
 On Apple Silicon, the local UTM-backed Linux path is documented in
-[docs/testing/samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
+[docs/testing/samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 For merge/release policy, required gate selection, and failure triage, use
-[docs/testing/release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
+[docs/testing/release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md).
 For the formal `0.2.x` support scope and guarantees behind those gates, use
-[docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md).
+[docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
 
 ## Security Notice
 

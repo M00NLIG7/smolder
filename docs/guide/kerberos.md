@@ -5,9 +5,9 @@ on.
 
 The stable public surface is:
 
-- [`KerberosCredentials`](/Users/cmagana/Projects/smolder/smolder-core/src/auth/kerberos.rs)
-- [`KerberosAuthenticator`](/Users/cmagana/Projects/smolder/smolder-core/src/auth/kerberos.rs)
-- [`KerberosTarget`](/Users/cmagana/Projects/smolder/smolder-core/src/auth/kerberos_spn.rs)
+- [`KerberosCredentials`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/auth/kerberos.rs)
+- [`KerberosAuthenticator`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/auth/kerberos.rs)
+- [`KerberosTarget`](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/src/auth/kerberos_spn.rs)
 
 Feature flags:
 
@@ -18,42 +18,25 @@ Feature flags:
 ## Minimal Kerberos Tree Connect
 
 ```rust
-use smolder_core::prelude::{
-    Connection, KerberosAuthenticator, KerberosCredentials, KerberosTarget, TokioTcpTransport,
-};
-use smolder_proto::smb::smb2::{
-    Dialect, GlobalCapabilities, NegotiateRequest, SigningMode, TreeConnectRequest,
-};
+use smolder_core::prelude::{Client, KerberosCredentials, KerberosTarget};
 
 # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-let transport = TokioTcpTransport::connect(("files1.lab.example", 445)).await?;
-let connection = Connection::new(transport);
-let negotiate = NegotiateRequest {
-    security_mode: SigningMode::ENABLED,
-    capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
-    client_guid: *b"smolder-krb-doc1",
-    dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
-    negotiate_contexts: Vec::new(),
-};
-let connection = connection.negotiate(&negotiate).await?;
-
 let credentials = KerberosCredentials::new("smolder@LAB.EXAMPLE", "Passw0rd!");
 let target = KerberosTarget::for_smb_host("files1.lab.example");
-let mut auth = KerberosAuthenticator::new(credentials, target);
-let connection = connection.authenticate(&mut auth).await?;
-let connection = connection
-    .tree_connect(&TreeConnectRequest::from_unc(r"\\files1.lab.example\IPC$"))
-    .await?;
+let client = Client::builder("files1.lab.example")
+    .with_kerberos_credentials(credentials, target)
+    .build()?;
+let share = client.connect_share("IPC$").await?;
 
-println!("kerberos session={} tree={}", connection.session_id().0, connection.tree_id().0);
+println!("kerberos session={} tree={}", share.session_id().0, share.tree_id().0);
 # Ok(())
 # }
 ```
 
 For the compile-checked examples, see:
 
-- [kerberos_tree_connect.rs](/Users/cmagana/Projects/smolder/smolder-core/examples/kerberos_tree_connect.rs)
-- [kerberos_share_list.rs](/Users/cmagana/Projects/smolder/smolder-tools/examples/kerberos_share_list.rs)
+- [kerberos_tree_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/kerberos_tree_connect.rs)
+- [kerberos_share_list.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-tools/examples/kerberos_share_list.rs)
 
 ## Practical Rules
 
@@ -64,6 +47,6 @@ For the compile-checked examples, see:
 
 ## Fixture And Validation Docs
 
-- [samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md)
-- [windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md)
-- [plans/kerberos-auth-roadmap.md](/Users/cmagana/Projects/smolder/plans/kerberos-auth-roadmap.md)
+- [samba-ad-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-ad-kerberos.md)
+- [windows-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-kerberos.md)
+- [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)

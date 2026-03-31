@@ -28,11 +28,11 @@
 //! Supporting project docs:
 //!
 //! - support policy:
-//!   [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
+//!   [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)
 //! - fuzzing/property coverage:
-//!   [docs/testing/fuzzing.md](/Users/cmagana/Projects/smolder/docs/testing/fuzzing.md)
+//!   [docs/testing/fuzzing.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/fuzzing.md)
 //! - benchmark harness:
-//!   [docs/testing/benchmarks.md](/Users/cmagana/Projects/smolder/docs/testing/benchmarks.md)
+//!   [docs/testing/benchmarks.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/benchmarks.md)
 //!
 //! Copyright (c) 2025 M00NLIG7
 

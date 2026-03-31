@@ -1,7 +1,7 @@
 # Cookbook
 
 This cookbook is the task-oriented companion to the API notes in
-[smolder-core-api.md](/Users/cmagana/Projects/smolder/docs/reference/smolder-core-api.md).
+[smolder-core-api.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md).
 
 Use it when you want to answer:
 
@@ -13,14 +13,14 @@ Use it when you want to answer:
 
 Pages in this cookbook:
 
-- [core-sessions.md](/Users/cmagana/Projects/smolder/docs/guide/core-sessions.md)
-- [named-pipes-and-rpc.md](/Users/cmagana/Projects/smolder/docs/guide/named-pipes-and-rpc.md)
-- [kerberos.md](/Users/cmagana/Projects/smolder/docs/guide/kerberos.md)
-- [tools-file-workflows.md](/Users/cmagana/Projects/smolder/docs/guide/tools-file-workflows.md)
-- [remote-exec.md](/Users/cmagana/Projects/smolder/docs/guide/remote-exec.md)
+- [core-sessions.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/core-sessions.md)
+- [named-pipes-and-rpc.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/named-pipes-and-rpc.md)
+- [kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/kerberos.md)
+- [tools-file-workflows.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/tools-file-workflows.md)
+- [remote-exec.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/remote-exec.md)
 
 Read this guide alongside:
 
-- [examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md) for shipped example entry points
-- [support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md) for the current `0.2.x` support contract
-- [interop.md](/Users/cmagana/Projects/smolder/docs/testing/interop.md) for the live validation matrix
+- [examples.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md) for shipped example entry points
+- [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md) for the current `0.2.x` support contract
+- [interop.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/interop.md) for the live validation matrix

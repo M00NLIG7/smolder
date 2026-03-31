@@ -5,8 +5,9 @@
 The published package name is `smolder-smb-core`, while the Rust library crate
 name remains `smolder_core`.
 
-It owns SMB auth/session state, transport logic, signing, encryption, named
-pipes, RPC transport, DFS helpers, and durable/reconnect primitives.
+It owns SMB auth/session state, transport logic, signing, encryption,
+compression, QUIC, named pipes, typed RPC clients, DFS helpers, and
+durable/reconnect primitives.
 
 Real-project readiness:
 
@@ -31,6 +32,7 @@ Recommended entry points:
 - `smolder_core::facade::{Client, ClientBuilder}` for embedded client usage
 - `smolder_core::facade::{Session, Share, File, OpenOptions}` for high-level
   authenticated-session, share, and file workflows
+- `smolder_core::{srvsvc, lsarpc, samr}` for typed RPC clients over `IPC$`
 - `smolder_core::client::Connection` for typed SMB negotiate/session/tree flow
 - `smolder_core::pipe::{SmbSessionConfig, connect_session, connect_tree, NamedPipe}`
   for lower-level session, tree, and named-pipe usage
@@ -47,6 +49,8 @@ Examples:
 - `cargo run -p smolder-smb-core --example client_session_connect`
 - `cargo run -p smolder-smb-core --example client_share_list`
 - `cargo run -p smolder-smb-core --example client_file_roundtrip`
+- `cargo run -p smolder-smb-core --example client_srvsvc`
+- `cargo run -p smolder-smb-core --example client_lsarpc`
 - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
 - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
 - `cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect`

@@ -5,7 +5,9 @@
 //!
 //! It owns ergonomic SMB file APIs, remote execution, and CLI integrations. It
 //! depends on the `smolder-smb-core` package for SMB/RPC primitives rather than
-//! extending the core crate with tool-specific behavior.
+//! extending the core crate with tool-specific behavior, and its session setup
+//! now rides on the core client facade instead of duplicating negotiate/auth
+//! orchestration.
 //!
 //! # Feature Flags
 //!
@@ -36,10 +38,10 @@
 //!
 //! Supporting project docs:
 //!
-//! - [docs/guide/examples.md](/Users/cmagana/Projects/smolder/docs/guide/examples.md)
-//! - [docs/guide/cookbook.md](/Users/cmagana/Projects/smolder/docs/guide/cookbook.md)
-//! - [docs/reference/support-policy.md](/Users/cmagana/Projects/smolder/docs/reference/support-policy.md)
-//! - [docs/reference/versioning-policy.md](/Users/cmagana/Projects/smolder/docs/reference/versioning-policy.md)
+//! - <https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md>
+//! - <https://github.com/M00NLIG7/smolder/blob/main/docs/guide/cookbook.md>
+//! - <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md>
+//! - <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md>
 //!
 //! Copyright (c) 2025 M00NLIG7
 
@@ -47,10 +49,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod cli;
 pub mod fs;
 pub mod reconnect;
 pub mod remote_exec;
-pub mod cli;
 pub mod prelude {
     //! Common types and traits
 

@@ -17,7 +17,7 @@ Use this crate when you need:
 
 Start here:
 
-- crate docs: [smolder-psexecsvc/src/lib.rs](/Users/cmagana/Projects/smolder/smolder-psexecsvc/src/lib.rs)
+- crate docs: <https://docs.rs/smolder-psexecsvc>
 - Windows fixture docs:
   <https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows.md>
 - interactive `psexec` usage guide:

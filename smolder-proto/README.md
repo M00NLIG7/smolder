@@ -17,7 +17,7 @@ are building protocol tooling, analysis, or a custom SMB/RPC client stack.
 
 Start here:
 
-- crate docs: [smolder-proto/src/lib.rs](/Users/cmagana/Projects/smolder/smolder-proto/src/lib.rs)
+- crate docs: <https://docs.rs/smolder-proto>
 - support policy:
   <https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md>
 - fuzz/property/bench coverage:

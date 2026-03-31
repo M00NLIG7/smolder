@@ -19,9 +19,7 @@
 //! - `SMOLDER_EXAMPLE_WORKSTATION`
 //! - `SMOLDER_EXAMPLE_PIPE` (defaults to `srvsvc`)
 
-use smolder_core::prelude::{
-    connect_tree, NamedPipe, NtlmCredentials, PipeAccess, PipeRpcClient, SmbSessionConfig,
-};
+use smolder_core::prelude::{Client, NtlmCredentials, PipeAccess};
 use smolder_proto::rpc::{SyntaxId, Uuid};
 
 const SRVSVC_CONTEXT_ID: u16 = 0;
@@ -66,17 +64,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         credentials = credentials.with_workstation(workstation);
     }
 
-    let config = SmbSessionConfig::new(host, credentials).with_port(port);
-    let connection = connect_tree(&config, "IPC$").await?;
-    let pipe = NamedPipe::open(connection, &pipe_name, PipeAccess::ReadWrite).await?;
-    let mut rpc = PipeRpcClient::new(pipe);
+    let client = Client::builder(host)
+        .with_port(port)
+        .with_ntlm_credentials(credentials)
+        .build()?;
+    let session = client.connect().await?;
+    let mut rpc = session
+        .connect_rpc_pipe(&pipe_name, PipeAccess::ReadWrite)
+        .await?;
     let bind_ack = rpc.bind_context(SRVSVC_CONTEXT_ID, SRVSVC_SYNTAX).await?;
 
     println!(
         "RPC bind succeeded: pipe={} max_xmit_frag={} max_recv_frag={}",
-        pipe_name,
-        bind_ack.max_xmit_frag,
-        bind_ack.max_recv_frag
+        pipe_name, bind_ack.max_xmit_frag, bind_ack.max_recv_frag
     );
 
     let connection = rpc.into_pipe().close().await?;

@@ -3,7 +3,7 @@
 This is the dedicated Samba-side fixture path for SMB over QUIC.
 
 It is separate from the normal local Samba fixture in
-[samba.md](/Users/cmagana/Projects/smolder/docs/testing/samba.md) because QUIC
+[samba.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba.md) because QUIC
 has different server requirements.
 
 ## What This Lane Is For
@@ -18,7 +18,7 @@ Use it when you need to validate:
 ## Important Boundaries
 
 This is not the same as the current local Samba compose stack in
-[docker/samba/compose.yaml](/Users/cmagana/Projects/smolder/docker/samba/compose.yaml).
+[docker/samba/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/compose.yaml).
 That stack currently uses `crazymax/samba:latest`, which is Samba `4.21.4` on
 this host and does not provide the new Samba 4.23 QUIC server path.
 
@@ -46,11 +46,11 @@ This repo now has two local proof paths:
 
 - a Linux-host path when the host kernel already provides `quic.ko`
 - an Apple Silicon path through UTM, documented in
-  [samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md)
+  [samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md)
 
 On Apple Silicon Macs, the recommended local path is now the UTM-backed Linux
 guest flow in
-[samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
+[samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 
 ## Linux Host Requirement
 
@@ -76,9 +76,9 @@ path.
 
 The repo includes a Linux-only Samba QUIC scaffold in:
 
-- [docker/samba-quic/Dockerfile](/Users/cmagana/Projects/smolder/docker/samba-quic/Dockerfile)
-- [docker/samba-quic/bootstrap.sh](/Users/cmagana/Projects/smolder/docker/samba-quic/bootstrap.sh)
-- [docker/samba-quic/compose.yaml](/Users/cmagana/Projects/smolder/docker/samba-quic/compose.yaml)
+- [docker/samba-quic/Dockerfile](https://github.com/M00NLIG7/smolder/blob/main/docker/samba-quic/Dockerfile)
+- [docker/samba-quic/bootstrap.sh](https://github.com/M00NLIG7/smolder/blob/main/docker/samba-quic/bootstrap.sh)
+- [docker/samba-quic/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba-quic/compose.yaml)
 
 This scaffold uses `debian:sid-slim` so the container can install a Samba
 package new enough for QUIC support.
@@ -103,7 +103,7 @@ The bootstrap creates:
 
 If you need a local Apple Silicon-compatible Linux host for this same fixture,
 use the UTM path in
-[samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
+[samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 
 ## Trust And Name Resolution
 

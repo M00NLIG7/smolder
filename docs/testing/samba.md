@@ -79,7 +79,7 @@ For local development, either:
 - point to an existing Samba instance
 - run a disposable Samba container or VM configured to listen on port `445`
 
-The repo now includes a pinned Docker Compose target at [docker/samba/compose.yaml](/Users/cmagana/Projects/smolder/docker/samba/compose.yaml) with config in [docker/samba/data/config.yml](/Users/cmagana/Projects/smolder/docker/samba/data/config.yml). It exposes Samba on `127.0.0.1:1445`.
+The repo now includes a pinned Docker Compose target at [docker/samba/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/compose.yaml) with config in [docker/samba/data/config.yml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/data/config.yml). It exposes Samba on `127.0.0.1:1445`.
 
 Bring it up with:
 
