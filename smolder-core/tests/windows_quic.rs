@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use smolder_core::auth::NtlmCredentials;
 use smolder_core::facade::Client;
+use smolder_core::transport::TransportTarget;
 use tokio::sync::Mutex;
 
 fn required_env(name: &str) -> Option<String> {
@@ -47,6 +48,7 @@ impl WindowsQuicConfig {
 
     fn client(&self) -> Result<Client, smolder_core::error::CoreError> {
         let mut builder = Client::builder(self.server.clone())
+            .with_transport_target(TransportTarget::quic(self.server.clone()))
             .with_port(self.port)
             .with_connect_host(self.connect_host.clone())
             .with_tls_server_name(self.tls_server_name.clone());

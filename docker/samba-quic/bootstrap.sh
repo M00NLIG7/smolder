@@ -31,6 +31,10 @@ if [[ ! -f "${TLS_DIR}/key.pem" || ! -f "${TLS_DIR}/cert.pem" ]]; then
     -subj "/CN=${SERVER_NAME}"
 fi
 
+if [[ ! -f "${TLS_DIR}/ca.pem" ]]; then
+  cp "${TLS_DIR}/cert.pem" "${TLS_DIR}/ca.pem"
+fi
+
 cat >/etc/samba/smb.conf <<EOF
 [global]
     workgroup = ${WORKGROUP}
