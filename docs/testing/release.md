@@ -46,6 +46,7 @@ If a change touches any of these areas, run the appropriate gates before merge:
 - durable handles / reconnect
 - `smbexec` / `psexec`
 - high-level file facade or CLI file commands
+- SMB over QUIC transport or TLS server-name handling
 
 ## Required Gates
 
@@ -78,6 +79,15 @@ This includes:
 - `smbexec whoami`
 - `psexec whoami`
 
+### For SMB over QUIC changes
+
+Required when the `quic` feature or QUIC transport logic changed:
+
+- `cargo test -p smolder-smb-core --features quic --lib`
+- a manual QUIC replay against a real Windows Server target:
+  - [run-windows-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-quic-interop.sh)
+  - [windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md)
+
 ### For DFS changes
 
 Required when DFS path resolution or CLI path handling changed:
@@ -104,6 +114,7 @@ If the service payload changed too:
 | --- | --- |
 | `smolder-proto` packet/codecs only | Samba interop workflow |
 | `smolder-core` auth/session/transport | Samba interop workflow + Windows release gate |
+| `smolder-core` QUIC transport | `cargo test -p smolder-smb-core --features quic --lib` + Windows QUIC manual lane |
 | `smolder-core` pipes/RPC | Samba interop workflow + Windows release gate |
 | `smolder-tools` file facade / CLI | Samba interop workflow + Windows release gate when Windows behavior could differ |
 | `smolder-tools` DFS | Samba interop workflow + Windows tools gate with DFS root configured |

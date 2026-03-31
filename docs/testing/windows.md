@@ -12,6 +12,10 @@ especially for:
 - encrypted-share behavior on Windows
 - `smbexec` / `psexec` smoke validation
 
+This document does not cover SMB over QUIC. That requires a dedicated Windows
+Server target and is documented separately in
+[windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md).
+
 ## Fixture
 
 Current local fixture assumptions:
