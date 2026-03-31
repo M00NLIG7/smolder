@@ -52,7 +52,7 @@ fn samba_lock() -> &'static Mutex<()> {
 }
 
 #[tokio::test]
-async fn opens_and_closes_samba_lsarpc_policy_when_configured() {
+async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaLsarpcConfig::from_env() else {
         eprintln!("skipping live Samba LSARPC test: SMOLDER_SAMBA_HOST must be set");
@@ -65,7 +65,7 @@ async fn opens_and_closes_samba_lsarpc_policy_when_configured() {
         .with_ntlm_credentials(credentials)
         .build()
         .expect("client builder should succeed");
-    let lsarpc = client
+    let mut lsarpc = client
         .connect_lsarpc()
         .await
         .expect("should bind and open lsarpc on Samba");
@@ -73,6 +73,26 @@ async fn opens_and_closes_samba_lsarpc_policy_when_configured() {
         lsarpc.desired_access(),
         smolder_core::prelude::DEFAULT_POLICY_ACCESS,
         "typed Samba LSARPC client should retain its requested policy access"
+    );
+    let primary_domain = lsarpc
+        .primary_domain_info()
+        .await
+        .expect("primary domain query should succeed on standalone Samba");
+    assert!(
+        !primary_domain.name.is_empty(),
+        "standalone Samba should report a primary domain or workgroup name"
+    );
+    let account_domain = lsarpc
+        .account_domain_info()
+        .await
+        .expect("account domain query should succeed on standalone Samba");
+    assert!(
+        !account_domain.name.is_empty(),
+        "standalone Samba should report an account domain name"
+    );
+    assert!(
+        account_domain.sid.is_some(),
+        "standalone Samba account domain information should include a SID"
     );
 
     let connection = close_lsarpc(lsarpc)

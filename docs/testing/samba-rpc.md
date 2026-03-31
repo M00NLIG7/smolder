@@ -56,7 +56,7 @@ Today that test proves:
 
 - `IPC$` access against the standalone Samba fixture
 - `\\PIPE\\lsarpc` open via the high-level client facade
-- typed `LsarpcClient` bind/open-policy/close round-trip
+- typed `LsarpcClient` bind plus primary/account-domain policy queries
 
 The same harness now also includes:
 

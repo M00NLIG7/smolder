@@ -18,11 +18,13 @@ const LSARPC_SYNTAX: SyntaxId = SyntaxId::new(
 );
 const LSARPC_CONTEXT_ID: u16 = 0;
 const LSAR_CLOSE_OPNUM: u16 = 0;
+const LSAR_QUERY_INFORMATION_POLICY_OPNUM: u16 = 7;
 const LSAR_OPEN_POLICY2_OPNUM: u16 = 44;
 const LSAR_QUERY_INFORMATION_POLICY2_OPNUM: u16 = 46;
 const POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS: u32 = 3;
 const POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS: u32 = 5;
 const POLICY_VIEW_LOCAL_INFORMATION: u32 = 0x0000_0001;
+const RPC_S_OP_RANGE_ERROR: u32 = 0x1c01_0002;
 
 /// Default policy access mask used by the typed LSARPC client.
 pub const DEFAULT_POLICY_ACCESS: u32 = POLICY_VIEW_LOCAL_INFORMATION;
@@ -109,15 +111,7 @@ where
     /// Queries `PolicyPrimaryDomainInformation`.
     pub async fn primary_domain_info(&mut self) -> Result<LsaDomainInfo, CoreError> {
         let response = self
-            .rpc
-            .call(
-                self.context_id,
-                LSAR_QUERY_INFORMATION_POLICY2_OPNUM,
-                encode_query_policy_request(
-                    self.policy_handle,
-                    POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS,
-                ),
-            )
+            .query_policy_information(POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS)
             .await?;
         parse_primary_domain_info_response(&response)
     }
@@ -125,15 +119,7 @@ where
     /// Queries `PolicyAccountDomainInformation`.
     pub async fn account_domain_info(&mut self) -> Result<LsaDomainInfo, CoreError> {
         let response = self
-            .rpc
-            .call(
-                self.context_id,
-                LSAR_QUERY_INFORMATION_POLICY2_OPNUM,
-                encode_query_policy_request(
-                    self.policy_handle,
-                    POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS,
-                ),
-            )
+            .query_policy_information(POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS)
             .await?;
         parse_account_domain_info_response(&response)
     }
@@ -151,6 +137,41 @@ where
         parse_close_handle_response(&response)?;
         Ok(self.rpc)
     }
+
+    async fn query_policy_information(&mut self, info_class: u32) -> Result<Vec<u8>, CoreError> {
+        let request = encode_query_policy_request(self.policy_handle, info_class);
+        match self
+            .rpc
+            .call(
+                self.context_id,
+                LSAR_QUERY_INFORMATION_POLICY2_OPNUM,
+                request.clone(),
+            )
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(error) if should_retry_legacy_policy_query(&error) => {
+                self.rpc
+                    .call(
+                        self.context_id,
+                        LSAR_QUERY_INFORMATION_POLICY_OPNUM,
+                        request,
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn should_retry_legacy_policy_query(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::RemoteOperation {
+            operation: "rpc_fault",
+            code: RPC_S_OP_RANGE_ERROR,
+        }
+    )
 }
 
 fn encode_open_policy2_request(desired_access: u32) -> Vec<u8> {
@@ -199,6 +220,10 @@ fn parse_primary_domain_info_response(response: &[u8]) -> Result<LsaDomainInfo, 
             "LsarQueryInformationPolicy2 did not return primary domain data",
         ));
     }
+    reader.consume_optional_union_discriminant(
+        POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS,
+        "PrimaryDomainInfoClass",
+    )?;
 
     let name_header = reader.read_unicode_string_header("PrimaryDomainName")?;
     let sid_referent = reader.read_u32("PrimaryDomainSidReferent")?;
@@ -227,6 +252,10 @@ fn parse_account_domain_info_response(response: &[u8]) -> Result<LsaDomainInfo, 
             "LsarQueryInformationPolicy2 did not return account domain data",
         ));
     }
+    reader.consume_optional_union_discriminant(
+        POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS,
+        "AccountDomainInfoClass",
+    )?;
 
     let name_header = reader.read_unicode_string_header("AccountDomainName")?;
     let sid_referent = reader.read_u32("AccountDomainSidReferent")?;
@@ -295,6 +324,33 @@ impl<'a> NdrReader<'a> {
         Ok(())
     }
 
+    fn consume_optional_union_discriminant(
+        &mut self,
+        expected: u32,
+        field: &'static str,
+    ) -> Result<(), CoreError> {
+        if self.remaining() < 4 {
+            return Ok(());
+        }
+        if self.peek_u32(field)? == expected {
+            let _ = self.read_u32(field)?;
+        }
+        Ok(())
+    }
+
+    fn peek_u32(&self, field: &'static str) -> Result<u32, CoreError> {
+        let padding = (4 - (self.offset % 4)) % 4;
+        if self.remaining() < padding + 4 {
+            return Err(CoreError::InvalidResponse(field));
+        }
+        let offset = self.offset + padding;
+        Ok(u32::from_le_bytes(
+            self.bytes[offset..offset + 4]
+                .try_into()
+                .expect("u32 slice should decode"),
+        ))
+    }
+
     fn read_u32(&mut self, field: &'static str) -> Result<u32, CoreError> {
         self.align(4, field)?;
         if self.remaining() < 4 {
@@ -349,17 +405,48 @@ impl<'a> NdrReader<'a> {
         if max_count * 2 < header.length || header.maximum_length < header.length {
             return Err(CoreError::InvalidResponse(field));
         }
-        let mut code_units = Vec::with_capacity(max_count);
-        for _ in 0..max_count {
+        let expected_units = header.length / 2;
+        let mut units_to_read = max_count;
+        if self.remaining() >= 8 {
+            let offset = u32::from_le_bytes(
+                self.bytes[self.offset..self.offset + 4]
+                    .try_into()
+                    .expect("offset slice should decode"),
+            ) as usize;
+            let actual_count = u32::from_le_bytes(
+                self.bytes[self.offset + 4..self.offset + 8]
+                    .try_into()
+                    .expect("actual count slice should decode"),
+            ) as usize;
+            if offset <= max_count && actual_count <= max_count && actual_count >= expected_units {
+                self.offset += 8;
+                units_to_read = actual_count;
+            }
+        }
+
+        let mut code_units = Vec::with_capacity(units_to_read);
+        for _ in 0..units_to_read {
             code_units.push(self.read_u16(field)?);
         }
         self.align(4, field)?;
-        let actual_units = header.length / 2;
-        String::from_utf16(&code_units[..actual_units])
+        String::from_utf16(&code_units[..expected_units])
             .map_err(|_| CoreError::InvalidResponse("failed to decode lsarpc UTF-16 string"))
     }
 
     fn read_sid(&mut self, field: &'static str) -> Result<LsaSid, CoreError> {
+        self.align(4, field)?;
+        if self.remaining() >= 12 {
+            let possible_sub_authority_count = u32::from_le_bytes(
+                self.bytes[self.offset..self.offset + 4]
+                    .try_into()
+                    .expect("sub-authority count slice should decode"),
+            ) as usize;
+            let revision = self.bytes[self.offset + 4];
+            let actual_sub_authority_count = self.bytes[self.offset + 5] as usize;
+            if revision == 1 && possible_sub_authority_count == actual_sub_authority_count {
+                self.offset += 4;
+            }
+        }
         if self.remaining() < 8 {
             return Err(CoreError::InvalidResponse(field));
         }
@@ -387,8 +474,10 @@ mod tests {
     use super::{
         encode_close_handle_request, encode_open_policy2_request, encode_query_policy_request,
         parse_account_domain_info_response, parse_close_handle_response,
-        parse_open_policy2_response, parse_primary_domain_info_response, LsaDomainInfo, LsaSid,
-        DEFAULT_POLICY_ACCESS,
+        parse_open_policy2_response, parse_primary_domain_info_response,
+        should_retry_legacy_policy_query, LsaDomainInfo, LsaSid, DEFAULT_POLICY_ACCESS,
+        POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS, POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS,
+        RPC_S_OP_RANGE_ERROR,
     };
     use crate::error::CoreError;
 
@@ -433,6 +522,26 @@ mod tests {
             self.align_deferred(4);
         }
 
+        fn write_varying_unicode_string_header(&mut self, value: &str) {
+            let encoded = value.encode_utf16().collect::<Vec<_>>();
+            let byte_len = (encoded.len() * 2) as u16;
+            self.write_u16(byte_len);
+            self.write_u16(byte_len);
+            let referent = self.take_referent();
+            self.write_u32(referent);
+
+            self.align_deferred(4);
+            self.deferred
+                .extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            self.deferred.extend_from_slice(&0_u32.to_le_bytes());
+            self.deferred
+                .extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            for code_unit in encoded {
+                self.deferred.extend_from_slice(&code_unit.to_le_bytes());
+            }
+            self.align_deferred(4);
+        }
+
         fn write_null_unicode_string_header(&mut self) {
             self.write_u16(0);
             self.write_u16(0);
@@ -445,6 +554,25 @@ mod tests {
                     let referent = self.take_referent();
                     self.write_u32(referent);
                     self.align_deferred(4);
+                    self.deferred.push(sid.revision);
+                    self.deferred.push(sid.sub_authorities.len() as u8);
+                    self.deferred.extend_from_slice(&sid.identifier_authority);
+                    for sub_authority in &sid.sub_authorities {
+                        self.deferred.extend_from_slice(&sub_authority.to_le_bytes());
+                    }
+                }
+                None => self.write_u32(0),
+            }
+        }
+
+        fn write_sid_pointer_with_conformant_count(&mut self, sid: Option<&LsaSid>) {
+            match sid {
+                Some(sid) => {
+                    let referent = self.take_referent();
+                    self.write_u32(referent);
+                    self.align_deferred(4);
+                    self.deferred
+                        .extend_from_slice(&(sid.sub_authorities.len() as u32).to_le_bytes());
                     self.deferred.push(sid.revision);
                     self.deferred.push(sid.sub_authorities.len() as u8);
                     self.deferred.extend_from_slice(&sid.identifier_authority);
@@ -566,6 +694,74 @@ mod tests {
     }
 
     #[test]
+    fn parse_primary_domain_info_response_decodes_varying_string_layout() {
+        let sid = LsaSid {
+            revision: 1,
+            identifier_authority: [0, 0, 0, 0, 0, 5],
+            sub_authorities: vec![21, 42, 84],
+        };
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(1);
+        writer.write_varying_unicode_string_header("WORKGROUP");
+        writer.write_sid_pointer(Some(&sid));
+
+        assert_eq!(
+            parse_primary_domain_info_response(&writer.finish_with_status(0))
+                .expect("response should decode"),
+            LsaDomainInfo {
+                name: "WORKGROUP".to_owned(),
+                sid: Some(sid),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_primary_domain_info_response_decodes_union_discriminant_layout() {
+        let sid = LsaSid {
+            revision: 1,
+            identifier_authority: [0, 0, 0, 0, 0, 5],
+            sub_authorities: vec![21, 42, 84],
+        };
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(1);
+        writer.write_u32(POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS);
+        writer.write_varying_unicode_string_header("WORKGROUP");
+        writer.write_sid_pointer(Some(&sid));
+
+        assert_eq!(
+            parse_primary_domain_info_response(&writer.finish_with_status(0))
+                .expect("response should decode"),
+            LsaDomainInfo {
+                name: "WORKGROUP".to_owned(),
+                sid: Some(sid),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_account_domain_info_response_decodes_union_and_sid_count_layout() {
+        let sid = LsaSid {
+            revision: 1,
+            identifier_authority: [0, 0, 0, 0, 0, 5],
+            sub_authorities: vec![21, 42, 84, 0],
+        };
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(1);
+        writer.write_u32(POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS);
+        writer.write_varying_unicode_string_header("B104FD764986");
+        writer.write_sid_pointer_with_conformant_count(Some(&sid));
+
+        assert_eq!(
+            parse_account_domain_info_response(&writer.finish_with_status(0))
+                .expect("response should decode"),
+            LsaDomainInfo {
+                name: "B104FD764986".to_owned(),
+                sid: Some(sid),
+            }
+        );
+    }
+
+    #[test]
     fn parse_close_handle_response_checks_status() {
         let response = [
             [0_u8; 20].as_slice(),
@@ -598,5 +794,17 @@ mod tests {
     fn close_handle_request_uses_handle_bytes_directly() {
         let request = encode_close_handle_request([0xaa; 20]);
         assert_eq!(request, vec![0xaa; 20]);
+    }
+
+    #[test]
+    fn op_range_rpc_fault_retries_with_legacy_policy_query() {
+        assert!(should_retry_legacy_policy_query(&CoreError::RemoteOperation {
+            operation: "rpc_fault",
+            code: RPC_S_OP_RANGE_ERROR,
+        }));
+        assert!(!should_retry_legacy_policy_query(&CoreError::RemoteOperation {
+            operation: "rpc_fault",
+            code: 5,
+        }));
     }
 }

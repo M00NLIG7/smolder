@@ -28,11 +28,20 @@ and the versioning/MSRV rules are defined in
 - Added deeper standalone Samba `SAMR` coverage to `smolder-smb-core`,
   including domain open, user enumeration, user open, and account-name query
   flows over `\\PIPE\\samr`.
+- Added deeper standalone Samba `LSARPC` coverage to `smolder-smb-core`,
+  including primary-domain and account-domain policy queries over
+  `\\PIPE\\lsarpc`.
 
 ### Fixed
 
 - Fixed `SAMR` NDR encoding and decoding for lookup-domain, open-domain, and
   account-name query paths against standalone Samba fixtures.
+- Refactored `smolder-smb-core` so the SMB client speaks raw SMB messages
+  internally while framed TCP transport remains a compatibility layer for
+  custom transports.
+- Fixed standalone Samba `LSARPC` compatibility by falling back from
+  `LsarQueryInformationPolicy2` to the legacy query opnum and by decoding the
+  union/string/SID layouts returned by the live fixture.
 
 ### Release Notes Flow
 
