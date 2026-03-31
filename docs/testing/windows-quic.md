@@ -27,6 +27,9 @@ Microsoft reference:
 
 If you need to create a local Windows Server 2025 fixture from scratch, use
 [windows-quic-provisioning.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic-provisioning.md).
+On Apple Silicon, use
+[windows-quic-apple-silicon.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic-apple-silicon.md)
+instead of the x64 VirtualBox flow.
 
 ## Environment
 

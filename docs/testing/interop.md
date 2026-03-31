@@ -19,6 +19,8 @@ The Windows Kerberos member flow is documented in
 [windows-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/windows-kerberos.md).
 The dedicated Windows Server SMB over QUIC lane is documented in
 [windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md).
+The Apple Silicon local fixture path for that lane is documented in
+[windows-quic-apple-silicon.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic-apple-silicon.md).
 
 For a single entrypoint instead of running each command manually, use
 [scripts/run-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-interop.sh).

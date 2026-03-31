@@ -15,6 +15,8 @@ especially for:
 This document does not cover SMB over QUIC. That requires a dedicated Windows
 Server target and is documented separately in
 [windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md).
+On Apple Silicon, use the dedicated local path in
+[windows-quic-apple-silicon.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic-apple-silicon.md).
 
 ## Fixture
 

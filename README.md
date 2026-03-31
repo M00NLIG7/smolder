@@ -294,6 +294,10 @@ Runner bootstrap and secret setup are documented in
 For the full manual Tiny11 pass, including remote execution smoke checks, use
 [run-windows-release-gate.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-release-gate.sh)
 and [docs/testing/windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
+For the dedicated Windows Server SMB over QUIC lane, use
+[docs/testing/windows-quic.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic.md).
+On Apple Silicon, the local ARM64/UTM path is documented in
+[docs/testing/windows-quic-apple-silicon.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic-apple-silicon.md).
 For merge/release policy, required gate selection, and failure triage, use
 [docs/testing/release.md](/Users/cmagana/Projects/smolder/docs/testing/release.md).
 For the formal `0.2.x` support scope and guarantees behind those gates, use
