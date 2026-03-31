@@ -130,6 +130,88 @@ mod windows_main {
         service_proc: Option<ServiceMainFn>,
     }
 
+    struct OwnedHandle(Handle);
+
+    impl OwnedHandle {
+        fn new(handle: Handle) -> io::Result<Self> {
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(handle))
+        }
+
+        fn raw(&self) -> Handle {
+            self.0
+        }
+    }
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            close_handle_quietly(self.0);
+            self.0 = ptr::null_mut();
+        }
+    }
+
+    struct ProcThreadAttributeList {
+        storage: Vec<usize>,
+    }
+
+    impl ProcThreadAttributeList {
+        fn new(attribute_count: Dword) -> io::Result<Self> {
+            let mut size = 0;
+            unsafe {
+                let _ = InitializeProcThreadAttributeList(
+                    ptr::null_mut(),
+                    attribute_count,
+                    0,
+                    &mut size,
+                );
+            }
+
+            let units = size.div_ceil(std::mem::size_of::<usize>());
+            let mut list = Self {
+                storage: vec![0_usize; units],
+            };
+            if unsafe {
+                InitializeProcThreadAttributeList(list.as_mut_ptr(), attribute_count, 0, &mut size)
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(list)
+        }
+
+        fn update_pseudoconsole(&mut self, hpc: HpcOn) -> io::Result<()> {
+            if unsafe {
+                UpdateProcThreadAttribute(
+                    self.as_mut_ptr(),
+                    0,
+                    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                    hpc.cast::<c_void>(),
+                    std::mem::size_of::<HpcOn>(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+
+        fn as_mut_ptr(&mut self) -> *mut c_void {
+            self.storage.as_mut_ptr() as *mut c_void
+        }
+    }
+
+    impl Drop for ProcThreadAttributeList {
+        fn drop(&mut self) {
+            unsafe {
+                DeleteProcThreadAttributeList(self.as_mut_ptr());
+            }
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct PseudoConsoleApi {
         create: CreatePseudoConsoleFn,
@@ -137,30 +219,29 @@ mod windows_main {
     }
 
     struct PseudoConsoleChild {
-        process: Handle,
+        process: OwnedHandle,
         hpc: HpcOn,
         api: PseudoConsoleApi,
     }
 
     impl PseudoConsoleChild {
         fn wait(self) -> io::Result<u32> {
-            if unsafe { WaitForSingleObject(self.process, INFINITE) } == u32::MAX {
+            if wait_for_single_object(self.process.raw(), INFINITE) == u32::MAX {
                 let error = io::Error::last_os_error();
-                unsafe {
-                    let _ = CloseHandle(self.process);
-                    (self.api.close)(self.hpc);
-                }
+                close_pseudo_console(self.api, self.hpc);
                 return Err(error);
             }
 
-            let mut exit_code = 1;
-            let exit_result = unsafe { GetExitCodeProcess(self.process, &mut exit_code) };
-            unsafe {
-                let _ = CloseHandle(self.process);
-                (self.api.close)(self.hpc);
-            }
-            if exit_result == 0 {
-                return Err(io::Error::last_os_error());
+            let exit_code = match get_process_exit_code(self.process.raw()) {
+                Ok(code) => code,
+                Err(error) => {
+                    close_pseudo_console(self.api, self.hpc);
+                    return Err(error);
+                }
+            };
+            close_pseudo_console(self.api, self.hpc);
+            if exit_code == 0 {
+                return Ok(exit_code);
             }
             Ok(exit_code)
         }
@@ -278,6 +359,245 @@ mod windows_main {
 
     static LAUNCH_STATE: OnceLock<LaunchState> = OnceLock::new();
 
+    fn close_handle_quietly(handle: Handle) {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return;
+        }
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+    }
+
+    fn wait_for_single_object(handle: Handle, milliseconds: Dword) -> Dword {
+        unsafe { WaitForSingleObject(handle, milliseconds) }
+    }
+
+    fn get_process_exit_code(process: Handle) -> io::Result<u32> {
+        let mut exit_code = 1;
+        if unsafe { GetExitCodeProcess(process, &mut exit_code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(exit_code)
+    }
+
+    fn close_pseudo_console(api: PseudoConsoleApi, hpc: HpcOn) {
+        unsafe {
+            (api.close)(hpc);
+        }
+    }
+
+    fn start_service_dispatcher(service_table: &[ServiceTableEntryW]) -> io::Result<()> {
+        if unsafe { StartServiceCtrlDispatcherW(service_table.as_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn register_service_control_handler(
+        service_name: *const u16,
+    ) -> io::Result<ServiceStatusHandle> {
+        let status_handle = unsafe {
+            RegisterServiceCtrlHandlerExW(
+                service_name,
+                Some(service_control_handler),
+                ptr::null_mut(),
+            )
+        };
+        if status_handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(status_handle)
+    }
+
+    fn create_named_pipe_handle(name: *const u16, open_mode: Dword) -> io::Result<Handle> {
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name,
+                open_mode,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_INSTANCE_COUNT,
+                PIPE_BUFFER_SIZE,
+                PIPE_BUFFER_SIZE,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(handle)
+    }
+
+    fn file_from_handle(handle: Handle) -> File {
+        // Safety: ownership is transferred from a successful Win32 constructor
+        // like CreateNamedPipeW/CreatePipe into File exactly once.
+        unsafe { File::from_raw_handle(handle) }
+    }
+
+    fn connect_named_pipe_handle(handle: Handle) -> io::Result<()> {
+        if unsafe { ConnectNamedPipe(handle, ptr::null_mut()) } == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_PIPE_CONNECTED) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn flush_handle_buffers(handle: Handle) -> io::Result<()> {
+        if unsafe { FlushFileBuffers(handle) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn current_process_handle() -> Handle {
+        unsafe { GetCurrentProcess() }
+    }
+
+    fn create_pipe_handles(
+        security_attributes: &SecurityAttributes,
+    ) -> io::Result<(Handle, Handle)> {
+        let mut read_handle = ptr::null_mut();
+        let mut write_handle = ptr::null_mut();
+        if unsafe {
+            CreatePipe(
+                &mut read_handle,
+                &mut write_handle,
+                security_attributes,
+                PIPE_BUFFER_SIZE,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((read_handle, write_handle))
+    }
+
+    fn module_handle(module_name: &OsStr) -> Option<Handle> {
+        let module_name = wide_null(module_name);
+        let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
+        (!module.is_null()).then_some(module)
+    }
+
+    fn proc_address(module: Handle, proc_name: &[u8]) -> Option<*mut c_void> {
+        let proc = unsafe { GetProcAddress(module, proc_name.as_ptr()) };
+        (!proc.is_null()).then_some(proc)
+    }
+
+    unsafe fn cast_create_pseudo_console_fn(proc: *mut c_void) -> CreatePseudoConsoleFn {
+        // Safety: the caller only passes the address of kernel32!CreatePseudoConsole.
+        std::mem::transmute::<*mut c_void, CreatePseudoConsoleFn>(proc)
+    }
+
+    unsafe fn cast_close_pseudo_console_fn(proc: *mut c_void) -> ClosePseudoConsoleFn {
+        // Safety: the caller only passes the address of kernel32!ClosePseudoConsole.
+        std::mem::transmute::<*mut c_void, ClosePseudoConsoleFn>(proc)
+    }
+
+    fn active_console_session_id() -> Dword {
+        unsafe { WTSGetActiveConsoleSessionId() }
+    }
+
+    fn open_current_process_token(desired_access: Dword) -> io::Result<OwnedHandle> {
+        let mut token = ptr::null_mut();
+        if unsafe { OpenProcessToken(current_process_handle(), desired_access, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedHandle::new(token)
+    }
+
+    fn duplicate_primary_token(
+        existing_token: Handle,
+        desired_access: Dword,
+    ) -> io::Result<OwnedHandle> {
+        let mut primary_token = ptr::null_mut();
+        if unsafe {
+            DuplicateTokenEx(
+                existing_token,
+                desired_access,
+                ptr::null(),
+                SECURITY_IMPERSONATION,
+                TOKEN_PRIMARY,
+                &mut primary_token,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedHandle::new(primary_token)
+    }
+
+    fn set_token_session_id(token: Handle, session_id: Dword) -> io::Result<()> {
+        if unsafe {
+            SetTokenInformation(
+                token,
+                TOKEN_SESSION_ID_CLASS,
+                (&session_id as *const Dword).cast::<c_void>(),
+                std::mem::size_of::<Dword>() as Dword,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn create_process_as_user(
+        token: Handle,
+        command_line: &mut [u16],
+        current_directory: Option<&Vec<u16>>,
+        startup_info: &mut StartupInfoW,
+        process_information: &mut ProcessInformation,
+    ) -> io::Result<()> {
+        if unsafe {
+            CreateProcessAsUserW(
+                token,
+                ptr::null(),
+                command_line.as_mut_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                EXTENDED_STARTUPINFO_PRESENT,
+                ptr::null_mut(),
+                current_directory.map_or(ptr::null(), |value| value.as_ptr()),
+                startup_info,
+                process_information,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn create_process(
+        command_line: &mut [u16],
+        current_directory: Option<&Vec<u16>>,
+        startup_info: &mut StartupInfoW,
+        process_information: &mut ProcessInformation,
+    ) -> io::Result<()> {
+        if unsafe {
+            CreateProcessW(
+                ptr::null(),
+                command_line.as_mut_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                EXTENDED_STARTUPINFO_PRESENT,
+                ptr::null_mut(),
+                current_directory.map_or(ptr::null(), |value| value.as_ptr()),
+                startup_info,
+                process_information,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn main() -> io::Result<()> {
         let args = std::env::args_os().skip(1).collect::<Vec<_>>();
         let launch = parse_launch_config(&args).map_err(|_| invalid_parameter_error())?;
@@ -322,15 +642,12 @@ mod windows_main {
             },
         ];
 
-        if unsafe { StartServiceCtrlDispatcherW(service_table.as_ptr()) } == 0 {
+        if let Err(error) = start_service_dispatcher(&service_table) {
             append_debug_log(
                 state().debug_log_path.as_deref(),
-                &format!(
-                    "StartServiceCtrlDispatcherW failed: {:?}",
-                    io::Error::last_os_error()
-                ),
+                &format!("StartServiceCtrlDispatcherW failed: {error:?}"),
             );
-            return Err(io::Error::last_os_error());
+            return Err(error);
         }
         append_debug_log(
             state().debug_log_path.as_deref(),
@@ -345,23 +662,17 @@ mod windows_main {
     }
 
     fn run_service() -> io::Result<()> {
-        let status_handle = unsafe {
-            RegisterServiceCtrlHandlerExW(
-                state().service_name_wide.as_ptr(),
-                Some(service_control_handler),
-                ptr::null_mut(),
-            )
-        };
-        if status_handle.is_null() {
-            append_debug_log(
-                state().debug_log_path.as_deref(),
-                &format!(
-                    "RegisterServiceCtrlHandlerExW failed: {:?}",
-                    io::Error::last_os_error()
-                ),
-            );
-            return Err(io::Error::last_os_error());
-        }
+        let status_handle =
+            match register_service_control_handler(state().service_name_wide.as_ptr()) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    append_debug_log(
+                        state().debug_log_path.as_deref(),
+                        &format!("RegisterServiceCtrlHandlerExW failed: {error:?}"),
+                    );
+                    return Err(error);
+                }
+            };
         append_debug_log(
             state().debug_log_path.as_deref(),
             "service control handler registered",
@@ -618,63 +929,31 @@ mod windows_main {
 
     fn create_named_pipe(name: &OsStr, open_mode: Dword) -> io::Result<File> {
         let name = wide_null(name);
-        let handle = unsafe {
-            CreateNamedPipeW(
-                name.as_ptr(),
-                open_mode,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                PIPE_INSTANCE_COUNT,
-                PIPE_BUFFER_SIZE,
-                PIPE_BUFFER_SIZE,
-                0,
-                ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(unsafe { File::from_raw_handle(handle) })
+        let handle = create_named_pipe_handle(name.as_ptr(), open_mode)?;
+        Ok(file_from_handle(handle))
     }
 
     fn connect_named_pipe(pipe: &File) -> io::Result<()> {
-        if unsafe { ConnectNamedPipe(pipe.as_raw_handle() as Handle, ptr::null_mut()) } == 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(ERROR_PIPE_CONNECTED) {
-                return Ok(());
-            }
-            return Err(error);
-        }
-        Ok(())
+        connect_named_pipe_handle(pipe.as_raw_handle() as Handle)
     }
 
     fn write_control_line(control_pipe: &mut File, line: &str) -> io::Result<()> {
         control_pipe.write_all(line.as_bytes())?;
         control_pipe.write_all(b"\n")?;
         control_pipe.flush()?;
-        if unsafe { FlushFileBuffers(control_pipe.as_raw_handle() as Handle) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        flush_handle_buffers(control_pipe.as_raw_handle() as Handle)
     }
 
     fn pseudo_console_api() -> Option<PseudoConsoleApi> {
         static API: OnceLock<Option<PseudoConsoleApi>> = OnceLock::new();
-        *API.get_or_init(|| unsafe {
-            let module_name = wide_null(OsStr::new("kernel32.dll"));
-            let module = GetModuleHandleW(module_name.as_ptr());
-            if module.is_null() {
-                return None;
-            }
-
-            let create = GetProcAddress(module, b"CreatePseudoConsole\0".as_ptr());
-            let close = GetProcAddress(module, b"ClosePseudoConsole\0".as_ptr());
-            if create.is_null() || close.is_null() {
-                return None;
-            }
+        *API.get_or_init(|| {
+            let module = module_handle(OsStr::new("kernel32.dll"))?;
+            let create = proc_address(module, b"CreatePseudoConsole\0")?;
+            let close = proc_address(module, b"ClosePseudoConsole\0")?;
 
             Some(PseudoConsoleApi {
-                create: std::mem::transmute::<*mut c_void, CreatePseudoConsoleFn>(create),
-                close: std::mem::transmute::<*mut c_void, ClosePseudoConsoleFn>(close),
+                create: unsafe { cast_create_pseudo_console_fn(create) },
+                close: unsafe { cast_close_pseudo_console_fn(close) },
             })
         })
     }
@@ -685,25 +964,11 @@ mod windows_main {
             security_descriptor: ptr::null_mut(),
             inherit_handle: 0,
         };
-        let mut read_handle = ptr::null_mut();
-        let mut write_handle = ptr::null_mut();
-        if unsafe {
-            CreatePipe(
-                &mut read_handle,
-                &mut write_handle,
-                &security_attributes,
-                PIPE_BUFFER_SIZE,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(unsafe {
-            (
-                File::from_raw_handle(read_handle),
-                File::from_raw_handle(write_handle),
-            )
-        })
+        let (read_handle, write_handle) = create_pipe_handles(&security_attributes)?;
+        Ok((
+            file_from_handle(read_handle),
+            file_from_handle(write_handle),
+        ))
     }
 
     fn create_pseudo_console(
@@ -726,45 +991,19 @@ mod windows_main {
         api: PseudoConsoleApi,
         hpc: HpcOn,
     ) -> io::Result<PseudoConsoleChild> {
-        let mut attribute_list_size = 0;
-        unsafe {
-            let _ =
-                InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut attribute_list_size);
-        }
-        let attribute_list_units = attribute_list_size.div_ceil(std::mem::size_of::<usize>());
-        let mut attribute_list = vec![0_usize; attribute_list_units];
-        if unsafe {
-            InitializeProcThreadAttributeList(
-                attribute_list.as_mut_ptr() as *mut c_void,
-                1,
-                0,
-                &mut attribute_list_size,
-            )
-        } == 0
-        {
-            unsafe { (api.close)(hpc) };
-            return Err(io::Error::last_os_error());
-        }
+        let mut attribute_list = match ProcThreadAttributeList::new(1) {
+            Ok(list) => list,
+            Err(error) => {
+                close_pseudo_console(api, hpc);
+                return Err(error);
+            }
+        };
 
         // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE expects the pseudoconsole handle
         // value itself, not a pointer-to-handle wrapper.
-        if unsafe {
-            UpdateProcThreadAttribute(
-                attribute_list.as_mut_ptr() as *mut c_void,
-                0,
-                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                hpc.cast::<c_void>(),
-                std::mem::size_of::<HpcOn>(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        } == 0
-        {
-            unsafe {
-                DeleteProcThreadAttributeList(attribute_list.as_mut_ptr() as *mut c_void);
-                (api.close)(hpc);
-            }
-            return Err(io::Error::last_os_error());
+        if let Err(error) = attribute_list.update_pseudoconsole(hpc) {
+            close_pseudo_console(api, hpc);
+            return Err(error);
         }
 
         let mut desktop = wide_null(OsStr::new("WinSta0\\Default"));
@@ -789,7 +1028,7 @@ mod windows_main {
                 std_output: ptr::null_mut(),
                 std_error: ptr::null_mut(),
             },
-            attribute_list: attribute_list.as_mut_ptr() as *mut c_void,
+            attribute_list: attribute_list.as_mut_ptr(),
         };
         let mut process_info = ProcessInformation {
             process: ptr::null_mut(),
@@ -803,75 +1042,43 @@ mod windows_main {
             .as_ref()
             .map(|path| wide_null(path.as_os_str()));
         let primary_token = active_console_primary_system_token(debug_log_path)?;
-        let created = if let Some(token) = primary_token {
+        let created = if let Some(token) = primary_token.as_ref() {
             append_debug_log(
                 debug_log_path,
                 "launching ConPTY child in the active console session",
             );
-            let result = unsafe {
-                CreateProcessAsUserW(
-                    token,
-                    ptr::null(),
-                    command_line.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    0,
-                    EXTENDED_STARTUPINFO_PRESENT,
-                    ptr::null_mut(),
-                    current_directory
-                        .as_ref()
-                        .map_or(ptr::null(), |value| value.as_ptr()),
-                    &mut startup_info.startup_info,
-                    &mut process_info,
-                )
-            };
-            unsafe {
-                let _ = CloseHandle(token);
-            }
-            result
+            create_process_as_user(
+                token.raw(),
+                &mut command_line,
+                current_directory.as_ref(),
+                &mut startup_info.startup_info,
+                &mut process_info,
+            )
         } else {
             append_debug_log(
                 debug_log_path,
                 "launching ConPTY child in the current service session",
             );
-            unsafe {
-                CreateProcessW(
-                    ptr::null(),
-                    command_line.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    0,
-                    EXTENDED_STARTUPINFO_PRESENT,
-                    ptr::null_mut(),
-                    current_directory
-                        .as_ref()
-                        .map_or(ptr::null(), |value| value.as_ptr()),
-                    &mut startup_info.startup_info,
-                    &mut process_info,
-                )
-            }
+            create_process(
+                &mut command_line,
+                current_directory.as_ref(),
+                &mut startup_info.startup_info,
+                &mut process_info,
+            )
         };
 
-        if created == 0 {
-            let error = io::Error::last_os_error();
+        if let Err(error) = created {
             append_debug_log(
                 debug_log_path,
                 &format!("ConPTY child CreateProcess failed: {error:?}"),
             );
-            unsafe {
-                DeleteProcThreadAttributeList(attribute_list.as_mut_ptr() as *mut c_void);
-                (api.close)(hpc);
-            }
+            close_pseudo_console(api, hpc);
             return Err(error);
         }
-
-        unsafe {
-            DeleteProcThreadAttributeList(attribute_list.as_mut_ptr() as *mut c_void);
-            let _ = CloseHandle(process_info.thread);
-        }
+        drop(OwnedHandle::new(process_info.thread)?);
 
         Ok(PseudoConsoleChild {
-            process: process_info.process,
+            process: OwnedHandle::new(process_info.process)?,
             hpc,
             api,
         })
@@ -879,8 +1086,8 @@ mod windows_main {
 
     fn active_console_primary_system_token(
         debug_log_path: Option<&Path>,
-    ) -> io::Result<Option<Handle>> {
-        let session_id = unsafe { WTSGetActiveConsoleSessionId() };
+    ) -> io::Result<Option<OwnedHandle>> {
+        let session_id = active_console_session_id();
         if session_id == u32::MAX {
             append_debug_log(
                 debug_log_path,
@@ -889,64 +1096,14 @@ mod windows_main {
             return Ok(None);
         }
 
-        let mut current_token = ptr::null_mut();
-        if unsafe {
-            OpenProcessToken(
-                GetCurrentProcess(),
-                TOKEN_ASSIGN_PRIMARY
-                    | TOKEN_DUPLICATE
-                    | TOKEN_QUERY
-                    | TOKEN_ADJUST_DEFAULT
-                    | TOKEN_ADJUST_SESSIONID,
-                &mut current_token,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-
-        let mut primary_token = ptr::null_mut();
-        if unsafe {
-            DuplicateTokenEx(
-                current_token,
-                TOKEN_ASSIGN_PRIMARY
-                    | TOKEN_DUPLICATE
-                    | TOKEN_QUERY
-                    | TOKEN_ADJUST_DEFAULT
-                    | TOKEN_ADJUST_SESSIONID,
-                ptr::null(),
-                SECURITY_IMPERSONATION,
-                TOKEN_PRIMARY,
-                &mut primary_token,
-            )
-        } == 0
-        {
-            let error = io::Error::last_os_error();
-            unsafe {
-                let _ = CloseHandle(current_token);
-            }
-            return Err(error);
-        }
-
-        unsafe {
-            let _ = CloseHandle(current_token);
-        }
-
-        if unsafe {
-            SetTokenInformation(
-                primary_token,
-                TOKEN_SESSION_ID_CLASS,
-                (&session_id as *const Dword).cast::<c_void>(),
-                std::mem::size_of::<Dword>() as Dword,
-            )
-        } == 0
-        {
-            let error = io::Error::last_os_error();
-            unsafe {
-                let _ = CloseHandle(primary_token);
-            }
-            return Err(error);
-        }
+        let desired_access = TOKEN_ASSIGN_PRIMARY
+            | TOKEN_DUPLICATE
+            | TOKEN_QUERY
+            | TOKEN_ADJUST_DEFAULT
+            | TOKEN_ADJUST_SESSIONID;
+        let current_token = open_current_process_token(desired_access)?;
+        let primary_token = duplicate_primary_token(current_token.raw(), desired_access)?;
+        set_token_session_id(primary_token.raw(), session_id)?;
 
         append_debug_log(
             debug_log_path,
