@@ -1,6 +1,10 @@
 use smolder_core::auth::NtlmCredentials;
-use smolder_core::prelude::{Client, CoreError};
+use smolder_core::lsarpc::LsaServerRole;
+use smolder_core::prelude::{Client, CoreError, LsarpcClient};
 use smolder_proto::smb::status::NtStatus;
+
+const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
+const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
 
 fn required_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -75,6 +79,51 @@ async fn queries_account_domain_info_when_configured() {
         "primary domain name should not be empty"
     );
 
+    let dns_domain = match lsarpc.dns_domain_info().await {
+        Ok(info) => info,
+        Err(error) if is_unsupported_policy_query_error(&error) => {
+            eprintln!("skipping live LSARPC test: DNS domain policy queries are not supported");
+            close_lsarpc(lsarpc).await;
+            return;
+        }
+        Err(error) => panic!("DNS domain query should succeed: {error:?}"),
+    };
+    assert!(
+        !dns_domain.name.is_empty(),
+        "DNS domain info should include a primary domain name"
+    );
+
+    let server_role = match lsarpc.server_role().await {
+        Ok(role) => role,
+        Err(error) if is_unsupported_policy_query_error(&error) => {
+            eprintln!("skipping live LSARPC test: server role policy queries are not supported");
+            close_lsarpc(lsarpc).await;
+            return;
+        }
+        Err(error) => panic!("server role query should succeed: {error:?}"),
+    };
+    assert!(
+        matches!(
+            server_role,
+            LsaServerRole::Primary | LsaServerRole::Backup | LsaServerRole::Unknown(_)
+        ),
+        "server role query should decode a role value"
+    );
+
+    close_lsarpc(lsarpc).await;
+}
+
+fn is_unsupported_policy_query_error(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::RemoteOperation { code, .. }
+            if *code == STATUS_INVALID_PARAMETER
+                || *code == STATUS_NOT_SUPPORTED
+                || *code == NtStatus::OBJECT_NAME_NOT_FOUND.0
+    )
+}
+
+async fn close_lsarpc(lsarpc: LsarpcClient) {
     let connection = lsarpc
         .close()
         .await

@@ -49,7 +49,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let primary_domain = lsarpc.primary_domain_info().await?;
     println!("primary domain: {}", primary_domain.name);
 
-    let connection = lsarpc.into_rpc().into_pipe().close().await?;
+    let dns_domain = lsarpc.dns_domain_info().await?;
+    println!("dns domain name: {}", dns_domain.name);
+    if !dns_domain.dns_domain_name.is_empty() {
+        println!("dns domain fqdn: {}", dns_domain.dns_domain_name);
+    }
+    if !dns_domain.dns_forest_name.is_empty() {
+        println!("dns forest: {}", dns_domain.dns_forest_name);
+    }
+    if let Some(domain_guid) = dns_domain.domain_guid {
+        println!(
+            "dns domain guid: {:08x}-{:04x}-{:04x}-{:02x?}",
+            domain_guid.data1, domain_guid.data2, domain_guid.data3, domain_guid.data4
+        );
+    }
+
+    println!("server role: {:?}", lsarpc.server_role().await?);
+
+    let connection = lsarpc.close().await?.into_pipe().close().await?;
     let connection = connection.tree_disconnect().await?;
     connection.logoff().await?;
     Ok(())

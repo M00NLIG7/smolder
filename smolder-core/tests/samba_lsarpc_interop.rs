@@ -1,7 +1,12 @@
 use std::sync::OnceLock;
 
+use smolder_core::lsarpc::LsaServerRole;
 use smolder_core::prelude::{Client, LsarpcClient, NtlmCredentials};
+use smolder_proto::smb::status::NtStatus;
 use tokio::sync::Mutex;
+
+const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
+const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
 
 fn optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -28,8 +33,7 @@ impl SambaLsarpcConfig {
                 .unwrap_or_else(|| "smolder".to_owned()),
             password: optional_env("SMOLDER_SAMBA_PASSWORD")
                 .unwrap_or_else(|| "smolderpass".to_owned()),
-            domain: optional_env("SMOLDER_SAMBA_DOMAIN")
-                .or_else(|| Some("WORKGROUP".to_owned())),
+            domain: optional_env("SMOLDER_SAMBA_DOMAIN").or_else(|| Some("WORKGROUP".to_owned())),
             workstation: optional_env("SMOLDER_SAMBA_WORKSTATION"),
         })
     }
@@ -95,6 +99,41 @@ async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
         "standalone Samba account domain information should include a SID"
     );
 
+    let dns_domain = match lsarpc.dns_domain_info().await {
+        Ok(info) => info,
+        Err(error) if is_unsupported_policy_query_error(&error) => {
+            eprintln!(
+                "skipping live Samba LSARPC test: DNS domain policy queries are not supported"
+            );
+            close_lsarpc(lsarpc).await;
+            return;
+        }
+        Err(error) => panic!("DNS domain query should succeed on standalone Samba: {error:?}"),
+    };
+    assert!(
+        !dns_domain.name.is_empty(),
+        "standalone Samba DNS domain info should include a primary domain name"
+    );
+
+    let server_role = match lsarpc.server_role().await {
+        Ok(role) => role,
+        Err(error) if is_unsupported_policy_query_error(&error) => {
+            eprintln!(
+                "skipping live Samba LSARPC test: server role policy queries are not supported"
+            );
+            close_lsarpc(lsarpc).await;
+            return;
+        }
+        Err(error) => panic!("server role query should succeed on standalone Samba: {error:?}"),
+    };
+    assert!(
+        matches!(
+            server_role,
+            LsaServerRole::Primary | LsaServerRole::Backup | LsaServerRole::Unknown(_)
+        ),
+        "standalone Samba server role should decode a role value"
+    );
+
     let connection = close_lsarpc(lsarpc)
         .await
         .into_pipe()
@@ -110,4 +149,14 @@ async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
 
 async fn close_lsarpc(lsarpc: LsarpcClient) -> smolder_core::rpc::PipeRpcClient {
     lsarpc.close().await.expect("policy close should succeed")
+}
+
+fn is_unsupported_policy_query_error(error: &smolder_core::prelude::CoreError) -> bool {
+    matches!(
+        error,
+        smolder_core::prelude::CoreError::RemoteOperation { code, .. }
+            if *code == STATUS_INVALID_PARAMETER
+                || *code == STATUS_NOT_SUPPORTED
+                || *code == NtStatus::OBJECT_NAME_NOT_FOUND.0
+    )
 }

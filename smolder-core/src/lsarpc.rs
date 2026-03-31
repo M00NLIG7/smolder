@@ -21,6 +21,8 @@ const LSAR_CLOSE_OPNUM: u16 = 0;
 const LSAR_QUERY_INFORMATION_POLICY_OPNUM: u16 = 7;
 const LSAR_OPEN_POLICY2_OPNUM: u16 = 44;
 const LSAR_QUERY_INFORMATION_POLICY2_OPNUM: u16 = 46;
+const POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS: u32 = 6;
+const POLICY_DNS_DOMAIN_INFORMATION_CLASS: u32 = 12;
 const POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS: u32 = 3;
 const POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS: u32 = 5;
 const POLICY_VIEW_LOCAL_INFORMATION: u32 = 0x0000_0001;
@@ -47,6 +49,51 @@ pub struct LsaDomainInfo {
     pub name: String,
     /// Optional domain SID.
     pub sid: Option<LsaSid>,
+}
+
+/// GUID value returned by LSARPC policy queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LsaGuid {
+    /// The first 32 bits of the GUID.
+    pub data1: u32,
+    /// The next 16 bits of the GUID.
+    pub data2: u16,
+    /// The next 16 bits of the GUID.
+    pub data3: u16,
+    /// The remaining 64 bits of the GUID.
+    pub data4: [u8; 8],
+}
+
+impl LsaGuid {
+    fn is_zero(self) -> bool {
+        self.data1 == 0 && self.data2 == 0 && self.data3 == 0 && self.data4 == [0; 8]
+    }
+}
+
+/// Decoded `POLICY_DNS_DOMAIN_INFO`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LsaDnsDomainInfo {
+    /// NetBIOS-style primary domain name.
+    pub name: String,
+    /// Fully qualified DNS domain name, if present.
+    pub dns_domain_name: String,
+    /// Fully qualified DNS forest name, if present.
+    pub dns_forest_name: String,
+    /// Optional domain GUID.
+    pub domain_guid: Option<LsaGuid>,
+    /// Optional domain SID.
+    pub sid: Option<LsaSid>,
+}
+
+/// Decoded `POLICY_LSA_SERVER_ROLE_INFO`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsaServerRole {
+    /// The account database is in backup state.
+    Backup,
+    /// The account database is in primary state.
+    Primary,
+    /// A responder returned an unexpected role value.
+    Unknown(u32),
 }
 
 /// Typed `lsarpc` client over an already-open RPC transport.
@@ -122,6 +169,22 @@ where
             .query_policy_information(POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS)
             .await?;
         parse_account_domain_info_response(&response)
+    }
+
+    /// Queries `PolicyDnsDomainInformation`.
+    pub async fn dns_domain_info(&mut self) -> Result<LsaDnsDomainInfo, CoreError> {
+        let response = self
+            .query_policy_information(POLICY_DNS_DOMAIN_INFORMATION_CLASS)
+            .await?;
+        parse_dns_domain_info_response(&response)
+    }
+
+    /// Queries `PolicyLsaServerRoleInformation`.
+    pub async fn server_role(&mut self) -> Result<LsaServerRole, CoreError> {
+        let response = self
+            .query_policy_information(POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS)
+            .await?;
+        parse_server_role_response(&response)
     }
 
     /// Closes the policy handle and returns the underlying RPC transport.
@@ -274,6 +337,79 @@ fn parse_account_domain_info_response(response: &[u8]) -> Result<LsaDomainInfo, 
     }
 
     Ok(LsaDomainInfo { name, sid })
+}
+
+fn parse_dns_domain_info_response(response: &[u8]) -> Result<LsaDnsDomainInfo, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let referent = reader.read_u32("PolicyInformation")?;
+    if referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "LsarQueryInformationPolicy2 did not return DNS domain data",
+        ));
+    }
+    reader.consume_optional_union_discriminant(
+        POLICY_DNS_DOMAIN_INFORMATION_CLASS,
+        "DnsDomainInfoClass",
+    )?;
+
+    let name_header = reader.read_unicode_string_header("DnsDomainName")?;
+    let dns_domain_name_header = reader.read_unicode_string_header("DnsDomainDnsName")?;
+    let dns_forest_name_header = reader.read_unicode_string_header("DnsForestName")?;
+    let domain_guid = reader.read_guid("DnsDomainGuid")?;
+    let sid_referent = reader.read_u32("DnsDomainSidReferent")?;
+    let name = reader.read_deferred_unicode_string(name_header, "DnsDomainName")?;
+    let dns_domain_name =
+        reader.read_deferred_unicode_string(dns_domain_name_header, "DnsDomainDnsName")?;
+    let dns_forest_name =
+        reader.read_deferred_unicode_string(dns_forest_name_header, "DnsForestName")?;
+    let sid = if sid_referent == 0 {
+        None
+    } else {
+        Some(reader.read_sid("DnsDomainSid")?)
+    };
+    let status = reader.read_u32("LsarQueryInformationPolicy2Status")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "LsarQueryInformationPolicy2(PolicyDnsDomainInformation)",
+            code: status,
+        });
+    }
+
+    Ok(LsaDnsDomainInfo {
+        name,
+        dns_domain_name,
+        dns_forest_name,
+        domain_guid: (!domain_guid.is_zero()).then_some(domain_guid),
+        sid,
+    })
+}
+
+fn parse_server_role_response(response: &[u8]) -> Result<LsaServerRole, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let referent = reader.read_u32("PolicyInformation")?;
+    if referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "LsarQueryInformationPolicy2 did not return server role data",
+        ));
+    }
+    reader.consume_optional_union_discriminant(
+        POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS,
+        "ServerRoleInfoClass",
+    )?;
+    let role = reader.read_u32("LsaServerRole")?;
+    let status = reader.read_u32("LsarQueryInformationPolicy2Status")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "LsarQueryInformationPolicy2(PolicyLsaServerRoleInformation)",
+            code: status,
+        });
+    }
+
+    Ok(match role {
+        2 => LsaServerRole::Backup,
+        3 => LsaServerRole::Primary,
+        value => LsaServerRole::Unknown(value),
+    })
 }
 
 fn encode_close_handle_request(handle: [u8; 20]) -> Vec<u8> {
@@ -435,6 +571,38 @@ impl<'a> NdrReader<'a> {
             .map_err(|_| CoreError::InvalidResponse("failed to decode lsarpc UTF-16 string"))
     }
 
+    fn read_guid(&mut self, field: &'static str) -> Result<LsaGuid, CoreError> {
+        self.align(4, field)?;
+        if self.remaining() < 16 {
+            return Err(CoreError::InvalidResponse(field));
+        }
+
+        let data1 = u32::from_le_bytes(
+            self.bytes[self.offset..self.offset + 4]
+                .try_into()
+                .expect("guid data1 should decode"),
+        );
+        let data2 = u16::from_le_bytes(
+            self.bytes[self.offset + 4..self.offset + 6]
+                .try_into()
+                .expect("guid data2 should decode"),
+        );
+        let data3 = u16::from_le_bytes(
+            self.bytes[self.offset + 6..self.offset + 8]
+                .try_into()
+                .expect("guid data3 should decode"),
+        );
+        let mut data4 = [0_u8; 8];
+        data4.copy_from_slice(&self.bytes[self.offset + 8..self.offset + 16]);
+        self.offset += 16;
+        Ok(LsaGuid {
+            data1,
+            data2,
+            data3,
+            data4,
+        })
+    }
+
     fn read_sid(&mut self, field: &'static str) -> Result<LsaSid, CoreError> {
         self.align(4, field)?;
         if self.remaining() >= 12 {
@@ -476,10 +644,12 @@ mod tests {
     use super::{
         encode_close_handle_request, encode_open_policy2_request, encode_query_policy_request,
         parse_account_domain_info_response, parse_close_handle_response,
-        parse_open_policy2_response, parse_primary_domain_info_response,
-        should_retry_legacy_policy_query, LsaDomainInfo, LsaSid, DEFAULT_POLICY_ACCESS,
-        POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS, POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS,
-        RPC_S_OP_RANGE_ERROR,
+        parse_dns_domain_info_response, parse_open_policy2_response,
+        parse_primary_domain_info_response, parse_server_role_response,
+        should_retry_legacy_policy_query, LsaDnsDomainInfo, LsaDomainInfo, LsaGuid, LsaServerRole,
+        LsaSid, DEFAULT_POLICY_ACCESS, POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS,
+        POLICY_DNS_DOMAIN_INFORMATION_CLASS, POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS,
+        POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS, RPC_S_OP_RANGE_ERROR,
     };
     use crate::error::CoreError;
 
@@ -548,6 +718,14 @@ mod tests {
             self.write_u16(0);
             self.write_u16(0);
             self.write_u32(0);
+        }
+
+        fn write_guid(&mut self, guid: LsaGuid) {
+            self.align_head(4);
+            self.head.extend_from_slice(&guid.data1.to_le_bytes());
+            self.head.extend_from_slice(&guid.data2.to_le_bytes());
+            self.head.extend_from_slice(&guid.data3.to_le_bytes());
+            self.head.extend_from_slice(&guid.data4);
         }
 
         fn write_sid_pointer(&mut self, sid: Option<&LsaSid>) {
@@ -762,6 +940,97 @@ mod tests {
                 name: "B104FD764986".to_owned(),
                 sid: Some(sid),
             }
+        );
+    }
+
+    #[test]
+    fn parse_dns_domain_info_response_decodes_domain_guid_and_sid() {
+        let sid = LsaSid {
+            revision: 1,
+            identifier_authority: [0, 0, 0, 0, 0, 5],
+            sub_authorities: vec![21, 42, 84, 126],
+        };
+        let guid = LsaGuid {
+            data1: 0x1122_3344,
+            data2: 0x5566,
+            data3: 0x7788,
+            data4: [0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78],
+        };
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(1);
+        writer.write_u32(POLICY_DNS_DOMAIN_INFORMATION_CLASS);
+        writer.write_varying_unicode_string_header("LAB");
+        writer.write_varying_unicode_string_header("lab.example.test");
+        writer.write_varying_unicode_string_header("example.test");
+        writer.write_guid(guid);
+        writer.write_sid_pointer_with_conformant_count(Some(&sid));
+
+        assert_eq!(
+            parse_dns_domain_info_response(&writer.finish_with_status(0))
+                .expect("response should decode"),
+            LsaDnsDomainInfo {
+                name: "LAB".to_owned(),
+                dns_domain_name: "lab.example.test".to_owned(),
+                dns_forest_name: "example.test".to_owned(),
+                domain_guid: Some(guid),
+                sid: Some(sid),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_dns_domain_info_response_decodes_standalone_layout() {
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(1);
+        writer.write_varying_unicode_string_header("WORKGROUP");
+        writer.write_null_unicode_string_header();
+        writer.write_null_unicode_string_header();
+        writer.write_guid(LsaGuid {
+            data1: 0,
+            data2: 0,
+            data3: 0,
+            data4: [0; 8],
+        });
+        writer.write_sid_pointer(None);
+
+        assert_eq!(
+            parse_dns_domain_info_response(&writer.finish_with_status(0))
+                .expect("response should decode"),
+            LsaDnsDomainInfo {
+                name: "WORKGROUP".to_owned(),
+                dns_domain_name: String::new(),
+                dns_forest_name: String::new(),
+                domain_guid: None,
+                sid: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_server_role_response_decodes_primary_and_unknown_roles() {
+        let primary_response = [
+            1_u32.to_le_bytes().as_slice(),
+            POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS
+                .to_le_bytes()
+                .as_slice(),
+            3_u32.to_le_bytes().as_slice(),
+            0_u32.to_le_bytes().as_slice(),
+        ]
+        .concat();
+        assert_eq!(
+            parse_server_role_response(&primary_response).expect("response should decode"),
+            LsaServerRole::Primary
+        );
+
+        let unknown_response = [
+            1_u32.to_le_bytes().as_slice(),
+            99_u32.to_le_bytes().as_slice(),
+            0_u32.to_le_bytes().as_slice(),
+        ]
+        .concat();
+        assert_eq!(
+            parse_server_role_response(&unknown_response).expect("response should decode"),
+            LsaServerRole::Unknown(99)
         );
     }
 
