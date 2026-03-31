@@ -6,10 +6,6 @@ This is the practical fixture setup for the live SMB over QUIC lane in
 Use it when you want a local VirtualBox target instead of a preexisting Windows
 Server deployment.
 
-If you are on Apple Silicon, use
-[windows-quic-apple-silicon.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic-apple-silicon.md)
-instead. This document is the x86_64 VirtualBox path only.
-
 ## What This Gives You
 
 - a local Windows Server 2025 VM shell in VirtualBox
@@ -33,9 +29,12 @@ Evaluation Center offers a current ISO and VHD. Sources:
 - enough disk for a new VM
 
 This specific VirtualBox flow assumes a host that can run the x64 Windows
-Server evaluation ISO directly. On Apple Silicon / ARM hosts, use the separate
-UTM / ARM64 path in
-[windows-quic-apple-silicon.md](/Users/cmagana/Projects/smolder/docs/testing/windows-quic-apple-silicon.md).
+Server evaluation ISO directly. On this Apple Silicon / ARM host, VirtualBox
+cannot launch that guest. In that case, use:
+
+- an x86_64 host for the VirtualBox path, or
+- a different local emulation/virtualization stack that can run x64 Windows
+  Server on ARM, which is outside the scope of this repo automation
 
 This repo does not download the ISO for you. Microsoft currently requires
 registration for the evaluation media.
