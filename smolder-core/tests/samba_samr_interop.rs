@@ -58,9 +58,7 @@ fn samba_lock() -> &'static Mutex<()> {
 async fn enumerates_samba_ad_samr_domains_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaSamrConfig::from_env() else {
-        eprintln!(
-            "skipping live Samba AD SAMR test: SMOLDER_SAMBA_AD_HOST must be set"
-        );
+        eprintln!("skipping live Samba AD SAMR test: SMOLDER_SAMBA_AD_HOST must be set");
         return;
     };
 
@@ -88,7 +86,10 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
         .enumerate_domains()
         .await
         .expect("SamrEnumerateDomainsInSamServer should succeed");
-    assert!(!domains.is_empty(), "SAMR should enumerate at least one domain");
+    assert!(
+        !domains.is_empty(),
+        "SAMR should enumerate at least one domain"
+    );
     assert!(
         domains
             .iter()
@@ -116,7 +117,9 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
         .await
         .expect("SamrEnumerateUsersInDomain should succeed");
     assert!(
-        users.iter().any(|user| user.name.eq_ignore_ascii_case("smolder")),
+        users
+            .iter()
+            .any(|user| user.name.eq_ignore_ascii_case("smolder")),
         "Samba AD SAMR user enumeration should include the fixture user"
     );
     let fixture_user = users
@@ -135,7 +138,10 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
     assert_eq!(user_info.account_name, fixture_user.name);
     let domain = user.close().await.expect("samr user close should succeed");
 
-    let rpc = domain.close().await.expect("samr domain close should succeed");
+    let rpc = domain
+        .close()
+        .await
+        .expect("samr domain close should succeed");
     let connection = rpc
         .into_pipe()
         .close()
@@ -158,12 +164,24 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
         .enumerate_aliases()
         .await
         .expect("SamrEnumerateAliasesInDomain should succeed for Builtin");
-    assert!(
-        aliases
-            .iter()
-            .any(|alias| alias.name.eq_ignore_ascii_case("Administrators")),
-        "Samba AD Builtin aliases should include Administrators"
-    );
+    let administrators = aliases
+        .iter()
+        .find(|alias| alias.name.eq_ignore_ascii_case("Administrators"))
+        .expect("Samba AD Builtin aliases should include Administrators")
+        .clone();
+    let mut alias = builtin
+        .open_alias(administrators.relative_id)
+        .await
+        .expect("should open the Samba AD Builtin Administrators alias");
+    let alias_info = alias
+        .query_general_information()
+        .await
+        .expect("SamrQueryInformationAlias should succeed for Samba AD Builtin Administrators");
+    assert_eq!(alias_info.name, administrators.name);
+    let builtin = alias
+        .close()
+        .await
+        .expect("samr alias close should succeed");
     let rpc = builtin
         .close()
         .await

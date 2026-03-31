@@ -26,12 +26,16 @@ const SAMR_OPEN_DOMAIN_OPNUM: u16 = 7;
 const SAMR_ENUMERATE_GROUPS_OPNUM: u16 = 11;
 const SAMR_ENUMERATE_USERS_OPNUM: u16 = 13;
 const SAMR_ENUMERATE_ALIASES_OPNUM: u16 = 15;
+const SAMR_OPEN_ALIAS_OPNUM: u16 = 27;
+const SAMR_QUERY_INFORMATION_ALIAS_OPNUM: u16 = 28;
 const SAMR_OPEN_USER_OPNUM: u16 = 34;
 const SAMR_QUERY_INFORMATION_USER_OPNUM: u16 = 36;
 const SAM_SERVER_CONNECT: u32 = 0x0000_0001;
 const SAM_SERVER_ENUMERATE_DOMAINS: u32 = 0x0000_0010;
 const SAM_SERVER_LOOKUP_DOMAIN: u32 = 0x0000_0020;
 const MAXIMUM_ALLOWED_ACCESS: u32 = 0x0200_0000;
+const ALIAS_READ_INFORMATION: u32 = 0x0000_0008;
+const ALIAS_GENERAL_INFORMATION_CLASS: u32 = 1;
 const USER_READ_GENERAL: u32 = 0x0000_0001;
 const USER_ACCOUNT_NAME_INFORMATION_CLASS: u32 = 7;
 
@@ -97,6 +101,17 @@ pub struct SamrAlias {
     pub name: String,
 }
 
+/// Typed alias information returned by `SamrQueryInformationAlias`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamrAliasInfo {
+    /// Alias name returned by the server.
+    pub name: String,
+    /// Number of members currently assigned to the alias.
+    pub member_count: u32,
+    /// Administrative comment returned by the server.
+    pub admin_comment: String,
+}
+
 /// Typed user information returned by `SamrQueryInformationUser`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SamrUserInfo {
@@ -123,6 +138,19 @@ pub struct SamrUserClient<T = TokioTcpTransport> {
     server_handle: [u8; 20],
     domain_handle: [u8; 20],
     user_handle: [u8; 20],
+    relative_id: u32,
+    domain_name: String,
+    domain_sid: SamrSid,
+}
+
+/// Typed `samr` alias client over an already-open alias handle.
+#[derive(Debug)]
+pub struct SamrAliasClient<T = TokioTcpTransport> {
+    rpc: PipeRpcClient<T>,
+    context_id: u16,
+    server_handle: [u8; 20],
+    domain_handle: [u8; 20],
+    alias_handle: [u8; 20],
     relative_id: u32,
     domain_name: String,
     domain_sid: SamrSid,
@@ -185,6 +213,32 @@ impl<T> SamrDomainClient<T> {
 
 impl<T> SamrUserClient<T> {
     /// Returns the opened user RID.
+    #[must_use]
+    pub fn relative_id(&self) -> u32 {
+        self.relative_id
+    }
+
+    /// Returns the name of the currently-open domain.
+    #[must_use]
+    pub fn domain_name(&self) -> &str {
+        &self.domain_name
+    }
+
+    /// Returns the SID of the currently-open domain.
+    #[must_use]
+    pub fn domain_sid(&self) -> &SamrSid {
+        &self.domain_sid
+    }
+
+    /// Returns the underlying RPC transport.
+    #[must_use]
+    pub fn rpc(&self) -> &PipeRpcClient<T> {
+        &self.rpc
+    }
+}
+
+impl<T> SamrAliasClient<T> {
+    /// Returns the opened alias RID.
     #[must_use]
     pub fn relative_id(&self) -> u32 {
         self.relative_id
@@ -337,7 +391,12 @@ where
             .call(
                 self.context_id,
                 SAMR_ENUMERATE_USERS_OPNUM,
-                encode_enumerate_users_request(self.domain_handle, 0, user_account_control, u32::MAX),
+                encode_enumerate_users_request(
+                    self.domain_handle,
+                    0,
+                    user_account_control,
+                    u32::MAX,
+                ),
             )
             .await?;
         parse_enumerate_users_response(&response)
@@ -354,6 +413,29 @@ where
             )
             .await?;
         parse_enumerate_aliases_response(&response)
+    }
+
+    /// Opens an alias handle by RID and consumes the domain-scoped client.
+    pub async fn open_alias(mut self, relative_id: u32) -> Result<SamrAliasClient<T>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_OPEN_ALIAS_OPNUM,
+                encode_open_alias_request(self.domain_handle, ALIAS_READ_INFORMATION, relative_id),
+            )
+            .await?;
+        let alias_handle = parse_open_alias_response(&response)?;
+        Ok(SamrAliasClient {
+            rpc: self.rpc,
+            context_id: self.context_id,
+            server_handle: self.server_handle,
+            domain_handle: self.domain_handle,
+            alias_handle,
+            relative_id,
+            domain_name: self.domain_name,
+            domain_sid: self.domain_sid,
+        })
     }
 
     /// Opens a user handle by RID and consumes the domain-scoped client.
@@ -429,6 +511,45 @@ where
                 self.context_id,
                 SAMR_CLOSE_HANDLE_OPNUM,
                 encode_close_handle_request(self.user_handle),
+            )
+            .await?;
+        parse_close_handle_response(&response)?;
+        Ok(SamrDomainClient {
+            rpc: self.rpc,
+            context_id: self.context_id,
+            server_handle: self.server_handle,
+            domain_handle: self.domain_handle,
+            domain_name: self.domain_name,
+            domain_sid: self.domain_sid,
+        })
+    }
+}
+
+impl<T> SamrAliasClient<T>
+where
+    T: crate::transport::SmbTransport + Send,
+{
+    /// Queries `AliasGeneralInformation` for the current alias handle.
+    pub async fn query_general_information(&mut self) -> Result<SamrAliasInfo, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_QUERY_INFORMATION_ALIAS_OPNUM,
+                encode_query_alias_request(self.alias_handle, ALIAS_GENERAL_INFORMATION_CLASS),
+            )
+            .await?;
+        parse_query_alias_general_response(&response)
+    }
+
+    /// Closes the alias handle and returns the domain-scoped client.
+    pub async fn close(mut self) -> Result<SamrDomainClient<T>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_CLOSE_HANDLE_OPNUM,
+                encode_close_handle_request(self.alias_handle),
             )
             .await?;
         parse_close_handle_response(&response)?;
@@ -661,6 +782,18 @@ fn encode_open_user_request(
     bytes
 }
 
+fn encode_open_alias_request(
+    domain_handle: [u8; 20],
+    desired_access: u32,
+    relative_id: u32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(28);
+    bytes.extend_from_slice(&domain_handle);
+    bytes.extend_from_slice(&desired_access.to_le_bytes());
+    bytes.extend_from_slice(&relative_id.to_le_bytes());
+    bytes
+}
+
 fn parse_open_user_response(response: &[u8]) -> Result<[u8; 20], CoreError> {
     if response.len() < 24 {
         return Err(CoreError::InvalidResponse(
@@ -679,9 +812,34 @@ fn parse_open_user_response(response: &[u8]) -> Result<[u8; 20], CoreError> {
     Ok(user_handle)
 }
 
+fn parse_open_alias_response(response: &[u8]) -> Result<[u8; 20], CoreError> {
+    if response.len() < 24 {
+        return Err(CoreError::InvalidResponse(
+            "SamrOpenAlias response was too short",
+        ));
+    }
+    let mut alias_handle = [0_u8; 20];
+    alias_handle.copy_from_slice(&response[..20]);
+    let status = u32::from_le_bytes(response[20..24].try_into().expect("status slice"));
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrOpenAlias",
+            code: status,
+        });
+    }
+    Ok(alias_handle)
+}
+
 fn encode_query_user_request(user_handle: [u8; 20], info_class: u32) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(24);
     bytes.extend_from_slice(&user_handle);
+    bytes.extend_from_slice(&info_class.to_le_bytes());
+    bytes
+}
+
+fn encode_query_alias_request(alias_handle: [u8; 20], info_class: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(24);
+    bytes.extend_from_slice(&alias_handle);
     bytes.extend_from_slice(&info_class.to_le_bytes());
     bytes
 }
@@ -709,6 +867,37 @@ fn parse_query_account_name_response(response: &[u8]) -> Result<SamrUserInfo, Co
         });
     }
     Ok(SamrUserInfo { account_name })
+}
+
+fn parse_query_alias_general_response(response: &[u8]) -> Result<SamrAliasInfo, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let buffer_referent = reader.read_u32("AliasInformationReferent")?;
+    if buffer_referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "SamrQueryInformationAlias did not return alias data",
+        ));
+    }
+    let info_class = reader.read_u32("AliasInformationClass")?;
+    if info_class != ALIAS_GENERAL_INFORMATION_CLASS {
+        return Err(CoreError::InvalidResponse(
+            "SamrQueryInformationAlias returned an unexpected information class",
+        ));
+    }
+    let name = reader.read_rpc_unicode_string("AliasName")?;
+    let member_count = reader.read_u32("AliasMemberCount")?;
+    let admin_comment = reader.read_rpc_unicode_string("AliasAdminComment")?;
+    let status = reader.read_u32("SamrQueryInformationAliasStatus")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrQueryInformationAlias",
+            code: status,
+        });
+    }
+    Ok(SamrAliasInfo {
+        name,
+        member_count,
+        admin_comment,
+    })
 }
 
 fn parse_enumerate_users_response(response: &[u8]) -> Result<Vec<SamrUser>, CoreError> {
@@ -1109,15 +1298,16 @@ impl NdrWriter {
 mod tests {
     use super::{
         encode_close_handle_request, encode_connect2_request, encode_connect5_request,
-        encode_enumerate_users_request, encode_enumeration_request,
-        encode_lookup_domain_request, encode_open_domain_request,
-        encode_open_user_request, encode_query_user_request, parse_close_handle_response,
+        encode_enumerate_users_request, encode_enumeration_request, encode_lookup_domain_request,
+        encode_open_alias_request, encode_open_domain_request, encode_open_user_request,
+        encode_query_alias_request, encode_query_user_request, parse_close_handle_response,
         parse_connect2_response, parse_connect5_response, parse_enumerate_aliases_response,
         parse_enumerate_domains_response, parse_enumerate_groups_response,
-        parse_enumerate_users_response, parse_lookup_domain_response, parse_open_domain_response,
-        parse_open_user_response, parse_query_account_name_response, SamrAlias, SamrDomain,
-        SamrGroup, SamrServerRevision, SamrSid, SamrUser, SamrUserInfo,
-        DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
+        parse_enumerate_users_response, parse_lookup_domain_response, parse_open_alias_response,
+        parse_open_domain_response, parse_open_user_response, parse_query_account_name_response,
+        parse_query_alias_general_response, SamrAlias, SamrAliasInfo, SamrDomain, SamrGroup,
+        SamrServerRevision, SamrSid, SamrUser, SamrUserInfo, ALIAS_GENERAL_INFORMATION_CLASS,
+        ALIAS_READ_INFORMATION, DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
         USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
     };
     use crate::error::CoreError;
@@ -1548,11 +1738,33 @@ mod tests {
     }
 
     #[test]
+    fn open_alias_request_encodes_handle_access_and_rid() {
+        assert_eq!(
+            encode_open_alias_request([0x24; 20], ALIAS_READ_INFORMATION, 544),
+            [
+                [0x24; 20].to_vec(),
+                ALIAS_READ_INFORMATION.to_le_bytes().to_vec(),
+                544_u32.to_le_bytes().to_vec(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
     fn open_user_response_decodes_handle() {
         let response = [[0x66; 20].to_vec(), 0_u32.to_le_bytes().to_vec()].concat();
         assert_eq!(
             parse_open_user_response(&response).expect("response should decode"),
             [0x66; 20]
+        );
+    }
+
+    #[test]
+    fn open_alias_response_decodes_handle() {
+        let response = [[0x67; 20].to_vec(), 0_u32.to_le_bytes().to_vec()].concat();
+        assert_eq!(
+            parse_open_alias_response(&response).expect("response should decode"),
+            [0x67; 20]
         );
     }
 
@@ -1565,6 +1777,18 @@ mod tests {
                 (USER_ACCOUNT_NAME_INFORMATION_CLASS as u32)
                     .to_le_bytes()
                     .to_vec(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn query_alias_request_encodes_handle_and_info_class() {
+        assert_eq!(
+            encode_query_alias_request([0x23; 20], ALIAS_GENERAL_INFORMATION_CLASS),
+            [
+                [0x23; 20].to_vec(),
+                ALIAS_GENERAL_INFORMATION_CLASS.to_le_bytes().to_vec(),
             ]
             .concat()
         );
@@ -1584,6 +1808,28 @@ mod tests {
                 .expect("response should decode"),
             SamrUserInfo {
                 account_name: "Administrator".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn query_alias_general_response_decodes_value() {
+        let mut writer = ResponseWriter::new();
+        let buffer_ref = writer.next_referent();
+        writer.write_u32(buffer_ref);
+        writer.write_u32(ALIAS_GENERAL_INFORMATION_CLASS);
+        writer.write_rpc_unicode_string("Administrators");
+        writer.write_u32(3);
+        writer.write_rpc_unicode_string("Builtin administrators");
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_query_alias_general_response(&writer.into_bytes())
+                .expect("response should decode"),
+            SamrAliasInfo {
+                name: "Administrators".to_owned(),
+                member_count: 3,
+                admin_comment: "Builtin administrators".to_owned(),
             }
         );
     }

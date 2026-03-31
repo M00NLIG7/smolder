@@ -28,8 +28,7 @@ impl SambaSamrStandaloneConfig {
                 .unwrap_or_else(|| "smolder".to_owned()),
             password: optional_env("SMOLDER_SAMBA_PASSWORD")
                 .unwrap_or_else(|| "smolderpass".to_owned()),
-            domain: optional_env("SMOLDER_SAMBA_DOMAIN")
-                .or_else(|| Some("WORKGROUP".to_owned())),
+            domain: optional_env("SMOLDER_SAMBA_DOMAIN").or_else(|| Some("WORKGROUP".to_owned())),
             workstation: optional_env("SMOLDER_SAMBA_WORKSTATION"),
         })
     }
@@ -84,7 +83,9 @@ async fn enumerates_standalone_samba_samr_users_when_configured() {
         .await
         .expect("SamrEnumerateDomainsInSamServer should succeed");
     assert!(
-        domains.iter().any(|domain| domain.name.eq_ignore_ascii_case("Builtin")),
+        domains
+            .iter()
+            .any(|domain| domain.name.eq_ignore_ascii_case("Builtin")),
         "standalone Samba SAMR enumeration should include Builtin"
     );
     let builtin_domain = domains
@@ -156,12 +157,24 @@ async fn enumerates_standalone_samba_samr_users_when_configured() {
         .enumerate_aliases()
         .await
         .expect("SamrEnumerateAliasesInDomain should succeed for Builtin");
-    assert!(
-        aliases
-            .iter()
-            .any(|alias| alias.name.eq_ignore_ascii_case("Administrators")),
-        "standalone Samba Builtin aliases should include Administrators"
-    );
+    let administrators = aliases
+        .iter()
+        .find(|alias| alias.name.eq_ignore_ascii_case("Administrators"))
+        .expect("standalone Samba Builtin aliases should include Administrators")
+        .clone();
+    let mut alias = builtin
+        .open_alias(administrators.relative_id)
+        .await
+        .expect("SamrOpenAlias should succeed for Builtin Administrators");
+    let alias_info = alias
+        .query_general_information()
+        .await
+        .expect("SamrQueryInformationAlias should return Builtin alias metadata");
+    assert_eq!(alias_info.name, administrators.name);
+    let builtin = alias
+        .close()
+        .await
+        .expect("samr alias close should succeed");
     let connection = close_domain(builtin)
         .await
         .into_pipe()
