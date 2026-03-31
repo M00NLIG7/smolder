@@ -42,8 +42,15 @@ host. This fixture is therefore intended for:
 
 where `quic.ko` is available.
 
-This repo currently ships the fixture scaffold and the client-side harness. It
-does not claim a full end-to-end QUIC pass from this Mac host.
+This repo now has two local proof paths:
+
+- a Linux-host path when the host kernel already provides `quic.ko`
+- an Apple Silicon path through UTM, documented in
+  [samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md)
+
+On Apple Silicon Macs, the recommended local path is now the UTM-backed Linux
+guest flow in
+[samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
 
 ## Linux Host Requirement
 
@@ -93,6 +100,10 @@ The bootstrap creates:
 - password: `smolderpass`
 - share: `share`
 - self-signed certificate with CN `files.lab.example`
+
+If you need a local Apple Silicon-compatible Linux host for this same fixture,
+use the UTM path in
+[samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
 
 ## Trust And Name Resolution
 

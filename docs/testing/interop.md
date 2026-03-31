@@ -15,6 +15,8 @@ The AD-backed Samba Kerberos fixture is documented in
 [samba-ad-kerberos.md](/Users/cmagana/Projects/smolder/docs/testing/samba-ad-kerberos.md).
 The Linux-host-only Samba QUIC fixture is documented in
 [samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md).
+The Apple Silicon UTM-backed Samba QUIC path is documented in
+[samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
 The Tiny11 / Windows release-style gate is documented in
 [windows.md](/Users/cmagana/Projects/smolder/docs/testing/windows.md).
 The Windows Kerberos member flow is documented in
@@ -154,7 +156,7 @@ Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 - GitHub Actions can also run the Windows gate through the self-hosted `interop-windows-self-hosted.yml` workflow when a runner labeled `smolder-windows-gate` is available.
 - Tiny11 / Windows still depends on the local VM fixture, local credentials, and the current VirtualBox port-forward setup.
 - The standalone Samba RPC fixture is local-only today and currently proves typed `lsarpc` policy queries plus the deeper standalone `samr` flow: bind, domain enumeration, `SamrOpenDomain`, user enumeration, `SamrOpenUser`, and `SamrQueryInformationUser` account-name lookup.
-- The SMB over QUIC lane is manual today and requires a dedicated Windows Server target through [run-windows-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-quic-interop.sh).
+- The SMB over QUIC lane is manual today and can be proven either against a dedicated Windows Server target through [run-windows-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-windows-quic-interop.sh) or against the UTM-backed Linux Samba path in [samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md).
 
 ## Core Commands
 

@@ -90,6 +90,7 @@ Required when the `quic` feature or QUIC transport logic changed:
 - optional Samba QUIC replay on a Linux host with `quic.ko`:
   - [run-samba-quic-interop.sh](/Users/cmagana/Projects/smolder/scripts/run-samba-quic-interop.sh)
   - [samba-quic.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic.md)
+  - [samba-quic-utm.md](/Users/cmagana/Projects/smolder/docs/testing/samba-quic-utm.md)
 
 ### For DFS changes
 
