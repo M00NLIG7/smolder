@@ -50,6 +50,7 @@
 //! - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
 //! - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
 //! - `cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect`
+//! - `cargo run -p smolder-smb-core --features quic --example client_quic_session_connect`
 //!
 //! Supporting project docs:
 //!

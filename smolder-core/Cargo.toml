@@ -25,6 +25,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 name = "kerberos_tree_connect"
 required-features = ["kerberos"]
 
+[[example]]
+name = "client_quic_session_connect"
+required-features = ["quic"]
+
 [features]
 default = []
 kerberos = ["kerberos-api", "kerberos-sspi"]
