@@ -45,7 +45,8 @@ pub use lock::{LockElement, LockFlags, LockRequest, LockResponse};
 pub use negotiate::{
     CipherId, CompressionCapabilities, Dialect, EncryptionCapabilities, GlobalCapabilities,
     NegotiateContext, NegotiateContextType, NegotiateRequest, NegotiateResponse,
-    PreauthIntegrityCapabilities, PreauthIntegrityHashId, SigningMode,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, SigningMode, TransportCapabilities,
+    TransportCapabilityFlags,
 };
 pub use notify::{ChangeNotifyFlags, ChangeNotifyRequest, ChangeNotifyResponse, CompletionFilter};
 pub use session::{

@@ -24,6 +24,15 @@ bitflags! {
 }
 
 bitflags! {
+    /// SMB2 transport-capability flags.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct TransportCapabilityFlags: u32 {
+        /// `SMB2_ACCEPT_TRANSPORT_LEVEL_SECURITY`
+        const ACCEPT_TRANSPORT_LEVEL_SECURITY = 0x0000_0001;
+    }
+}
+
+bitflags! {
     /// SMB2 negotiate capabilities.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct GlobalCapabilities: u32 {
@@ -196,6 +205,13 @@ pub struct CompressionCapabilities {
     pub flags: CompressionCapabilityFlags,
 }
 
+/// `SMB2_TRANSPORT_CAPABILITIES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportCapabilities {
+    /// Transport capability flags.
+    pub flags: TransportCapabilityFlags,
+}
+
 impl CompressionCapabilities {
     /// Serializes the context payload.
     #[must_use]
@@ -240,6 +256,28 @@ impl CompressionCapabilities {
             compression_algorithms,
             flags,
         })
+    }
+}
+
+impl TransportCapabilities {
+    /// Serializes the context payload.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = BytesMut::with_capacity(4);
+        out.put_u32_le(self.flags.bits());
+        out.to_vec()
+    }
+
+    /// Parses the context payload.
+    pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
+        let mut input = data;
+        let flags = TransportCapabilityFlags::from_bits(get_u32(&mut input, "flags")?).ok_or(
+            ProtocolError::InvalidField {
+                field: "flags",
+                reason: "unknown transport capability flags set",
+            },
+        )?;
+        Ok(Self { flags })
     }
 }
 
@@ -391,6 +429,25 @@ impl NegotiateContext {
             return Ok(None);
         }
         CompressionCapabilities::decode(&self.data).map(Some)
+    }
+
+    /// Builds a transport-capabilities negotiate context.
+    #[must_use]
+    pub fn transport_capabilities(capabilities: TransportCapabilities) -> Self {
+        Self {
+            context_type: NegotiateContextType::TransportCapabilities as u16,
+            data: capabilities.encode(),
+        }
+    }
+
+    /// Decodes a transport-capabilities negotiate context.
+    pub fn as_transport_capabilities(
+        &self,
+    ) -> Result<Option<TransportCapabilities>, ProtocolError> {
+        if self.context_type() != Some(NegotiateContextType::TransportCapabilities) {
+            return Ok(None);
+        }
+        TransportCapabilities::decode(&self.data).map(Some)
     }
 
     fn encode_into(&self, out: &mut Vec<u8>) {
@@ -692,7 +749,7 @@ mod tests {
     use super::{
         CipherId, CompressionCapabilities, Dialect, EncryptionCapabilities, GlobalCapabilities,
         NegotiateContext, NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities,
-        PreauthIntegrityHashId, SigningMode,
+        PreauthIntegrityHashId, SigningMode, TransportCapabilities, TransportCapabilityFlags,
     };
 
     #[test]
@@ -763,6 +820,20 @@ mod tests {
                 flags: CompressionCapabilityFlags::empty(),
             }
         );
+    }
+
+    #[test]
+    fn transport_capabilities_context_roundtrips() {
+        let capabilities = TransportCapabilities {
+            flags: TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY,
+        };
+        let context = NegotiateContext::transport_capabilities(capabilities.clone());
+
+        let decoded = context
+            .as_transport_capabilities()
+            .expect("context should decode")
+            .expect("context should be transport capabilities");
+        assert_eq!(decoded, capabilities);
     }
 
     #[test]
