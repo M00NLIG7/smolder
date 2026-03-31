@@ -95,6 +95,12 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
             .any(|domain| domain.name.eq_ignore_ascii_case("Builtin")),
         "Samba AD SAMR enumeration should include the Builtin domain"
     );
+    let builtin_domain = domains
+        .iter()
+        .find(|domain| domain.name.eq_ignore_ascii_case("Builtin"))
+        .expect("Samba AD SAMR enumeration should include the Builtin domain")
+        .name
+        .clone();
     let account_domain = domains
         .iter()
         .find(|domain| !domain.name.eq_ignore_ascii_case("Builtin"))
@@ -130,6 +136,38 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
     let domain = user.close().await.expect("samr user close should succeed");
 
     let rpc = domain.close().await.expect("samr domain close should succeed");
+    let connection = rpc
+        .into_pipe()
+        .close()
+        .await
+        .expect("pipe close should return the IPC$ tree");
+    let connection = connection
+        .tree_disconnect()
+        .await
+        .expect("tree disconnect should succeed");
+    connection.logoff().await.expect("logoff should succeed");
+
+    let samr = connect_samr_from_client(&client)
+        .await
+        .expect("should reconnect to samr for Builtin alias enumeration");
+    let mut builtin = samr
+        .open_domain(&builtin_domain)
+        .await
+        .expect("should open the Builtin domain");
+    let aliases = builtin
+        .enumerate_aliases()
+        .await
+        .expect("SamrEnumerateAliasesInDomain should succeed for Builtin");
+    assert!(
+        aliases
+            .iter()
+            .any(|alias| alias.name.eq_ignore_ascii_case("Administrators")),
+        "Samba AD Builtin aliases should include Administrators"
+    );
+    let rpc = builtin
+        .close()
+        .await
+        .expect("Builtin domain close should succeed");
     let connection = rpc
         .into_pipe()
         .close()

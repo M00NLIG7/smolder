@@ -66,7 +66,7 @@ async fn enumerates_standalone_samba_samr_users_when_configured() {
         .build()
         .expect("client builder should succeed");
 
-    let mut samr = client
+    let samr = client
         .connect()
         .await
         .expect("session connect should succeed")
@@ -87,6 +87,12 @@ async fn enumerates_standalone_samba_samr_users_when_configured() {
         domains.iter().any(|domain| domain.name.eq_ignore_ascii_case("Builtin")),
         "standalone Samba SAMR enumeration should include Builtin"
     );
+    let builtin_domain = domains
+        .iter()
+        .find(|domain| domain.name.eq_ignore_ascii_case("Builtin"))
+        .expect("standalone Samba SAMR enumeration should include Builtin")
+        .name
+        .clone();
     assert!(
         domains
             .iter()
@@ -124,6 +130,39 @@ async fn enumerates_standalone_samba_samr_users_when_configured() {
     let domain = user.close().await.expect("samr user close should succeed");
 
     let connection = close_domain(domain)
+        .await
+        .into_pipe()
+        .close()
+        .await
+        .expect("pipe close should succeed");
+    let connection = connection
+        .tree_disconnect()
+        .await
+        .expect("tree disconnect should succeed");
+    connection.logoff().await.expect("logoff should succeed");
+
+    let mut samr = client
+        .connect()
+        .await
+        .expect("session connect should succeed")
+        .connect_samr_pipe("samr")
+        .await
+        .expect("standalone Samba should expose a samr pipe");
+    let mut builtin = samr
+        .open_domain(&builtin_domain)
+        .await
+        .expect("SamrOpenDomain should succeed for Builtin");
+    let aliases = builtin
+        .enumerate_aliases()
+        .await
+        .expect("SamrEnumerateAliasesInDomain should succeed for Builtin");
+    assert!(
+        aliases
+            .iter()
+            .any(|alias| alias.name.eq_ignore_ascii_case("Administrators")),
+        "standalone Samba Builtin aliases should include Administrators"
+    );
+    let connection = close_domain(builtin)
         .await
         .into_pipe()
         .close()

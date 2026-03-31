@@ -23,7 +23,9 @@ const SAMR_CLOSE_HANDLE_OPNUM: u16 = 1;
 const SAMR_LOOKUP_DOMAIN_OPNUM: u16 = 5;
 const SAMR_ENUMERATE_DOMAINS_OPNUM: u16 = 6;
 const SAMR_OPEN_DOMAIN_OPNUM: u16 = 7;
+const SAMR_ENUMERATE_GROUPS_OPNUM: u16 = 11;
 const SAMR_ENUMERATE_USERS_OPNUM: u16 = 13;
+const SAMR_ENUMERATE_ALIASES_OPNUM: u16 = 15;
 const SAMR_OPEN_USER_OPNUM: u16 = 34;
 const SAMR_QUERY_INFORMATION_USER_OPNUM: u16 = 36;
 const SAM_SERVER_CONNECT: u32 = 0x0000_0001;
@@ -74,6 +76,24 @@ pub struct SamrUser {
     /// User RID.
     pub relative_id: u32,
     /// Account name.
+    pub name: String,
+}
+
+/// Domain-scoped group enumeration entry returned by `SamrEnumerateGroupsInDomain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamrGroup {
+    /// Group RID.
+    pub relative_id: u32,
+    /// Group name.
+    pub name: String,
+}
+
+/// Domain-scoped alias enumeration entry returned by `SamrEnumerateAliasesInDomain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamrAlias {
+    /// Alias RID.
+    pub relative_id: u32,
+    /// Alias name.
     pub name: String,
 }
 
@@ -294,6 +314,19 @@ impl<T> SamrDomainClient<T>
 where
     T: crate::transport::SmbTransport + Send,
 {
+    /// Enumerates groups in the currently-open domain.
+    pub async fn enumerate_groups(&mut self) -> Result<Vec<SamrGroup>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_ENUMERATE_GROUPS_OPNUM,
+                encode_enumeration_request(self.domain_handle, 0, u32::MAX),
+            )
+            .await?;
+        parse_enumerate_groups_response(&response)
+    }
+
     /// Enumerates users in the currently-open domain.
     pub async fn enumerate_users(
         &mut self,
@@ -304,15 +337,23 @@ where
             .call(
                 self.context_id,
                 SAMR_ENUMERATE_USERS_OPNUM,
-                encode_enumerate_users_request(
-                    self.domain_handle,
-                    0,
-                    user_account_control,
-                    u32::MAX,
-                ),
+                encode_enumerate_users_request(self.domain_handle, 0, user_account_control, u32::MAX),
             )
             .await?;
         parse_enumerate_users_response(&response)
+    }
+
+    /// Enumerates aliases in the currently-open domain.
+    pub async fn enumerate_aliases(&mut self) -> Result<Vec<SamrAlias>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_ENUMERATE_ALIASES_OPNUM,
+                encode_enumeration_request(self.domain_handle, 0, u32::MAX),
+            )
+            .await?;
+        parse_enumerate_aliases_response(&response)
     }
 
     /// Opens a user handle by RID and consumes the domain-scoped client.
@@ -596,6 +637,18 @@ fn encode_enumerate_users_request(
     bytes
 }
 
+fn encode_enumeration_request(
+    domain_handle: [u8; 20],
+    enumeration_context: u32,
+    preferred_maximum_length: u32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(28);
+    bytes.extend_from_slice(&domain_handle);
+    bytes.extend_from_slice(&enumeration_context.to_le_bytes());
+    bytes.extend_from_slice(&preferred_maximum_length.to_le_bytes());
+    bytes
+}
+
 fn encode_open_user_request(
     domain_handle: [u8; 20],
     desired_access: u32,
@@ -659,10 +712,46 @@ fn parse_query_account_name_response(response: &[u8]) -> Result<SamrUserInfo, Co
 }
 
 fn parse_enumerate_users_response(response: &[u8]) -> Result<Vec<SamrUser>, CoreError> {
+    let entries = parse_rid_enumeration_response(response, "SamrEnumerateUsersInDomain")?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| SamrUser {
+            relative_id: entry.relative_id,
+            name: entry.name,
+        })
+        .collect())
+}
+
+fn parse_enumerate_groups_response(response: &[u8]) -> Result<Vec<SamrGroup>, CoreError> {
+    let entries = parse_rid_enumeration_response(response, "SamrEnumerateGroupsInDomain")?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| SamrGroup {
+            relative_id: entry.relative_id,
+            name: entry.name,
+        })
+        .collect())
+}
+
+fn parse_enumerate_aliases_response(response: &[u8]) -> Result<Vec<SamrAlias>, CoreError> {
+    let entries = parse_rid_enumeration_response(response, "SamrEnumerateAliasesInDomain")?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| SamrAlias {
+            relative_id: entry.relative_id,
+            name: entry.name,
+        })
+        .collect())
+}
+
+fn parse_rid_enumeration_response(
+    response: &[u8],
+    operation: &'static str,
+) -> Result<Vec<RidEnumeration>, CoreError> {
     let mut reader = NdrReader::new(response);
     let _enumeration_context = reader.read_u32("EnumerationContext")?;
     let buffer_referent = reader.read_u32("BufferReferent")?;
-    let mut users = Vec::new();
+    let mut entries = Vec::new();
 
     if buffer_referent != 0 {
         let entries_read = reader.read_u32("EntriesRead")? as usize;
@@ -691,31 +780,25 @@ fn parse_enumerate_users_response(response: &[u8]) -> Result<Vec<SamrUser>, Core
             for (entry, header) in raw_entries.iter_mut().zip(headers) {
                 entry.name = reader.read_deferred_unicode_string(header, "Name")?;
             }
-            users = raw_entries
-                .into_iter()
-                .map(|entry| SamrUser {
-                    relative_id: entry.relative_id,
-                    name: entry.name,
-                })
-                .collect();
+            entries = raw_entries;
         }
     }
 
     let count_returned = reader.read_u32("CountReturned")? as usize;
-    if count_returned != users.len() {
+    if count_returned != entries.len() {
         return Err(CoreError::InvalidResponse(
-            "SamrEnumerateUsersInDomain count did not match returned entries",
+            "SAMR enumeration count did not match returned entries",
         ));
     }
 
-    let status = reader.read_u32("SamrEnumerateUsersInDomainStatus")?;
+    let status = reader.read_u32("SamrEnumerateStatus")?;
     if status != 0 && status != 0x0000_0105 {
         return Err(CoreError::RemoteOperation {
-            operation: "SamrEnumerateUsersInDomain",
+            operation,
             code: status,
         });
     }
-    Ok(users)
+    Ok(entries)
 }
 
 fn parse_enumerate_domains_response(response: &[u8]) -> Result<Vec<SamrDomain>, CoreError> {
@@ -1026,13 +1109,15 @@ impl NdrWriter {
 mod tests {
     use super::{
         encode_close_handle_request, encode_connect2_request, encode_connect5_request,
-        encode_enumerate_domains_request, encode_enumerate_users_request,
-        encode_lookup_domain_request, encode_open_domain_request, encode_open_user_request,
-        encode_query_user_request, parse_close_handle_response, parse_connect2_response,
-        parse_connect5_response, parse_enumerate_domains_response, parse_enumerate_users_response,
-        parse_lookup_domain_response, parse_open_domain_response, parse_open_user_response,
-        parse_query_account_name_response, SamrDomain, SamrServerRevision, SamrSid, SamrUser,
-        SamrUserInfo, DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
+        encode_enumerate_users_request, encode_enumeration_request,
+        encode_lookup_domain_request, encode_open_domain_request,
+        encode_open_user_request, encode_query_user_request, parse_close_handle_response,
+        parse_connect2_response, parse_connect5_response, parse_enumerate_aliases_response,
+        parse_enumerate_domains_response, parse_enumerate_groups_response,
+        parse_enumerate_users_response, parse_lookup_domain_response, parse_open_domain_response,
+        parse_open_user_response, parse_query_account_name_response, SamrAlias, SamrDomain,
+        SamrGroup, SamrServerRevision, SamrSid, SamrUser, SamrUserInfo,
+        DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
         USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
     };
     use crate::error::CoreError;
@@ -1176,13 +1261,81 @@ mod tests {
     #[test]
     fn enumerate_domains_request_encodes_handle_and_context() {
         assert_eq!(
-            encode_enumerate_domains_request([0x42; 20], 7, u32::MAX),
+            encode_enumeration_request([0x42; 20], 7, u32::MAX),
             [
                 [0x42; 20].to_vec(),
                 7_u32.to_le_bytes().to_vec(),
                 u32::MAX.to_le_bytes().to_vec()
             ]
             .concat()
+        );
+    }
+
+    #[test]
+    fn enumerate_groups_response_decodes_entries() {
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(0);
+        let buffer_ref = writer.next_referent();
+        writer.write_u32(buffer_ref);
+        writer.write_u32(2);
+        let array_ref = writer.next_referent();
+        writer.write_u32(array_ref);
+        writer.write_u32(2);
+        writer.write_u32(512);
+        writer.write_unicode_string_header("Domain Admins");
+        writer.write_u32(513);
+        writer.write_unicode_string_header("Domain Users");
+        writer.write_deferred_unicode_string("Domain Admins");
+        writer.write_deferred_unicode_string("Domain Users");
+        writer.write_u32(2);
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_enumerate_groups_response(&writer.into_bytes()).expect("response should decode"),
+            vec![
+                SamrGroup {
+                    relative_id: 512,
+                    name: "Domain Admins".to_owned(),
+                },
+                SamrGroup {
+                    relative_id: 513,
+                    name: "Domain Users".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn enumerate_aliases_response_decodes_entries() {
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(0);
+        let buffer_ref = writer.next_referent();
+        writer.write_u32(buffer_ref);
+        writer.write_u32(2);
+        let array_ref = writer.next_referent();
+        writer.write_u32(array_ref);
+        writer.write_u32(2);
+        writer.write_u32(544);
+        writer.write_unicode_string_header("Administrators");
+        writer.write_u32(545);
+        writer.write_unicode_string_header("Users");
+        writer.write_deferred_unicode_string("Administrators");
+        writer.write_deferred_unicode_string("Users");
+        writer.write_u32(2);
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_enumerate_aliases_response(&writer.into_bytes()).expect("response should decode"),
+            vec![
+                SamrAlias {
+                    relative_id: 544,
+                    name: "Administrators".to_owned(),
+                },
+                SamrAlias {
+                    relative_id: 545,
+                    name: "Users".to_owned(),
+                },
+            ]
         );
     }
 
