@@ -45,6 +45,10 @@ For the `0.3.x` line, the preferred split is:
   implementing new high-level flows inside Smolder itself
 - use `transport::TransportTarget` when you want the facade to remain the main
   API while selecting Direct TCP, NetBIOS session service, or QUIC
+- use `srvsvc::SrvsvcClient`, `lsarpc::LsarpcClient`, and `samr::SamrClient`
+  when you want typed RPC over `IPC$` without working at the raw PDU level;
+  the stable `0.3.x` examples cover `srvsvc` host/session queries, `lsarpc`
+  policy and name lookup, and `samr` alias/user enumeration
 
 ## Public But Expert-Oriented
 

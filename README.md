@@ -21,8 +21,9 @@ for:
 - high-level NetBIOS session/share connect
 - high-level share listing
 - high-level file roundtrip
-- typed `srvsvc` RPC
-- typed `lsarpc` RPC
+- typed `samr` alias metadata and member enumeration
+- typed `srvsvc` server info and session enumeration
+- typed `lsarpc` policy and name lookup RPC
 - NTLM tree connect
 - named-pipe RPC bind
 - Kerberos tree connect
@@ -106,8 +107,9 @@ Implemented now:
   SMB3 encryption, SMB compression, SMB over NetBIOS session service, named
   pipes, DCE/RPC transport, DFS referral handling, compound requests,
   durable/resilient reconnect primitives, an embedded client facade, typed
-  `srvsvc` / `lsarpc` / `samr` clients, SMB over QUIC, and feature-gated
-  Kerberos support
+  `srvsvc` / `lsarpc` / `samr` clients including `lsarpc` name lookup,
+  `samr` alias member enumeration, `srvsvc` server info and session queries,
+  SMB over QUIC, and feature-gated Kerberos support
 - `smolder-tools`: high-level SMB file APIs, DFS-aware path resolution,
   reconnect helpers, CLI file workflows, feature-gated Kerberos file auth,
   `smbexec`, and `psexec`
@@ -121,8 +123,9 @@ Validated now:
   CLI workflows, Kerberos `smbexec`, Kerberos `psexec`, `smbexec`, and `psexec`
 - Samba: negotiate, file I/O, IOCTLs, NetBIOS session-service file I/O,
   encrypted shares, encrypted `IPC$`, named pipes, encrypted RPC, standalone
-  `lsarpc` policy queries, standalone `samr` domain enumeration and user
-  queries, SMB compression, SMB over QUIC, and Kerberos core auth
+  `lsarpc` policy and name-lookup queries, standalone `samr` domain
+  enumeration, user queries, and alias member queries, typed `srvsvc` host and
+  session queries, SMB compression, SMB over QUIC, and Kerberos core auth
 
 Current priorities:
 

@@ -71,7 +71,9 @@ Supported:
 - SMB over QUIC
 - named pipes over `IPC$`
 - DCE/RPC transport over named pipes
-- typed `srvsvc`, `lsarpc`, and `samr` clients
+- typed `srvsvc`, `lsarpc`, and `samr` clients for the currently implemented
+  operations, including `srvsvc` host/session queries, `lsarpc` policy and
+  name lookup, and `samr` user/alias enumeration
 - DFS referral handling and path resolution primitives
 - compound request dispatch
 - durable and resilient handle reconnect primitives
@@ -130,7 +132,9 @@ Not guaranteed:
   - encryption
   - compression
   - named pipes and RPC
-  - typed `lsarpc` and `samr` standalone RPC coverage
+  - typed `lsarpc` policy and name lookup coverage
+  - typed `samr` standalone domain, user, and alias-member coverage
+  - typed `srvsvc` host and session query coverage
 - Samba QUIC:
   - SMB session/file flows over QUIC through the UTM-backed Linux fixture
 - Samba AD:
@@ -184,8 +188,10 @@ Supported in `0.3.x`:
 - SMB over QUIC
 - named pipes over `IPC$`
 - DCE/RPC bind/call transport over named pipes
-- typed `srvsvc`, `lsarpc`, and `samr` coverage for the currently implemented
+- typed `srvsvc` coverage for share enumeration/info plus server/session query
   operations
+- typed `lsarpc` coverage for policy open/query and name lookup operations
+- typed `samr` coverage for domain, user, and alias-member enumeration
 - DFS referral resolution
 - durable/resilient reconnect primitives
 

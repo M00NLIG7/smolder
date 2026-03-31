@@ -33,6 +33,8 @@ Recommended entry points:
 - `smolder_core::facade::{Session, Share, File, OpenOptions}` for high-level
   authenticated-session, share, and file workflows
 - `smolder_core::{srvsvc, lsarpc, samr}` for typed RPC clients over `IPC$`
+  including host/session queries, policy queries, name lookup, and account
+  enumeration
 - `smolder_core::client::Connection` for typed SMB negotiate/session/tree flow
 - `smolder_core::pipe::{SmbSessionConfig, connect_session, connect_tree, NamedPipe}`
   for lower-level session, tree, and named-pipe usage
@@ -58,5 +60,13 @@ Examples:
 - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
 - `cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect`
 - `cargo run -p smolder-smb-core --features quic --example client_quic_session_connect`
+
+Current stable examples to copy first:
+
+- `client_file_roundtrip` for facade-first file workflows
+- `client_netbios_session_connect` for SMB over NetBIOS session service
+- `client_lsarpc` for typed policy and name lookup over `IPC$`
+- `client_samr_alias_info` for alias metadata and member enumeration
+- `client_srvsvc` / `client_srvsvc_sessions` for typed server/session queries
 
 Repository: <https://github.com/M00NLIG7/smolder>

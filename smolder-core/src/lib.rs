@@ -50,6 +50,8 @@
 //! - `cargo run -p smolder-smb-core --example client_share_list`
 //! - `cargo run -p smolder-smb-core --example client_file_roundtrip`
 //! - `cargo run -p smolder-smb-core --example client_samr_alias_info`
+//! - `cargo run -p smolder-smb-core --example client_srvsvc`
+//! - `cargo run -p smolder-smb-core --example client_lsarpc`
 //! - `cargo run -p smolder-smb-core --example client_srvsvc_sessions`
 //! - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
 //! - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
@@ -70,6 +72,8 @@
 //! - [`facade::Client`] and [`facade::ClientBuilder`] for embedded client usage
 //! - [`facade::Session`], [`facade::Share`], [`facade::File`], and
 //!   [`facade::OpenOptions`] for authenticated-session, share, and file flows
+//! - [`samr::SamrClient`], [`srvsvc::SrvsvcClient`], and [`lsarpc::LsarpcClient`]
+//!   for typed RPC over `IPC$`
 //! - [`client::Connection`] plus its typestate markers for negotiate, session,
 //!   tree, and file operations
 //! - [`pipe::SmbSessionConfig`], [`pipe::connect_tree`], and
@@ -149,7 +153,10 @@ pub mod prelude {
         SamrClient, SamrDomain, SamrDomainClient, SamrGroup, SamrServerRevision, SamrSid, SamrUser,
         SamrUserClient, SamrUserInfo,
     };
-    pub use crate::srvsvc::{ServerInfo101, ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};
+    pub use crate::srvsvc::{
+        ServerInfo101, ServerInfo103, SessionInfo10, ShareInfo1, ShareInfo2, SrvsvcClient,
+        TimeOfDayInfo,
+    };
     #[cfg(feature = "quic")]
     #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
     pub use crate::transport::QuicTransport;

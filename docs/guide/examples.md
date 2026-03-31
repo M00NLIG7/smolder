@@ -24,6 +24,8 @@ The support contract for these examples lives in
 - [core_file_roundtrip.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/core_file_roundtrip.rs)
 - [client_netbios_session_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/client_netbios_session_connect.rs)
 - [client_samr_alias_info.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/client_samr_alias_info.rs)
+- [client_lsarpc.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/client_lsarpc.rs)
+- [client_srvsvc.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/client_srvsvc.rs)
 - [client_srvsvc_sessions.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/client_srvsvc_sessions.rs)
 - [ntlm_tree_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/ntlm_tree_connect.rs)
 - [named_pipe_rpc_bind.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/named_pipe_rpc_bind.rs)
@@ -96,6 +98,7 @@ shows a real domain-scoped query flow. It shows:
 - `SamrDomainClient::enumerate_aliases(...)`
 - `SamrDomainClient::open_alias(...)`
 - `SamrAliasClient::query_general_information(...)`
+- `SamrAliasClient::members()`
 
 Build it explicitly:
 
@@ -128,6 +131,49 @@ Run it:
 
 ```bash
 cargo run -p smolder-smb-core --example client_srvsvc_sessions
+```
+
+### LSARPC Policy And Name Lookup Example
+
+This is the smallest typed `LSARPC` example that goes beyond policy-handle open
+and shows a real account-domain lookup flow. It shows:
+
+- `Session::connect_lsarpc_with_access(...)`
+- `LsarpcClient::account_domain_info(...)`
+- `LsarpcClient::lookup_name(...)`
+- typed `LsaTranslatedSid` results
+
+Build it explicitly:
+
+```bash
+cargo build -p smolder-smb-core --example client_lsarpc
+```
+
+Run it:
+
+```bash
+cargo run -p smolder-smb-core --example client_lsarpc
+```
+
+### SRVSVC Server Info Example
+
+This is the smallest typed `SRVSVC` example for host-level metadata. It shows:
+
+- `Session::connect_srvsvc(...)`
+- `SrvsvcClient::server_get_info_level101(...)`
+- `SrvsvcClient::server_get_info_level103(...)`
+- typed `ServerInfo101` / `ServerInfo103` results
+
+Build it explicitly:
+
+```bash
+cargo build -p smolder-smb-core --example client_srvsvc
+```
+
+Run it:
+
+```bash
+cargo run -p smolder-smb-core --example client_srvsvc
 ```
 
 ## Standalone Demo
