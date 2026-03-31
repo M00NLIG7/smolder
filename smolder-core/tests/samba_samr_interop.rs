@@ -6,6 +6,8 @@ use smolder_proto::smb::status::NtStatus;
 use tokio::sync::Mutex;
 
 const SAMR_PIPE_CANDIDATES: &[&str] = &["samr", "lsarpc"];
+const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
+const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
 
 fn optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -178,6 +180,40 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
         .await
         .expect("SamrQueryInformationAlias should succeed for Samba AD Builtin Administrators");
     assert_eq!(alias_info.name, administrators.name);
+    let alias_members = match alias.enumerate_members().await {
+        Ok(members) => members,
+        Err(CoreError::RemoteOperation { code, .. })
+            if code == STATUS_ACCESS_DENIED || code == STATUS_NOT_SUPPORTED =>
+        {
+            eprintln!("skipping Samba AD alias member enumeration: alias membership is not available");
+            let builtin = alias
+                .close()
+                .await
+                .expect("samr alias close should succeed");
+            let rpc = builtin
+                .close()
+                .await
+                .expect("Builtin domain close should succeed");
+            let connection = rpc
+                .into_pipe()
+                .close()
+                .await
+                .expect("pipe close should return the IPC$ tree");
+            let connection = connection
+                .tree_disconnect()
+                .await
+                .expect("tree disconnect should succeed");
+            connection.logoff().await.expect("logoff should succeed");
+            return;
+        }
+        Err(error) => panic!(
+            "SamrGetMembersInAlias should succeed for Samba AD Builtin Administrators: {error:?}"
+        ),
+    };
+    assert!(
+        !alias_members.is_empty(),
+        "Samba AD Builtin Administrators should have at least one member"
+    );
     let builtin = alias
         .close()
         .await

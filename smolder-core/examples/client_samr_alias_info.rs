@@ -48,10 +48,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut alias_client = domain.open_alias(alias.relative_id).await?;
     let alias_info = alias_client.query_general_information().await?;
+    let members = alias_client.enumerate_members().await?;
     println!(
         "domain={} alias={} members={} comment={}",
         domain_name, alias_info.name, alias_info.member_count, alias_info.admin_comment
     );
+    println!("alias member sid count={}", members.len());
+    if let Some(member_sid) = members.first() {
+        println!(
+            "first alias member sid revision={} sub_authorities={}",
+            member_sid.revision,
+            member_sid.sub_authorities.len()
+        );
+    }
 
     let domain = alias_client.close().await?;
     let connection = domain.close().await?.into_pipe().close().await?;

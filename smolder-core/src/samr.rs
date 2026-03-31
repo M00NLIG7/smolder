@@ -27,6 +27,7 @@ const SAMR_ENUMERATE_GROUPS_OPNUM: u16 = 11;
 const SAMR_ENUMERATE_USERS_OPNUM: u16 = 13;
 const SAMR_ENUMERATE_ALIASES_OPNUM: u16 = 15;
 const SAMR_OPEN_ALIAS_OPNUM: u16 = 27;
+const SAMR_GET_MEMBERS_IN_ALIAS_OPNUM: u16 = 33;
 const SAMR_QUERY_INFORMATION_ALIAS_OPNUM: u16 = 28;
 const SAMR_OPEN_USER_OPNUM: u16 = 34;
 const SAMR_QUERY_INFORMATION_USER_OPNUM: u16 = 36;
@@ -34,7 +35,9 @@ const SAM_SERVER_CONNECT: u32 = 0x0000_0001;
 const SAM_SERVER_ENUMERATE_DOMAINS: u32 = 0x0000_0010;
 const SAM_SERVER_LOOKUP_DOMAIN: u32 = 0x0000_0020;
 const MAXIMUM_ALLOWED_ACCESS: u32 = 0x0200_0000;
+const ALIAS_LIST_MEMBERS: u32 = 0x0000_0004;
 const ALIAS_READ_INFORMATION: u32 = 0x0000_0008;
+const ALIAS_READ_AND_LIST_MEMBERS: u32 = ALIAS_READ_INFORMATION | ALIAS_LIST_MEMBERS;
 const ALIAS_GENERAL_INFORMATION_CLASS: u32 = 1;
 const USER_READ_GENERAL: u32 = 0x0000_0001;
 const USER_ACCOUNT_NAME_INFORMATION_CLASS: u32 = 7;
@@ -209,6 +212,7 @@ impl<T> SamrDomainClient<T> {
     pub fn rpc(&self) -> &PipeRpcClient<T> {
         &self.rpc
     }
+
 }
 
 impl<T> SamrUserClient<T> {
@@ -260,6 +264,25 @@ impl<T> SamrAliasClient<T> {
     #[must_use]
     pub fn rpc(&self) -> &PipeRpcClient<T> {
         &self.rpc
+    }
+
+}
+
+impl<T> SamrAliasClient<T>
+where
+    T: crate::transport::SmbTransport + Send,
+{
+    /// Returns the members of the currently-open alias as SIDs.
+    pub async fn enumerate_members(&mut self) -> Result<Vec<SamrSid>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                SAMR_GET_MEMBERS_IN_ALIAS_OPNUM,
+                encode_get_members_in_alias_request(self.alias_handle),
+            )
+            .await?;
+        parse_get_members_in_alias_response(&response)
     }
 }
 
@@ -422,7 +445,11 @@ where
             .call(
                 self.context_id,
                 SAMR_OPEN_ALIAS_OPNUM,
-                encode_open_alias_request(self.domain_handle, ALIAS_READ_INFORMATION, relative_id),
+                encode_open_alias_request(
+                    self.domain_handle,
+                    ALIAS_READ_AND_LIST_MEMBERS,
+                    relative_id,
+                ),
             )
             .await?;
         let alias_handle = parse_open_alias_response(&response)?;
@@ -844,6 +871,10 @@ fn encode_query_alias_request(alias_handle: [u8; 20], info_class: u32) -> Vec<u8
     bytes
 }
 
+fn encode_get_members_in_alias_request(alias_handle: [u8; 20]) -> Vec<u8> {
+    alias_handle.to_vec()
+}
+
 fn parse_query_account_name_response(response: &[u8]) -> Result<SamrUserInfo, CoreError> {
     let mut reader = NdrReader::new(response);
     let buffer_referent = reader.read_u32("UserInformationReferent")?;
@@ -898,6 +929,52 @@ fn parse_query_alias_general_response(response: &[u8]) -> Result<SamrAliasInfo, 
         member_count,
         admin_comment,
     })
+}
+
+fn parse_get_members_in_alias_response(response: &[u8]) -> Result<Vec<SamrSid>, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let member_count = reader.read_u32("AliasMemberCount")? as usize;
+    let members_referent = reader.read_u32("AliasMembersReferent")?;
+    if members_referent == 0 {
+        if member_count == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(CoreError::InvalidResponse(
+            "SamrGetMembersInAlias omitted the member SID buffer",
+        ));
+    }
+
+    let max_count = reader.read_u32("AliasMembersMaxCount")? as usize;
+    if max_count < member_count {
+        return Err(CoreError::InvalidResponse(
+            "SamrGetMembersInAlias returned fewer member slots than count",
+        ));
+    }
+
+    let mut member_headers = Vec::with_capacity(member_count);
+    for _ in 0..member_count {
+        member_headers.push(reader.read_u32("AliasMemberSidReferent")?);
+    }
+
+    let mut members = Vec::with_capacity(member_count);
+    for sid_referent in member_headers {
+        if sid_referent == 0 {
+            return Err(CoreError::InvalidResponse(
+                "SamrGetMembersInAlias returned a null SID entry",
+            ));
+        }
+        members.push(reader.read_sid("AliasMemberSid")?);
+    }
+
+    let status = reader.read_u32("SamrGetMembersInAliasStatus")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "SamrGetMembersInAlias",
+            code: status,
+        });
+    }
+
+    Ok(members)
 }
 
 fn parse_enumerate_users_response(response: &[u8]) -> Result<Vec<SamrUser>, CoreError> {
@@ -1303,11 +1380,12 @@ mod tests {
         encode_query_alias_request, encode_query_user_request, parse_close_handle_response,
         parse_connect2_response, parse_connect5_response, parse_enumerate_aliases_response,
         parse_enumerate_domains_response, parse_enumerate_groups_response,
-        parse_enumerate_users_response, parse_lookup_domain_response, parse_open_alias_response,
-        parse_open_domain_response, parse_open_user_response, parse_query_account_name_response,
+        parse_enumerate_users_response, parse_get_members_in_alias_response,
+        parse_lookup_domain_response, parse_open_alias_response, parse_open_domain_response,
+        parse_open_user_response, parse_query_account_name_response,
         parse_query_alias_general_response, SamrAlias, SamrAliasInfo, SamrDomain, SamrGroup,
         SamrServerRevision, SamrSid, SamrUser, SamrUserInfo, ALIAS_GENERAL_INFORMATION_CLASS,
-        ALIAS_READ_INFORMATION, DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
+        ALIAS_READ_AND_LIST_MEMBERS, DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
         USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
     };
     use crate::error::CoreError;
@@ -1375,6 +1453,31 @@ mod tests {
                 self.write_u16(code_unit);
             }
             self.align(4);
+        }
+
+        fn write_sid_pointer_array(&mut self, sids: &[SamrSid]) {
+            self.write_u32(sids.len() as u32);
+            if sids.is_empty() {
+                self.write_u32(0);
+                return;
+            }
+
+            let array_referent = self.next_referent();
+            self.write_u32(array_referent);
+            self.write_u32(sids.len() as u32);
+            let mut deferred = Vec::new();
+            for sid in sids {
+                let sid_referent = self.next_referent();
+                self.write_u32(sid_referent);
+                deferred.push(sid.revision);
+                deferred.push(sid.sub_authorities.len() as u8);
+                deferred.extend_from_slice(&sid.identifier_authority);
+                for sub_authority in &sid.sub_authorities {
+                    deferred.extend_from_slice(&sub_authority.to_le_bytes());
+                }
+            }
+            self.align(4);
+            self.bytes.extend_from_slice(&deferred);
         }
 
         fn next_referent(&mut self) -> u32 {
@@ -1740,10 +1843,10 @@ mod tests {
     #[test]
     fn open_alias_request_encodes_handle_access_and_rid() {
         assert_eq!(
-            encode_open_alias_request([0x24; 20], ALIAS_READ_INFORMATION, 544),
+            encode_open_alias_request([0x24; 20], ALIAS_READ_AND_LIST_MEMBERS, 544),
             [
                 [0x24; 20].to_vec(),
-                ALIAS_READ_INFORMATION.to_le_bytes().to_vec(),
+                ALIAS_READ_AND_LIST_MEMBERS.to_le_bytes().to_vec(),
                 544_u32.to_le_bytes().to_vec(),
             ]
             .concat()
@@ -1831,6 +1934,31 @@ mod tests {
                 member_count: 3,
                 admin_comment: "Builtin administrators".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn get_members_in_alias_response_decodes_sids() {
+        let members = vec![
+            SamrSid {
+                revision: 1,
+                identifier_authority: [0, 0, 0, 0, 0, 5],
+                sub_authorities: vec![32, 544],
+            },
+            SamrSid {
+                revision: 1,
+                identifier_authority: [0, 0, 0, 0, 0, 5],
+                sub_authorities: vec![32, 545],
+            },
+        ];
+        let mut writer = ResponseWriter::new();
+        writer.write_sid_pointer_array(&members);
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_get_members_in_alias_response(&writer.into_bytes())
+                .expect("response should decode"),
+            members
         );
     }
 }
