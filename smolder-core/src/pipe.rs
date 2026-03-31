@@ -872,6 +872,10 @@ pub async fn connect_session(
             .await?;
             connect_session_with_transport(transport, config).await
         }
+        TransportProtocol::Netbios => {
+            let transport = TokioTcpTransport::connect_netbios(config.transport_target()).await?;
+            connect_session_with_transport(transport, config).await
+        }
         TransportProtocol::Quic => Err(CoreError::Unsupported(
             "SMB over QUIC requires connect_session_quic",
         )),
@@ -936,6 +940,10 @@ pub async fn connect_tree(
                 config.port(),
             ))
             .await?;
+            connect_tree_with_transport(transport, config, share).await
+        }
+        TransportProtocol::Netbios => {
+            let transport = TokioTcpTransport::connect_netbios(config.transport_target()).await?;
             connect_tree_with_transport(transport, config, share).await
         }
         TransportProtocol::Quic => Err(CoreError::Unsupported(
@@ -1140,6 +1148,27 @@ mod tests {
     }
 
     #[test]
+    fn smb_session_config_can_use_netbios_transport_target() {
+        let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
+            .with_transport_target(
+                TransportTarget::netbios("files.lab.example")
+                    .with_connect_host("127.0.0.1")
+                    .with_port(1139),
+            );
+
+        assert_eq!(config.server(), "files.lab.example");
+        assert_eq!(config.connect_host(), "127.0.0.1");
+        assert_eq!(config.port(), 1139);
+        assert_eq!(config.transport_protocol(), TransportProtocol::Netbios);
+        assert_eq!(
+            config.transport_target(),
+            &TransportTarget::netbios("files.lab.example")
+                .with_connect_host("127.0.0.1")
+                .with_port(1139)
+        );
+    }
+
+    #[test]
     fn quic_target_adds_transport_capabilities_context() {
         let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
             .with_transport_target(TransportTarget::quic("server"));
@@ -1163,6 +1192,26 @@ mod tests {
             transport.flags,
             TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY
         );
+    }
+
+    #[test]
+    fn netbios_target_does_not_add_transport_capabilities_context() {
+        let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
+            .with_transport_target(TransportTarget::netbios("server"));
+
+        let contexts = super::default_negotiate_contexts(
+            &config.dialects,
+            config.capabilities,
+            config.compression_capabilities(),
+            config.transport_protocol(),
+        );
+
+        assert!(contexts.iter().all(|context| {
+            context
+                .as_transport_capabilities()
+                .expect("transport context should decode cleanly")
+                .is_none()
+        }));
     }
 
     #[tokio::test]
