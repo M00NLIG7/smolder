@@ -146,7 +146,7 @@ Current priorities:
   no longer drags in Unix GSS/Kerberos libraries unless it is explicitly
   enabled.
 
-- `smolder-core` is moving into an API-stability and docs phase. The current
+- `smolder-core` is in an API-stability and docs phase. The current
   public-surface notes are in
   [docs/reference/smolder-core-api.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md).
   The formal `0.3.x` support contract is in

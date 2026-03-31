@@ -50,6 +50,8 @@ and the versioning/MSRV rules are defined in
 - Added a working local Apple Silicon Samba QUIC validation path through UTM,
   including guest provisioning, Samba fixture setup, and live QUIC interop
   coverage against the current `smolder-smb-core` QUIC lane.
+- Added SMB transport-capability negotiate contexts to `smolder-proto` so
+  SMB over QUIC transport-level security can be represented at the wire layer.
 
 ### Fixed
 
@@ -76,6 +78,10 @@ and the versioning/MSRV rules are defined in
   with GitHub/docs.rs-friendly links.
 - Updated the public README and crate metadata to reflect compression, typed
   RPC clients, QUIC, and the current validated surface.
+
+### Changed
+
+- Promoted the documented support line from `0.2.x` to `0.3.x`.
 
 ### Validation
 
