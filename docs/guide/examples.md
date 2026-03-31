@@ -24,6 +24,7 @@ The support contract for these examples lives in
 - [core_file_roundtrip.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/core_file_roundtrip.rs)
 - [client_netbios_session_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/client_netbios_session_connect.rs)
 - [client_samr_alias_info.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/client_samr_alias_info.rs)
+- [client_srvsvc_sessions.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/client_srvsvc_sessions.rs)
 - [ntlm_tree_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/ntlm_tree_connect.rs)
 - [named_pipe_rpc_bind.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/named_pipe_rpc_bind.rs)
 - [kerberos_tree_connect.rs](https://github.com/M00NLIG7/smolder/blob/main/smolder-core/examples/kerberos_tree_connect.rs)
@@ -106,6 +107,27 @@ Run it:
 
 ```bash
 cargo run -p smolder-smb-core --example client_samr_alias_info
+```
+
+### SRVSVC Session Enumeration Example
+
+This is the smallest typed `SRVSVC` example that goes beyond share listing and
+shows a real host-session query flow. It shows:
+
+- `Session::connect_srvsvc(...)`
+- `SrvsvcClient::session_enum_level10(...)`
+- typed `SessionInfo10` results
+
+Build it explicitly:
+
+```bash
+cargo build -p smolder-smb-core --example client_srvsvc_sessions
+```
+
+Run it:
+
+```bash
+cargo run -p smolder-smb-core --example client_srvsvc_sessions
 ```
 
 ## Standalone Demo

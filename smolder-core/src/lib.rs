@@ -50,6 +50,7 @@
 //! - `cargo run -p smolder-smb-core --example client_share_list`
 //! - `cargo run -p smolder-smb-core --example client_file_roundtrip`
 //! - `cargo run -p smolder-smb-core --example client_samr_alias_info`
+//! - `cargo run -p smolder-smb-core --example client_srvsvc_sessions`
 //! - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
 //! - `cargo run -p smolder-smb-core --example named_pipe_rpc_bind`
 //! - `cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect`
