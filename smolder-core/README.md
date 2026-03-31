@@ -50,6 +50,7 @@ Examples:
 - `cargo run -p smolder-smb-core --example client_netbios_session_connect`
 - `cargo run -p smolder-smb-core --example client_share_list`
 - `cargo run -p smolder-smb-core --example client_file_roundtrip`
+- `cargo run -p smolder-smb-core --example client_samr_alias_info`
 - `cargo run -p smolder-smb-core --example client_srvsvc`
 - `cargo run -p smolder-smb-core --example client_lsarpc`
 - `cargo run -p smolder-smb-core --example ntlm_tree_connect`
