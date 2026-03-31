@@ -160,10 +160,22 @@ impl SmbSessionConfig {
         self
     }
 
-    /// Returns the configured server host name or IP address.
+    /// Returns the logical SMB server name used for auth and share access.
     #[must_use]
     pub fn server(&self) -> &str {
         self.target.server()
+    }
+
+    /// Returns the configured dial host or IP address.
+    #[must_use]
+    pub fn connect_host(&self) -> &str {
+        self.target.connect_host()
+    }
+
+    /// Returns the configured TLS server name for SMB over QUIC.
+    #[must_use]
+    pub fn tls_server_name(&self) -> &str {
+        self.target.tls_server_name()
     }
 
     /// Returns the configured SMB TCP port.
@@ -287,7 +299,9 @@ impl NamedPipe<TokioTcpTransport> {
         pipe_name: &str,
         access: PipeAccess,
     ) -> Result<Self, CoreError> {
-        let transport = TokioTcpTransport::connect((config.server(), config.port())).await?;
+        let transport =
+            TokioTcpTransport::connect((config.transport_target().connect_host(), config.port()))
+                .await?;
         Self::connect_with_transport(transport, config, share, pipe_name, access).await
     }
 }
@@ -851,7 +865,11 @@ pub async fn connect_session(
 ) -> Result<Connection<TokioTcpTransport, Authenticated>, CoreError> {
     match config.transport_protocol() {
         TransportProtocol::Tcp => {
-            let transport = TokioTcpTransport::connect((config.server(), config.port())).await?;
+            let transport = TokioTcpTransport::connect((
+                config.transport_target().connect_host(),
+                config.port(),
+            ))
+            .await?;
             connect_session_with_transport(transport, config).await
         }
         TransportProtocol::Quic => Err(CoreError::Unsupported(
@@ -913,7 +931,11 @@ pub async fn connect_tree(
 ) -> Result<Connection<TokioTcpTransport, TreeConnected>, CoreError> {
     match config.transport_protocol() {
         TransportProtocol::Tcp => {
-            let transport = TokioTcpTransport::connect((config.server(), config.port())).await?;
+            let transport = TokioTcpTransport::connect((
+                config.transport_target().connect_host(),
+                config.port(),
+            ))
+            .await?;
             connect_tree_with_transport(transport, config, share).await
         }
         TransportProtocol::Quic => Err(CoreError::Unsupported(
@@ -1096,14 +1118,24 @@ mod tests {
     #[test]
     fn smb_session_config_can_override_transport_target() {
         let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
-            .with_transport_target(TransportTarget::quic("edge.lab.example").with_port(8443));
+            .with_transport_target(
+                TransportTarget::quic("edge.lab.example")
+                    .with_connect_host("127.0.0.1")
+                    .with_tls_server_name("gateway.lab.example")
+                    .with_port(8443),
+            );
 
         assert_eq!(config.server(), "edge.lab.example");
+        assert_eq!(config.connect_host(), "127.0.0.1");
+        assert_eq!(config.tls_server_name(), "gateway.lab.example");
         assert_eq!(config.port(), 8443);
         assert_eq!(config.transport_protocol(), TransportProtocol::Quic);
         assert_eq!(
             config.transport_target(),
-            &TransportTarget::quic("edge.lab.example").with_port(8443)
+            &TransportTarget::quic("edge.lab.example")
+                .with_connect_host("127.0.0.1")
+                .with_tls_server_name("gateway.lab.example")
+                .with_port(8443)
         );
     }
 

@@ -101,6 +101,20 @@ impl ClientBuilder {
         self
     }
 
+    /// Overrides the transport dial host or IP address while preserving the logical SMB server name.
+    #[must_use]
+    pub fn with_connect_host(mut self, connect_host: impl Into<String>) -> Self {
+        self.target = self.target.with_connect_host(connect_host);
+        self
+    }
+
+    /// Overrides the TLS server name used by SMB over QUIC.
+    #[must_use]
+    pub fn with_tls_server_name(mut self, tls_server_name: impl Into<String>) -> Self {
+        self.target = self.target.with_tls_server_name(tls_server_name);
+        self
+    }
+
     /// Overrides the SMB signing mode sent during negotiate.
     #[must_use]
     pub fn with_signing_mode(mut self, signing_mode: SigningMode) -> Self {
@@ -247,6 +261,18 @@ impl Client {
     #[must_use]
     pub fn port(&self) -> u16 {
         self.config.port()
+    }
+
+    /// Returns the configured dial host or IP address.
+    #[must_use]
+    pub fn connect_host(&self) -> &str {
+        self.config.connect_host()
+    }
+
+    /// Returns the configured TLS server name used by SMB over QUIC.
+    #[must_use]
+    pub fn tls_server_name(&self) -> &str {
+        self.config.tls_server_name()
     }
 
     /// Returns the configured transport target.
@@ -1459,18 +1485,42 @@ mod tests {
     #[test]
     fn builder_can_override_transport_target() {
         let client = ClientBuilder::new("server")
-            .with_transport_target(TransportTarget::quic("edge.lab.example").with_port(8443))
+            .with_transport_target(
+                TransportTarget::quic("edge.lab.example")
+                    .with_connect_host("127.0.0.1")
+                    .with_tls_server_name("gateway.lab.example")
+                    .with_port(8443),
+            )
             .with_ntlm_credentials(NtlmCredentials::new("user", "pass"))
             .build()
             .expect("builder should produce a client");
 
         assert_eq!(client.server(), "edge.lab.example");
+        assert_eq!(client.connect_host(), "127.0.0.1");
+        assert_eq!(client.tls_server_name(), "gateway.lab.example");
         assert_eq!(client.port(), 8443);
         assert_eq!(client.transport_protocol(), TransportProtocol::Quic);
         assert_eq!(
             client.transport_target(),
-            &TransportTarget::quic("edge.lab.example").with_port(8443)
+            &TransportTarget::quic("edge.lab.example")
+                .with_connect_host("127.0.0.1")
+                .with_tls_server_name("gateway.lab.example")
+                .with_port(8443)
         );
+    }
+
+    #[test]
+    fn builder_can_override_connect_host_without_replacing_target() {
+        let client = ClientBuilder::new("files.lab.example")
+            .with_connect_host("127.0.0.1")
+            .with_ntlm_credentials(NtlmCredentials::new("user", "pass"))
+            .build()
+            .expect("builder should produce a client");
+
+        assert_eq!(client.server(), "files.lab.example");
+        assert_eq!(client.connect_host(), "127.0.0.1");
+        assert_eq!(client.transport_target().server(), "files.lab.example");
+        assert_eq!(client.transport_protocol(), TransportProtocol::Tcp);
     }
 
     #[cfg(feature = "kerberos-api")]

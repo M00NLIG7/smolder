@@ -34,6 +34,8 @@ pub enum TransportProtocol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportTarget {
     server: String,
+    connect_host: Option<String>,
+    tls_server_name: Option<String>,
     port: u16,
     protocol: TransportProtocol,
 }
@@ -44,6 +46,8 @@ impl TransportTarget {
     pub fn tcp(server: impl Into<String>) -> Self {
         Self {
             server: server.into(),
+            connect_host: None,
+            tls_server_name: None,
             port: 445,
             protocol: TransportProtocol::Tcp,
         }
@@ -54,15 +58,29 @@ impl TransportTarget {
     pub fn quic(server: impl Into<String>) -> Self {
         Self {
             server: server.into(),
+            connect_host: None,
+            tls_server_name: None,
             port: 443,
             protocol: TransportProtocol::Quic,
         }
     }
 
-    /// Returns the SMB server host name or IP address.
+    /// Returns the logical SMB server name for auth, share access, and defaults.
     #[must_use]
     pub fn server(&self) -> &str {
         &self.server
+    }
+
+    /// Returns the dial host or IP address used for the underlying transport.
+    #[must_use]
+    pub fn connect_host(&self) -> &str {
+        self.connect_host.as_deref().unwrap_or(&self.server)
+    }
+
+    /// Returns the TLS server name used by SMB over QUIC.
+    #[must_use]
+    pub fn tls_server_name(&self) -> &str {
+        self.tls_server_name.as_deref().unwrap_or(&self.server)
     }
 
     /// Returns the configured port.
@@ -81,6 +99,22 @@ impl TransportTarget {
     #[must_use]
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = port;
+        self
+    }
+
+    /// Returns a copy of this target with a different dial host or IP address.
+    #[must_use]
+    pub fn with_connect_host(mut self, connect_host: impl Into<String>) -> Self {
+        self.connect_host = Some(connect_host.into());
+        self
+    }
+
+    /// Returns a copy of this target with a different TLS server name.
+    ///
+    /// This is only used by SMB over QUIC. Classic SMB over TCP ignores it.
+    #[must_use]
+    pub fn with_tls_server_name(mut self, tls_server_name: impl Into<String>) -> Self {
+        self.tls_server_name = Some(tls_server_name.into());
         self
     }
 }
@@ -203,7 +237,7 @@ impl QuicTransport {
             ));
         }
 
-        let remote = lookup_host((target.server(), target.port()))
+        let remote = lookup_host((target.connect_host(), target.port()))
             .await?
             .next()
             .ok_or_else(|| {
@@ -220,7 +254,7 @@ impl QuicTransport {
         let mut endpoint = Endpoint::client(bind_addr)?;
         endpoint.set_default_client_config(default_quic_client_config()?);
         let connection = endpoint
-            .connect(remote, target.server())
+            .connect(remote, target.tls_server_name())
             .map_err(quic_connect_error_to_io)?
             .await
             .map_err(quic_connection_error_to_io)?;
@@ -315,12 +349,35 @@ impl Transport for QuicTransport {
 
 #[cfg(all(test, feature = "quic"))]
 mod tests {
-    use super::QuicTransport;
+    use super::{QuicTransport, TransportProtocol, TransportTarget};
 
     #[test]
     fn quic_client_config_sets_smb_alpn() {
         let client_crypto =
             QuicTransport::rustls_client_config().expect("quic client crypto should build");
         assert_eq!(client_crypto.alpn_protocols, vec![b"smb".to_vec()]);
+    }
+
+    #[test]
+    fn transport_target_defaults_connect_and_tls_names_to_server() {
+        let target = TransportTarget::quic("files.lab.example");
+
+        assert_eq!(target.server(), "files.lab.example");
+        assert_eq!(target.connect_host(), "files.lab.example");
+        assert_eq!(target.tls_server_name(), "files.lab.example");
+        assert_eq!(target.protocol(), TransportProtocol::Quic);
+    }
+
+    #[test]
+    fn transport_target_can_override_connect_and_tls_names() {
+        let target = TransportTarget::quic("files.lab.example")
+            .with_connect_host("127.0.0.1")
+            .with_tls_server_name("gateway.lab.example")
+            .with_port(8443);
+
+        assert_eq!(target.server(), "files.lab.example");
+        assert_eq!(target.connect_host(), "127.0.0.1");
+        assert_eq!(target.tls_server_name(), "gateway.lab.example");
+        assert_eq!(target.port(), 8443);
     }
 }
