@@ -14,7 +14,8 @@ use smolder_proto::smb::smb2::{
     Dialect, DirectoryInformationEntry, DispositionInformation, EchoResponse, FileAttributes,
     FileBasicInformation, FileId, FileInfoClass, FileStandardInformation, FlushRequest,
     GlobalCapabilities, QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest, ReadRequest,
-    SessionId, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest, TreeId, WriteRequest,
+    RenameInformation, SessionId, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest,
+    TreeId, WriteRequest,
 };
 
 use crate::auth::NtlmCredentials;
@@ -831,6 +832,63 @@ where
     /// naming convention used by embedders.
     pub async fn read_dir(&mut self, path: &str) -> Result<Vec<DirectoryEntry>, CoreError> {
         self.list(path).await
+    }
+
+    /// Creates one directory on the current tree.
+    pub async fn create_dir(&mut self, path: &str) -> Result<(), CoreError> {
+        let normalized_path = normalize_share_path(path)?;
+        let mut create_request = CreateRequest::from_path(&normalized_path);
+        create_request.desired_access = FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+        create_request.share_access = ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE;
+        create_request.file_attributes = FileAttributes::DIRECTORY;
+        create_request.create_disposition = CreateDisposition::Create;
+        create_request.create_options = CreateOptions::DIRECTORY_FILE;
+        let response = self.connection.create(&create_request).await?;
+        let file_id = response.file_id;
+        self.connection
+            .close(&CloseRequest { flags: 0, file_id })
+            .await?;
+        Ok(())
+    }
+
+    /// Creates one directory on the current tree.
+    ///
+    /// This is an alias for [`Share::create_dir`] that matches common shell
+    /// naming.
+    pub async fn mkdir(&mut self, path: &str) -> Result<(), CoreError> {
+        self.create_dir(path).await
+    }
+
+    /// Renames or moves one file-system entry within the current tree.
+    pub async fn rename(&mut self, source: &str, destination: &str) -> Result<(), CoreError> {
+        let normalized_source = normalize_share_path(source)?;
+        let normalized_destination = normalize_share_path(destination)?;
+
+        let mut create_request = CreateRequest::from_path(&normalized_source);
+        create_request.desired_access =
+            DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+        create_request.share_access = ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE;
+        create_request.create_disposition = CreateDisposition::Open;
+        let response = self.connection.create(&create_request).await?;
+        let file_id = response.file_id;
+
+        let rename_result = self
+            .connection
+            .set_info(&SetInfoRequest::for_file_info(
+                file_id,
+                FileInfoClass::RenameInformation,
+                RenameInformation::from_path(&normalized_destination, false).encode(),
+            ))
+            .await;
+        let close_result = self
+            .connection
+            .close(&CloseRequest { flags: 0, file_id })
+            .await;
+        match (rename_result, close_result) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     /// Removes a file from the current tree by marking it delete-pending and closing it.
@@ -2152,5 +2210,105 @@ mod tests {
         assert_eq!(entries[0].metadata.size, 5);
         assert_eq!(entries[1].name, "nested");
         assert!(entries[1].is_directory());
+    }
+
+    #[tokio::test]
+    async fn share_create_dir_creates_and_closes_directory_handle() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::DIRECTORY,
+            allocation_size: 0,
+            end_of_file: 0,
+            file_id: FileId {
+                persistent: 30,
+                volatile: 40,
+            },
+            create_contexts: Vec::new(),
+        };
+
+        let mut share = build_share(vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                CloseResponse {
+                    flags: 0,
+                    allocation_size: 0,
+                    end_of_file: 0,
+                    file_attributes: FileAttributes::DIRECTORY,
+                }
+                .encode(),
+            ),
+        ])
+        .await;
+
+        share
+            .create_dir("nested")
+            .await
+            .expect("create_dir should succeed");
+    }
+
+    #[tokio::test]
+    async fn share_rename_sets_rename_information_and_closes_handle() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 5,
+            end_of_file: 5,
+            file_id: FileId {
+                persistent: 50,
+                volatile: 60,
+            },
+            create_contexts: Vec::new(),
+        };
+
+        let mut share = build_share(vec![
+            response_frame(
+                Command::Create,
+                NtStatus::SUCCESS.to_u32(),
+                3,
+                11,
+                7,
+                create_response.encode(),
+            ),
+            response_frame(
+                Command::SetInfo,
+                NtStatus::SUCCESS.to_u32(),
+                4,
+                11,
+                7,
+                smolder_proto::smb::smb2::SetInfoResponse.encode(),
+            ),
+            response_frame(
+                Command::Close,
+                NtStatus::SUCCESS.to_u32(),
+                5,
+                11,
+                7,
+                CloseResponse {
+                    flags: 0,
+                    allocation_size: 5,
+                    end_of_file: 5,
+                    file_attributes: FileAttributes::ARCHIVE,
+                }
+                .encode(),
+            ),
+        ])
+        .await;
+
+        share
+            .rename("notes.txt", "archive\\notes.txt")
+            .await
+            .expect("rename should succeed");
     }
 }
