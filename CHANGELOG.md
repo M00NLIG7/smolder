@@ -17,6 +17,22 @@ and the versioning/MSRV rules are defined in
 
 ## [Unreleased]
 
+### Release Notes Flow
+
+- Add user-visible changes here as they land.
+- Keep entries grouped by `Added`, `Changed`, `Fixed`, `Docs`, or `Security`
+  where possible.
+- Before tagging a release:
+  - move the accumulated notes into a dated version section
+  - keep the wording user-facing rather than commit-by-commit
+  - include any support-policy or MSRV changes explicitly
+  - note the required validation gates that were run for that release
+- After tagging:
+  - recreate an empty `Unreleased` section
+  - use the matching version section as the basis for the GitHub release body
+
+## [0.3.0] - 2026-03-31
+
 ### Added
 
 - Added a high-level embedded client facade to `smolder-smb-core` with
@@ -61,19 +77,15 @@ and the versioning/MSRV rules are defined in
 - Updated the public README and crate metadata to reflect compression, typed
   RPC clients, QUIC, and the current validated surface.
 
-### Release Notes Flow
+### Validation
 
-- Add user-visible changes here as they land.
-- Keep entries grouped by `Added`, `Changed`, `Fixed`, `Docs`, or `Security`
-  where possible.
-- Before tagging a release:
-  - move the accumulated notes into a dated version section
-  - keep the wording user-facing rather than commit-by-commit
-  - include any support-policy or MSRV changes explicitly
-  - note the required validation gates that were run for that release
-- After tagging:
-  - recreate an empty `Unreleased` section
-  - use the matching version section as the basis for the GitHub release body
+- `cargo test -p smolder-proto`
+- `cargo test -p smolder-smb-core --features quic --lib`
+- `cargo test -p smolder --lib`
+- `cargo build -p smolder-smb-core --features "kerberos quic" --example kerberos_tree_connect --example ntlm_tree_connect --example named_pipe_rpc_bind --example client_quic_session_connect`
+- `cargo doc -p smolder-smb-core --no-deps --features "kerberos quic"`
+- `cargo doc -p smolder --no-deps --features kerberos`
+- `cargo doc -p smolder-proto --no-deps`
 
 ## [0.2.0] - 2026-03-27
 

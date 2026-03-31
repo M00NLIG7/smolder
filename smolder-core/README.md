@@ -11,7 +11,7 @@ durable/reconnect primitives.
 
 Real-project readiness:
 
-- intended for direct library use within the documented `0.2.x` support policy
+- intended for direct library use within the documented `0.3.x` support policy
 - additive API evolution is preferred over churn
 - pre-`1.0` breaking changes are still possible, but they should be deliberate
   and reflected in the versioning policy rather than landing silently

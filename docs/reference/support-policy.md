@@ -1,6 +1,6 @@
-# Smolder `0.2.x` Support Policy
+# Smolder `0.3.x` Support Policy
 
-This document defines the current support contract for the published `0.2.x`
+This document defines the current support contract for the published `0.3.x`
 line.
 
 It is intentionally stricter than "whatever exists in the repo." The goal is to
@@ -19,7 +19,7 @@ MSRV and semver rules live in
 
 ## Versioning Direction
 
-For the `0.2.x` line:
+For the `0.3.x` line:
 
 - additive changes are preferred over public API churn
 - public behavior that is documented here should not change casually
@@ -30,7 +30,7 @@ For the `0.2.x` line:
 
 ## Readiness Statement
 
-The `0.2.x` line is intended to be usable in real projects.
+The `0.3.x` line is intended to be usable in real projects.
 
 That does not mean "frozen forever." It means:
 
@@ -66,8 +66,11 @@ Supported:
 - NTLMv2 / SPNEGO auth
 - SMB signing
 - SMB3 encryption
+- SMB compression
+- SMB over QUIC
 - named pipes over `IPC$`
 - DCE/RPC transport over named pipes
+- typed `srvsvc`, `lsarpc`, and `samr` clients
 - DFS referral handling and path resolution primitives
 - compound request dispatch
 - durable and resilient handle reconnect primitives
@@ -124,7 +127,11 @@ Not guaranteed:
 - Local Samba fixtures:
   - SMB session/file flows
   - encryption
+  - compression
   - named pipes and RPC
+  - typed `lsarpc` and `samr` standalone RPC coverage
+- Samba QUIC:
+  - SMB session/file flows over QUIC through the UTM-backed Linux fixture
 - Samba AD:
   - Kerberos SMB auth in core
   - password, ticket-cache, and keytab-backed Kerberos lanes
@@ -143,7 +150,7 @@ Not guaranteed:
 
 ### NTLM / SPNEGO
 
-Supported in `0.2.x`:
+Supported in `0.3.x`:
 
 - NTLMv2 over SPNEGO for SMB `SESSION_SETUP`
 - session-key derivation feeding SMB signing and SMB3 encryption
@@ -151,7 +158,7 @@ Supported in `0.2.x`:
 
 ### Kerberos
 
-Supported in `0.2.x`, but feature-gated:
+Supported in `0.3.x`, but feature-gated:
 
 - enable with `kerberos`
 - default documented backend path is the password-backed `kerberos-sspi` lane
@@ -166,20 +173,23 @@ Current constraints:
 
 ## Transport, Encryption, and RPC Policy
 
-Supported in `0.2.x`:
+Supported in `0.3.x`:
 
 - SMB2/3 only
 - SMB signing
 - SMB3 encryption and transform handling
+- SMB compression
+- SMB over QUIC
 - named pipes over `IPC$`
 - DCE/RPC bind/call transport over named pipes
+- typed `srvsvc`, `lsarpc`, and `samr` coverage for the currently implemented
+  operations
 - DFS referral resolution
 - durable/resilient reconnect primitives
 
 Explicitly not promised yet:
 
 - SMB multichannel as an end-to-end transport feature
-- SMB compression
 - full DFS client behavior beyond the documented resolution path
 - authenticated RPC coverage for every Windows interface
 
@@ -225,7 +235,7 @@ The policy is only as strong as the gates behind it.
 The narrower change-to-gate mapping remains in
 [release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md).
 
-## Non-Goals for `0.2.x`
+## Non-Goals for `0.3.x`
 
 - SMB1 support
 - claiming universal parity with every Windows or Samba deployment
@@ -241,4 +251,4 @@ If behavior is:
 - backed by the interop matrix
 - and covered by the required gates
 
-then it is part of the `0.2.x` support story and should not be changed lightly.
+then it is part of the `0.3.x` support story and should not be changed lightly.

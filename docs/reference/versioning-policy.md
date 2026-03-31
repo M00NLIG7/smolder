@@ -42,10 +42,10 @@ The MSRV is a release promise for the published crates, not a best-effort guess.
 - If a dependency forces a higher floor, document the reason in the changelog
   and this policy file.
 
-For `0.2.x`, the intent is to keep the MSRV stable unless there is a clear
+For `0.3.x`, the intent is to keep the MSRV stable unless there is a clear
 release-quality reason to move it.
 
-## Semver Rules for `0.2.x`
+## Semver Rules for `0.3.x`
 
 The project is still pre-`1.0`, but published crates should no longer behave as
 if every release is unconstrained.
@@ -81,7 +81,7 @@ Use minor releases for:
 
 ### What counts as breaking here
 
-For the published `0.2.x` line, treat these as breaking even before `1.0`:
+For the published `0.3.x` line, treat these as breaking even before `1.0`:
 
 - removing or renaming documented public entry points
 - changing the meaning of stable feature flags

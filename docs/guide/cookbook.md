@@ -22,5 +22,5 @@ Pages in this cookbook:
 Read this guide alongside:
 
 - [examples.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md) for shipped example entry points
-- [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md) for the current `0.2.x` support contract
+- [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md) for the current `0.3.x` support contract
 - [interop.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/interop.md) for the live validation matrix

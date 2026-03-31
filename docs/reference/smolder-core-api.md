@@ -1,7 +1,7 @@
 # smolder-core Public API Notes
 
 This document captures the intended public surface of `smolder-smb-core` as of
-the current `0.2.x` line.
+the current `0.3.x` line.
 
 The broader release/support contract for the workspace lives in
 [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
@@ -33,7 +33,7 @@ For most users, the supported starting surface is:
 These are the APIs new examples, docs, and downstream integrations should
 prefer.
 
-For the `0.2.x` line, the preferred split is:
+For the `0.3.x` line, the preferred split is:
 
 - use `facade::Client` when you want an embedded SMB client that gets you to an
   authenticated session or tree connection quickly
@@ -67,7 +67,7 @@ machinery rather than primary API concepts.
 
 ## Compatibility Direction
 
-The current direction for `0.2.x` is:
+The current direction for `0.3.x` is:
 
 - prefer additive changes over signature churn
 - keep `prelude` curated rather than exhaustive
