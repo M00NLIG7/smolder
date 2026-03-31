@@ -4,3 +4,9 @@ target/
 Cargo.lock
 docker/cross/private/
 docker/cross/*.local
+docker/samba/data/cache/
+docker/samba/data/lib/
+docker/samba/data-global-encryption/cache/
+docker/samba/data-global-encryption/lib/
+docker/samba/data-netbios/cache/
+docker/samba/data-netbios/lib/
