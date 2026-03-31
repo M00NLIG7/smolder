@@ -17,6 +17,12 @@ and the versioning/MSRV rules are defined in
 
 ## [Unreleased]
 
+### Added
+
+- Added SMB over NetBIOS session-service support to `smolder-smb-core`,
+  including a facade-based Samba interop lane and a local fixture path on
+  `127.0.0.1:1139`.
+
 ### Release Notes Flow
 
 - Add user-visible changes here as they land.

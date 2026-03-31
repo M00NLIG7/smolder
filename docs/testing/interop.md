@@ -61,6 +61,7 @@ export SMOLDER_WINDOWS_PASSWORD='<windows-password>'
 ### Local Samba
 
 - Host: `127.0.0.1`
+- NetBIOS session-service port: `1139`
 - Plain/file-share port: `1445`
 - Encrypted `IPC$` / named-pipe port: `1446`
 - Username: `smolder`
@@ -80,7 +81,7 @@ Start the local fixtures with:
 
 ```bash
 scripts/prepare-samba-fixture.sh
-docker compose -f docker/samba/compose.yaml up -d
+docker compose -f docker/samba/compose.yaml up -d samba samba-netbios
 docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 ```
 
@@ -98,6 +99,7 @@ docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 | `smolder-tools` | Windows AD member | Kerberos-enabled file CLI over `IPC$` | `run-windows-kerberos-interop.sh` |
 | `smolder-core` | Samba AD | Kerberos SMB session setup and post-auth tree connect with password and Linux/MIT keytab lanes | `kerberos_interop.rs` via `run-kerberos-interop.sh` |
 | `smolder-core` | Samba | negotiate, auth, file I/O, IOCTLs, lease-aware create, durable reconnect attempt | `samba_negotiate.rs` |
+| `smolder-core` | Samba | facade-based session, tree connect, and file roundtrip over NetBIOS session service | `samba_netbios.rs` |
 | `smolder-core` | Samba | encrypted file I/O | `samba_encryption.rs` |
 | `smolder-core` | Samba | named-pipe open/write/read over encrypted `IPC$` | `named_pipe_interop.rs` |
 | `smolder-core` | Samba | encrypted `srvsvc` RPC call over `IPC$` | `samba_rpc_encryption.rs` |

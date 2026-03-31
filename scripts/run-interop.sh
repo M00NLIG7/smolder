@@ -175,10 +175,20 @@ run_samba_core() {
   require_env SMOLDER_SAMBA_PASSWORD
 
   local plain_port="${SMOLDER_SAMBA_PORT:-1445}"
+  local netbios_port="${SMOLDER_SAMBA_NETBIOS_PORT:-1139}"
   local rpc_port="${SMOLDER_SAMBA_RPC_PORT:-1446}"
   local share="${SMOLDER_SAMBA_SHARE:-share}"
   local domain="${SMOLDER_SAMBA_DOMAIN:-WORKGROUP}"
   local encrypted_share="${SMOLDER_SAMBA_ENCRYPTED_SHARE:-SMOLDERENC}"
+
+  run_env_cmd \
+    "SMOLDER_SAMBA_HOST=${SMOLDER_SAMBA_HOST}" \
+    "SMOLDER_SAMBA_NETBIOS_PORT=${netbios_port}" \
+    "SMOLDER_SAMBA_USERNAME=${SMOLDER_SAMBA_USERNAME}" \
+    "SMOLDER_SAMBA_PASSWORD=${SMOLDER_SAMBA_PASSWORD}" \
+    "SMOLDER_SAMBA_SHARE=${share}" \
+    "SMOLDER_SAMBA_DOMAIN=${domain}" \
+    cargo test -p smolder-smb-core --test samba_netbios -- --nocapture
 
   run_env_cmd \
     "SMOLDER_SAMBA_HOST=${SMOLDER_SAMBA_HOST}" \

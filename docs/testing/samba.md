@@ -10,6 +10,7 @@ Smolder now has two layers of SMB verification:
 This document now includes live interoperability gates against a real Samba server for:
 
 - `NEGOTIATE`
+- `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> READ -> REMOVE -> LOGOFF` over NetBIOS session service
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> READ -> CLOSE`
 - `NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT -> CREATE -> WRITE -> FLUSH -> CLOSE -> TREE_DISCONNECT -> LOGOFF`
@@ -43,6 +44,8 @@ This document now includes live interoperability gates against a real Samba serv
 The second gate exercises NTLMv2 session setup and confirms that Smolder can bind to a real share.
 The third gate exercises basic file I/O over a real handle and keeps the file ephemeral with `DELETE_ON_CLOSE`.
 The newer high-level and CLI gates prove that the ergonomic APIs stay honest against the same Samba endpoint.
+The NetBIOS gate proves that the same facade path still works over port `139`
+session service instead of direct TCP on `445`.
 
 ## Running The Live Test
 
@@ -80,12 +83,13 @@ For local development, either:
 - run a disposable Samba container or VM configured to listen on port `445`
 
 The repo now includes a pinned Docker Compose target at [docker/samba/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/compose.yaml) with config in [docker/samba/data/config.yml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/data/config.yml). It exposes Samba on `127.0.0.1:1445`.
+The same fixture now also exposes NetBIOS session service on `127.0.0.1:1139`.
 
 Bring it up with:
 
 ```bash
 scripts/prepare-samba-fixture.sh
-docker compose -f docker/samba/compose.yaml up -d
+docker compose -f docker/samba/compose.yaml up -d samba samba-netbios
 ```
 
 The prep step matters on Linux hosts and GitHub Actions runners: it makes the
@@ -102,6 +106,18 @@ SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
 cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
+```
+
+Run the NetBIOS facade gate with:
+
+```bash
+SMOLDER_SAMBA_HOST=127.0.0.1 \
+SMOLDER_SAMBA_NETBIOS_PORT=1139 \
+SMOLDER_SAMBA_USERNAME=smolder \
+SMOLDER_SAMBA_PASSWORD=smolderpass \
+SMOLDER_SAMBA_SHARE=share \
+SMOLDER_SAMBA_DOMAIN=WORKGROUP \
+cargo test -p smolder-smb-core --test samba_netbios -- --nocapture
 ```
 
 Run the high-level API gates with the same environment:

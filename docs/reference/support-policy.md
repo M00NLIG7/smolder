@@ -67,6 +67,7 @@ Supported:
 - SMB signing
 - SMB3 encryption
 - SMB compression
+- SMB over NetBIOS session service
 - SMB over QUIC
 - named pipes over `IPC$`
 - DCE/RPC transport over named pipes
@@ -125,7 +126,7 @@ Not guaranteed:
   - DFS
   - `smbexec` and `psexec`
 - Local Samba fixtures:
-  - SMB session/file flows
+  - SMB session/file flows over Direct TCP and NetBIOS session service
   - encryption
   - compression
   - named pipes and RPC
@@ -179,6 +180,7 @@ Supported in `0.3.x`:
 - SMB signing
 - SMB3 encryption and transform handling
 - SMB compression
+- SMB over NetBIOS session service
 - SMB over QUIC
 - named pipes over `IPC$`
 - DCE/RPC bind/call transport over named pipes

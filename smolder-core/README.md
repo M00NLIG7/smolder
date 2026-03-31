@@ -6,8 +6,8 @@ The published package name is `smolder-smb-core`, while the Rust library crate
 name remains `smolder_core`.
 
 It owns SMB auth/session state, transport logic, signing, encryption,
-compression, QUIC, named pipes, typed RPC clients, DFS helpers, and
-durable/reconnect primitives.
+compression, NetBIOS session-service transport, QUIC, named pipes, typed RPC
+clients, DFS helpers, and durable/reconnect primitives.
 
 Real-project readiness:
 

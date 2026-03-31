@@ -31,7 +31,7 @@ jobs:
 
       - name: Start Samba fixtures
         run: |
-          docker compose -f docker/samba/compose.yaml up -d
+          docker compose -f docker/samba/compose.yaml up -d samba samba-netbios
           docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
 
       - name: Show Samba fixture status

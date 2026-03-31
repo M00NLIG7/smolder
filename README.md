@@ -102,10 +102,11 @@ Implemented now:
   durable-handle create contexts, named-pipe/RPC packets, and SMB3 transform
   headers
 - `smolder-core`: SMB negotiate/session setup, NTLMv2/SPNEGO auth, signing,
-  SMB3 encryption, SMB compression, named pipes, DCE/RPC transport, DFS
-  referral handling, compound requests, durable/resilient reconnect
-  primitives, an embedded client facade, typed `srvsvc` / `lsarpc` / `samr`
-  clients, SMB over QUIC, and feature-gated Kerberos support
+  SMB3 encryption, SMB compression, SMB over NetBIOS session service, named
+  pipes, DCE/RPC transport, DFS referral handling, compound requests,
+  durable/resilient reconnect primitives, an embedded client facade, typed
+  `srvsvc` / `lsarpc` / `samr` clients, SMB over QUIC, and feature-gated
+  Kerberos support
 - `smolder-tools`: high-level SMB file APIs, DFS-aware path resolution,
   reconnect helpers, CLI file workflows, feature-gated Kerberos file auth,
   `smbexec`, and `psexec`
@@ -117,17 +118,17 @@ Validated now:
 - Windows: negotiate, auth, tree connect, file I/O, durable reconnect,
   encrypted share I/O, named pipes, RPC, DFS, Kerberos core auth, Kerberos file
   CLI workflows, Kerberos `smbexec`, Kerberos `psexec`, `smbexec`, and `psexec`
-- Samba: negotiate, file I/O, IOCTLs, encrypted shares, encrypted `IPC$`,
-  named pipes, encrypted RPC, standalone `lsarpc` policy queries,
-  standalone `samr` domain enumeration and user queries, SMB compression, SMB
-  over QUIC, and Kerberos core auth
+- Samba: negotiate, file I/O, IOCTLs, NetBIOS session-service file I/O,
+  encrypted shares, encrypted `IPC$`, named pipes, encrypted RPC, standalone
+  `lsarpc` policy queries, standalone `samr` domain enumeration and user
+  queries, SMB compression, SMB over QUIC, and Kerberos core auth
 
 Current priorities:
 
 - public Windows Server QUIC proof alongside the current Samba QUIC lane
 - full Samba `selftest` parity
 - stronger Windows automation; the Tiny11 gate is still manual/self-hosted
-- NetBIOS transport and additional embedders-first polish
+- additional embedders-first polish after the new NetBIOS transport lane
 - SMB1 remains deferred behind the modern SMB2/3 library and tooling work
 
 - Kerberos in `smolder-core` is implemented behind the `kerberos` feature. The

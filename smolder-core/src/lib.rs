@@ -26,7 +26,7 @@
 //!
 //! This crate is the reusable library layer for:
 //!
-//! - SMB negotiate, session setup, signing, and encryption
+//! - SMB negotiate, session setup, signing, encryption, and transport variants
 //! - NTLM/SPNEGO authentication primitives, with optional Kerberos support
 //! - Tree/file operations, compound dispatch, and credit-aware request flow
 //! - DFS referral helpers
