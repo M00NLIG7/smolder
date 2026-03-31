@@ -136,9 +136,16 @@ where
     T: crate::transport::SmbTransport + Send,
 {
     /// Performs the default `lsarpc` bind and `LsarOpenPolicy2`.
-    pub async fn bind(mut rpc: PipeRpcClient<T>) -> Result<Self, CoreError> {
+    pub async fn bind(rpc: PipeRpcClient<T>) -> Result<Self, CoreError> {
+        Self::bind_with_access(rpc, DEFAULT_POLICY_ACCESS).await
+    }
+
+    /// Performs the default `lsarpc` bind and `LsarOpenPolicy2` with a caller-selected policy access mask.
+    pub async fn bind_with_access(
+        mut rpc: PipeRpcClient<T>,
+        desired_access: u32,
+    ) -> Result<Self, CoreError> {
         rpc.bind_context(Self::CONTEXT_ID, Self::SYNTAX).await?;
-        let desired_access = DEFAULT_POLICY_ACCESS;
         let response = rpc
             .call(
                 Self::CONTEXT_ID,

@@ -25,7 +25,7 @@ use crate::client::{
     Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle, TreeConnected,
 };
 use crate::error::CoreError;
-use crate::lsarpc::LsarpcClient;
+use crate::lsarpc::{LsarpcClient, DEFAULT_POLICY_ACCESS};
 use crate::pipe::{connect_session, NamedPipe, PipeAccess, SmbSessionConfig};
 #[cfg(feature = "quic")]
 use crate::pipe::{connect_session_quic, connect_tree_quic};
@@ -351,14 +351,39 @@ impl Client {
 
     /// Connects, authenticates, opens `IPC$`, and binds a typed `lsarpc` client.
     pub async fn connect_lsarpc(&self) -> Result<LsarpcClient, CoreError> {
-        self.connect().await?.connect_lsarpc().await
+        self.connect_lsarpc_with_access(DEFAULT_POLICY_ACCESS).await
+    }
+
+    /// Connects, authenticates, opens `IPC$`, and binds a typed `lsarpc` client with a caller-selected policy access mask.
+    pub async fn connect_lsarpc_with_access(
+        &self,
+        desired_access: u32,
+    ) -> Result<LsarpcClient, CoreError> {
+        self.connect()
+            .await?
+            .connect_lsarpc_with_access(desired_access)
+            .await
     }
 
     /// Connects, authenticates, opens `IPC$`, and binds a typed `lsarpc` client over QUIC.
     #[cfg(feature = "quic")]
     #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
     pub async fn connect_lsarpc_quic(&self) -> Result<LsarpcClient<QuicTransport>, CoreError> {
-        self.connect_quic().await?.connect_lsarpc().await
+        self.connect_lsarpc_quic_with_access(DEFAULT_POLICY_ACCESS)
+            .await
+    }
+
+    /// Connects, authenticates, opens `IPC$`, and binds a typed `lsarpc` client over QUIC with a caller-selected policy access mask.
+    #[cfg(feature = "quic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+    pub async fn connect_lsarpc_quic_with_access(
+        &self,
+        desired_access: u32,
+    ) -> Result<LsarpcClient<QuicTransport>, CoreError> {
+        self.connect_quic()
+            .await?
+            .connect_lsarpc_with_access(desired_access)
+            .await
     }
 
     /// Connects, authenticates, opens `IPC$`, and binds a typed `srvsvc` client.
@@ -489,10 +514,18 @@ where
 
     /// Opens `\\PIPE\\lsarpc` on `IPC$`, performs the bind/open, and returns a typed client.
     pub async fn connect_lsarpc(self) -> Result<LsarpcClient<T>, CoreError> {
+        self.connect_lsarpc_with_access(DEFAULT_POLICY_ACCESS).await
+    }
+
+    /// Opens `\\PIPE\\lsarpc` on `IPC$`, performs the bind/open, and returns a typed client with a caller-selected policy access mask.
+    pub async fn connect_lsarpc_with_access(
+        self,
+        desired_access: u32,
+    ) -> Result<LsarpcClient<T>, CoreError> {
         let rpc = self
             .connect_rpc_pipe("lsarpc", PipeAccess::ReadWrite)
             .await?;
-        LsarpcClient::bind(rpc).await
+        LsarpcClient::bind_with_access(rpc, desired_access).await
     }
 
     /// Opens a caller-selected SAMR-capable pipe on `IPC$`, performs the bind/connect, and returns a typed client.
@@ -650,10 +683,18 @@ where
 
     /// Opens `\\PIPE\\lsarpc` on the current tree, performs the bind/open, and returns a typed client.
     pub async fn connect_lsarpc(self) -> Result<LsarpcClient<T>, CoreError> {
+        self.connect_lsarpc_with_access(DEFAULT_POLICY_ACCESS).await
+    }
+
+    /// Opens `\\PIPE\\lsarpc` on the current tree, performs the bind/open, and returns a typed client with a caller-selected policy access mask.
+    pub async fn connect_lsarpc_with_access(
+        self,
+        desired_access: u32,
+    ) -> Result<LsarpcClient<T>, CoreError> {
         let rpc = self
             .connect_rpc_pipe("lsarpc", PipeAccess::ReadWrite)
             .await?;
-        LsarpcClient::bind(rpc).await
+        LsarpcClient::bind_with_access(rpc, desired_access).await
     }
 
     /// Opens a caller-selected SAMR-capable pipe on the current tree, performs the bind/connect, and returns a typed client.
