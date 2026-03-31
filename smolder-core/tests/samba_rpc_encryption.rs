@@ -7,6 +7,8 @@ use smolder_core::prelude::{
 use smolder_proto::smb::smb2::{SessionId, TreeId};
 use tokio::sync::Mutex;
 
+const ERROR_ACCESS_DENIED: u32 = 5;
+
 fn required_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
@@ -92,9 +94,14 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
 
     match srvsvc.share_enum_level1().await {
         Ok(shares) => {
-            assert!(!shares.is_empty(), "srvsvc share enumeration should not be empty");
             assert!(
-                shares.iter().any(|share| share.name.eq_ignore_ascii_case("IPC$")),
+                !shares.is_empty(),
+                "srvsvc share enumeration should not be empty"
+            );
+            assert!(
+                shares
+                    .iter()
+                    .any(|share| share.name.eq_ignore_ascii_case("IPC$")),
                 "srvsvc share enumeration should include IPC$"
             );
             let ipc = shares
@@ -113,14 +120,15 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
                 "skipping encrypted Samba share enumeration assertion: fixture returned an unsupported shi1_remark layout"
             );
         }
-        Err(error) => panic!(
-            "NetrShareEnum level 1 should succeed over encrypted IPC$: {error:?}"
-        ),
+        Err(error) => panic!("NetrShareEnum level 1 should succeed over encrypted IPC$: {error:?}"),
     }
 
     match srvsvc.server_get_info_level101().await {
         Ok(server_info) => {
-            assert!(!server_info.name.is_empty(), "server name should not be empty");
+            assert!(
+                !server_info.name.is_empty(),
+                "server name should not be empty"
+            );
             assert!(
                 server_info.version_major > 0,
                 "server major version should be populated"
@@ -131,9 +139,31 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
                 "skipping encrypted Samba server info assertion: fixture returned an unsupported sv101_comment layout"
             );
         }
-        Err(error) => panic!(
-            "NetrServerGetInfo level 101 should succeed over encrypted IPC$: {error:?}"
-        ),
+        Err(error) => {
+            panic!("NetrServerGetInfo level 101 should succeed over encrypted IPC$: {error:?}")
+        }
+    }
+
+    match srvsvc.session_enum_level10().await {
+        Ok(sessions) => {
+            for session in &sessions {
+                assert!(
+                    session.client_name.is_some() || session.username.is_some(),
+                    "srvsvc session enumeration should decode at least one identifying field per entry"
+                );
+            }
+        }
+        Err(CoreError::RemoteOperation {
+            operation: "NetrSessionEnum",
+            code: ERROR_ACCESS_DENIED,
+        }) => {
+            eprintln!(
+                "skipping encrypted Samba session enumeration assertion: fixture denied NetrSessionEnum"
+            );
+        }
+        Err(error) => {
+            panic!("NetrSessionEnum level 10 should succeed over encrypted IPC$: {error:?}")
+        }
     }
 
     let connection = srvsvc

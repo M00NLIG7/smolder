@@ -17,6 +17,7 @@ const SRVSVC_SYNTAX: SyntaxId = SyntaxId::new(
     0,
 );
 const SRVSVC_CONTEXT_ID: u16 = 0;
+const NETR_SESSION_ENUM_OPNUM: u16 = 12;
 const NETR_SHARE_ENUM_OPNUM: u16 = 15;
 const NETR_SERVER_GET_INFO_OPNUM: u16 = 21;
 const NETR_REMOTE_TOD_OPNUM: u16 = 28;
@@ -88,6 +89,19 @@ pub struct ServerInfo101 {
     pub server_type: u32,
     /// Optional server comment/description.
     pub comment: Option<String>,
+}
+
+/// Decoded `SESSION_INFO_10` entry returned by `NetrSessionEnum` level 10.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo10 {
+    /// Remote client name if present.
+    pub client_name: Option<String>,
+    /// Authenticated username if present.
+    pub username: Option<String>,
+    /// Connected session age in seconds.
+    pub time: u32,
+    /// Idle time in seconds.
+    pub idle_time: u32,
 }
 
 /// Typed `srvsvc` client over an already-open RPC transport.
@@ -162,6 +176,19 @@ where
         parse_share_enum_level1_response(&response)
     }
 
+    /// Calls `NetrSessionEnum` at information level 10.
+    pub async fn session_enum_level10(&mut self) -> Result<Vec<SessionInfo10>, CoreError> {
+        let response = self
+            .rpc
+            .call(
+                self.context_id,
+                NETR_SESSION_ENUM_OPNUM,
+                encode_session_enum_level10_request(),
+            )
+            .await?;
+        parse_session_enum_level10_response(&response)
+    }
+
     /// Calls `NetrShareGetInfo` at information level 2.
     pub async fn share_get_info_level2(
         &mut self,
@@ -201,6 +228,20 @@ fn encode_share_enum_level1_request() -> Vec<u8> {
     stub.extend_from_slice(&0_u32.to_le_bytes());
     stub.extend_from_slice(&1_u32.to_le_bytes());
     stub.extend_from_slice(&1_u32.to_le_bytes());
+    stub.extend_from_slice(&0_u32.to_le_bytes());
+    stub.extend_from_slice(&0_u32.to_le_bytes());
+    stub.extend_from_slice(&MAX_PREFERRED_LENGTH.to_le_bytes());
+    stub.extend_from_slice(&0_u32.to_le_bytes());
+    stub
+}
+
+fn encode_session_enum_level10_request() -> Vec<u8> {
+    let mut stub = Vec::with_capacity(36);
+    stub.extend_from_slice(&0_u32.to_le_bytes());
+    stub.extend_from_slice(&0_u32.to_le_bytes());
+    stub.extend_from_slice(&0_u32.to_le_bytes());
+    stub.extend_from_slice(&10_u32.to_le_bytes());
+    stub.extend_from_slice(&10_u32.to_le_bytes());
     stub.extend_from_slice(&0_u32.to_le_bytes());
     stub.extend_from_slice(&0_u32.to_le_bytes());
     stub.extend_from_slice(&MAX_PREFERRED_LENGTH.to_le_bytes());
@@ -350,6 +391,92 @@ fn parse_share_enum_level1_response(response: &[u8]) -> Result<Vec<ShareInfo1>, 
         .collect())
 }
 
+fn parse_session_enum_level10_response(response: &[u8]) -> Result<Vec<SessionInfo10>, CoreError> {
+    let mut reader = NdrReader::new(response);
+    let level = reader.read_u32("Level")?;
+    if level != 10 {
+        return Err(CoreError::InvalidResponse(
+            "NetrSessionEnum did not return level 10 data",
+        ));
+    }
+    let union_level = reader.read_u32("SessionInfo.Level")?;
+    if union_level != 10 {
+        return Err(CoreError::InvalidResponse(
+            "NetrSessionEnum returned an unexpected union level",
+        ));
+    }
+
+    let entries_read = reader.read_u32("EntriesRead")? as usize;
+    let buffer_referent = reader.read_u32("BufferReferent")?;
+    let mut entries = Vec::with_capacity(entries_read);
+    if buffer_referent != 0 {
+        let max_count = reader.read_u32("BufferMaxCount")? as usize;
+        if max_count < entries_read {
+            return Err(CoreError::InvalidResponse(
+                "NetrSessionEnum buffer count was smaller than entries read",
+            ));
+        }
+
+        for _ in 0..entries_read {
+            entries.push(SessionInfo10Stub {
+                client_name_referent: reader.read_u32("sesi10_cname")?,
+                username_referent: reader.read_u32("sesi10_username")?,
+                time: reader.read_u32("sesi10_time")?,
+                idle_time: reader.read_u32("sesi10_idle_time")?,
+                client_name: None,
+                username: None,
+            });
+        }
+
+        for entry in &mut entries {
+            entry.client_name = if entry.client_name_referent != 0 {
+                Some(reader.read_wide_string("sesi10_cname")?)
+            } else {
+                None
+            };
+            entry.username = if entry.username_referent != 0 {
+                Some(reader.read_wide_string("sesi10_username")?)
+            } else {
+                None
+            };
+        }
+    } else if entries_read != 0 {
+        return Err(CoreError::InvalidResponse(
+            "NetrSessionEnum returned entries without a buffer",
+        ));
+    }
+
+    let total_entries = reader.read_u32("TotalEntries")? as usize;
+    if total_entries < entries_read {
+        return Err(CoreError::InvalidResponse(
+            "NetrSessionEnum total entries was smaller than entries read",
+        ));
+    }
+
+    let resume_handle_referent = reader.read_u32("ResumeHandleReferent")?;
+    if resume_handle_referent != 0 {
+        let _ = reader.read_u32("ResumeHandleValue")?;
+    }
+
+    let status = reader.read_u32("NetrSessionEnumStatus")?;
+    if status != 0 {
+        return Err(CoreError::RemoteOperation {
+            operation: "NetrSessionEnum",
+            code: status,
+        });
+    }
+
+    Ok(entries
+        .into_iter()
+        .map(|entry| SessionInfo10 {
+            client_name: entry.client_name,
+            username: entry.username,
+            time: entry.time,
+            idle_time: entry.idle_time,
+        })
+        .collect())
+}
+
 fn parse_share_get_info_level2_response(response: &[u8]) -> Result<ShareInfo2, CoreError> {
     let mut reader = NdrReader::new(response);
     let info_referent = reader.read_u32("InfoStruct")?;
@@ -467,6 +594,16 @@ struct ShareInfo1Stub {
     remark: Option<String>,
 }
 
+#[derive(Debug)]
+struct SessionInfo10Stub {
+    client_name_referent: u32,
+    username_referent: u32,
+    time: u32,
+    idle_time: u32,
+    client_name: Option<String>,
+    username: Option<String>,
+}
+
 struct NdrReader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -582,10 +719,12 @@ impl NdrWriter {
 mod tests {
     use super::{
         encode_remote_tod_request, encode_server_get_info_level101_request,
+        encode_session_enum_level10_request,
         encode_share_enum_level1_request, encode_share_get_info_level2_request,
         parse_remote_tod_response, parse_server_get_info_level101_response,
-        parse_share_enum_level1_response, parse_share_get_info_level2_response, ServerInfo101,
-        ShareInfo1, ShareInfo2, TimeOfDayInfo,
+        parse_session_enum_level10_response, parse_share_enum_level1_response,
+        parse_share_get_info_level2_response, ServerInfo101, SessionInfo10, ShareInfo1,
+        ShareInfo2, TimeOfDayInfo,
     };
     use crate::error::CoreError;
 
@@ -654,6 +793,25 @@ mod tests {
                 0_u32.to_le_bytes(),
                 u32::MAX.to_le_bytes(),
                 0_u32.to_le_bytes()
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn session_enum_level10_request_uses_null_filters_and_max_preferred_length() {
+        assert_eq!(
+            encode_session_enum_level10_request(),
+            [
+                0_u32.to_le_bytes(),
+                0_u32.to_le_bytes(),
+                0_u32.to_le_bytes(),
+                10_u32.to_le_bytes(),
+                10_u32.to_le_bytes(),
+                0_u32.to_le_bytes(),
+                0_u32.to_le_bytes(),
+                u32::MAX.to_le_bytes(),
+                0_u32.to_le_bytes(),
             ]
             .concat()
         );
@@ -766,6 +924,54 @@ mod tests {
                 share_type: 0,
                 remark: Some(String::new()),
             }]
+        );
+    }
+
+    #[test]
+    fn parse_session_enum_level10_response_decodes_entries() {
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(10);
+        writer.write_u32(10);
+        writer.write_u32(2);
+        let array_referent = writer.next_referent();
+        writer.write_u32(array_referent);
+        writer.write_u32(2);
+
+        let client_ref = writer.next_referent();
+        let user_ref = writer.next_referent();
+        writer.write_u32(client_ref);
+        writer.write_u32(user_ref);
+        writer.write_u32(120);
+        writer.write_u32(4);
+
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(30);
+        writer.write_u32(7);
+
+        writer.write_wide_string(r"\\10.0.0.5");
+        writer.write_wide_string("smolder");
+        writer.write_u32(2);
+        writer.write_u32(0);
+        writer.write_u32(0);
+
+        assert_eq!(
+            parse_session_enum_level10_response(&writer.into_bytes())
+                .expect("response should decode"),
+            vec![
+                SessionInfo10 {
+                    client_name: Some(r"\\10.0.0.5".to_owned()),
+                    username: Some("smolder".to_owned()),
+                    time: 120,
+                    idle_time: 4,
+                },
+                SessionInfo10 {
+                    client_name: None,
+                    username: None,
+                    time: 30,
+                    idle_time: 7,
+                },
+            ]
         );
     }
 
