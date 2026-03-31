@@ -13,25 +13,29 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 #[cfg(feature = "kerberos")]
-use smolder_core::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
-use smolder_core::auth::{NtlmAuthenticator, NtlmCredentials};
+use smolder_core::auth::{KerberosCredentials, KerberosTarget};
+use smolder_core::auth::NtlmCredentials;
 use smolder_core::client::{
     Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle, TreeConnected,
 };
 use smolder_core::dfs::{referrals_from_response, resolve_unc_path, DfsReferral, UncPath};
 use smolder_core::error::CoreError;
+use smolder_core::facade::Client as CoreClient;
 use smolder_core::transport::{TokioTcpTransport, Transport};
 use smolder_proto::smb::smb2::{
-    CipherId, CloseRequest, CloseResponse, Command, CreateContext, CreateDisposition,
-    CreateOptions, CreateRequest, DfsReferralRequest, Dialect, DispositionInformation,
-    EncryptionCapabilities, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
-    FileStandardInformation, FlushRequest, GlobalCapabilities, IoctlRequest, LeaseFlags,
-    LeaseState, LeaseV2, NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities,
-    PreauthIntegrityHashId, QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest,
-    ReadRequest, RenameInformation, SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest,
-    WriteRequest,
+    CloseRequest, CloseResponse, Command, CreateContext, CreateDisposition, CreateOptions,
+    CreateRequest, DfsReferralRequest, Dialect, DispositionInformation, FileAttributes,
+    FileBasicInformation, FileId, FileInfoClass, FileStandardInformation, FlushRequest,
+    GlobalCapabilities, IoctlRequest, LeaseFlags, LeaseState, LeaseV2, QueryDirectoryFlags,
+    QueryDirectoryRequest, QueryInfoRequest, ReadRequest, RenameInformation, SetInfoRequest,
+    ShareAccess, SigningMode, TreeConnectRequest, WriteRequest,
 };
 use smolder_proto::smb::status::NtStatus;
+#[cfg(test)]
+use smolder_proto::smb::smb2::{
+    CipherId, EncryptionCapabilities, NegotiateContext, PreauthIntegrityCapabilities,
+    PreauthIntegrityHashId,
+};
 
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TRANSFER_CHUNK_SIZE: u32 = 64 * 1024;
@@ -295,31 +299,27 @@ impl SmbClientBuilder {
         let auth = self
             .auth
             .ok_or(CoreError::InvalidInput("credentials must be configured"))?;
+        let mut builder = CoreClient::builder(server.as_str())
+            .with_port(self.port)
+            .with_signing_mode(self.signing_mode)
+            .with_capabilities(self.capabilities)
+            .with_dialects(self.dialects)
+            .with_client_guid(self.client_guid);
 
-        let transport = TokioTcpTransport::connect((server.as_str(), self.port)).await?;
-        let request = NegotiateRequest {
-            security_mode: self.signing_mode,
-            capabilities: self.capabilities,
-            client_guid: self.client_guid,
-            negotiate_contexts: default_negotiate_contexts(&self.dialects, self.capabilities),
-            dialects: self.dialects,
-        };
-        let connection = Connection::new(transport).negotiate(&request).await?;
-
-        let connection = match auth {
+        match auth {
             SessionAuth::Ntlm(credentials) => {
-                let mut auth = NtlmAuthenticator::new(credentials);
-                connection.authenticate(&mut auth).await?
+                builder = builder.with_ntlm_credentials(credentials);
             }
             #[cfg(feature = "kerberos")]
             SessionAuth::Kerberos {
                 credentials,
                 target,
             } => {
-                let mut auth = KerberosAuthenticator::new(credentials, target);
-                connection.authenticate(&mut auth).await?
+                builder = builder.with_kerberos_credentials(credentials, target);
             }
-        };
+        }
+
+        let connection = builder.build()?.connect().await?.into_connection();
         Ok(SmbClient {
             server,
             connection,
@@ -1842,6 +1842,7 @@ fn dialect_supports_durable_v2(dialect: Dialect) -> bool {
     matches!(dialect, Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311)
 }
 
+#[cfg(test)]
 fn default_negotiate_contexts(
     dialects: &[Dialect],
     capabilities: GlobalCapabilities,

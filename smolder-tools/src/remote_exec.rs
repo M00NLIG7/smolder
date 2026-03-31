@@ -15,11 +15,12 @@ use smolder_proto::smb::smb2::{
 };
 use smolder_proto::smb::status::NtStatus;
 
+use smolder_core::auth::NtlmCredentials;
 #[cfg(feature = "kerberos")]
 use smolder_core::auth::{KerberosCredentials, KerberosTarget};
-use smolder_core::auth::NtlmCredentials;
 use smolder_core::client::{Connection, TreeConnected};
 use smolder_core::error::CoreError;
+use smolder_core::facade::Client as CoreClient;
 use smolder_core::pipe::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
 use smolder_core::rpc::PipeRpcClient;
 use smolder_core::transport::TokioTcpTransport;
@@ -408,22 +409,29 @@ impl RemoteExecBuilder {
         let ipc_share = normalize_share_name(&self.ipc_share)?;
         let staging_directory = normalize_share_path(&self.staging_directory)?;
 
-        let config = match auth {
-            SessionAuth::Ntlm(credentials) => SmbSessionConfig::new(server, credentials),
+        let mut builder = CoreClient::builder(server.clone())
+            .with_port(self.port)
+            .with_signing_mode(self.signing_mode)
+            .with_capabilities(self.capabilities)
+            .with_dialects(self.dialects)
+            .with_client_guid(self.client_guid);
+
+        match auth {
+            SessionAuth::Ntlm(credentials) => {
+                builder = builder.with_ntlm_credentials(credentials);
+            }
             #[cfg(feature = "kerberos")]
             SessionAuth::Kerberos {
                 credentials,
                 target,
-            } => SmbSessionConfig::kerberos(server, credentials, target),
-        };
+            } => {
+                builder = builder.with_kerberos_credentials(credentials, target);
+            }
+        }
+        let config = builder.build()?.into_session_config();
 
         Ok(RemoteExecClient {
-            config: config
-                .with_port(self.port)
-                .with_signing_mode(self.signing_mode)
-                .with_capabilities(self.capabilities)
-                .with_dialects(self.dialects)
-                .with_client_guid(self.client_guid),
+            config,
             admin_share,
             ipc_share,
             staging_directory,
@@ -1755,10 +1763,8 @@ mod tests {
 
     #[test]
     fn remote_exec_builder_stores_ntlm_credentials() {
-        let builder =
-            RemoteExecBuilder::new().credentials(smolder_core::prelude::NtlmCredentials::new(
-                "user", "pass",
-            ));
+        let builder = RemoteExecBuilder::new()
+            .credentials(smolder_core::prelude::NtlmCredentials::new("user", "pass"));
         assert!(matches!(builder.auth, Some(super::SessionAuth::Ntlm(_))));
     }
 
