@@ -141,8 +141,9 @@ pub mod prelude {
     pub use crate::pipe::{connect_session_quic, connect_tree_quic};
     pub use crate::rpc::PipeRpcClient;
     pub use crate::samr::{
-        SamrClient, SamrDomain, SamrDomainClient, SamrServerRevision, SamrSid, SamrUser,
-        SamrUserClient, SamrUserInfo, DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
+        SamrAlias, SamrAliasClient, SamrAliasInfo, SamrClient, SamrDomain, SamrDomainClient,
+        SamrGroup, SamrServerRevision, SamrSid, SamrUser, SamrUserClient, SamrUserInfo,
+        DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
     };
     pub use crate::srvsvc::{ServerInfo101, ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};
     #[cfg(feature = "quic")]
