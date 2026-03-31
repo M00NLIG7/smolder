@@ -9,14 +9,14 @@ use bytes::BytesMut;
 use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use smolder_proto::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
 use smolder_proto::smb::smb2::{
     CipherId, CloseRequest, Command, CompressionCapabilities, CreateDisposition, CreateOptions,
     CreateRequest, Dialect, EncryptionCapabilities, FileAttributes, FileId, FlushRequest,
     GlobalCapabilities, NegotiateContext, NegotiateRequest, PreauthIntegrityCapabilities,
-    PreauthIntegrityHashId, ReadRequest, ShareAccess, SigningMode, TreeConnectRequest,
-    WriteRequest,
+    PreauthIntegrityHashId, ReadRequest, ShareAccess, SigningMode, TransportCapabilities,
+    TransportCapabilityFlags, TreeConnectRequest, WriteRequest,
 };
-use smolder_proto::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
 use smolder_proto::smb::status::NtStatus;
 
 #[cfg(feature = "kerberos-api")]
@@ -24,6 +24,8 @@ use crate::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
 use crate::client::{Authenticated, Connection, TreeConnected};
 use crate::error::CoreError;
+#[cfg(feature = "quic")]
+use crate::transport::QuicTransport;
 use crate::transport::{TokioTcpTransport, Transport, TransportProtocol, TransportTarget};
 
 const FILE_READ_DATA: u32 = 0x0000_0001;
@@ -285,8 +287,21 @@ impl NamedPipe<TokioTcpTransport> {
         pipe_name: &str,
         access: PipeAccess,
     ) -> Result<Self, CoreError> {
-        let transport =
-            TokioTcpTransport::connect((config.server(), config.port())).await?;
+        let transport = TokioTcpTransport::connect((config.server(), config.port())).await?;
+        Self::connect_with_transport(transport, config, share, pipe_name, access).await
+    }
+}
+
+#[cfg(feature = "quic")]
+impl NamedPipe<QuicTransport> {
+    /// Connects to the target share over QUIC and opens the named pipe with the requested access mode.
+    pub async fn connect(
+        config: &SmbSessionConfig,
+        share: &str,
+        pipe_name: &str,
+        access: PipeAccess,
+    ) -> Result<Self, CoreError> {
+        let transport = QuicTransport::connect(config.transport_target()).await?;
         Self::connect_with_transport(transport, config, share, pipe_name, access).await
     }
 }
@@ -840,9 +855,18 @@ pub async fn connect_session(
             connect_session_with_transport(transport, config).await
         }
         TransportProtocol::Quic => Err(CoreError::Unsupported(
-            "SMB over QUIC is not implemented yet",
+            "SMB over QUIC requires connect_session_quic",
         )),
     }
+}
+
+/// Authenticates a session over SMB over QUIC.
+#[cfg(feature = "quic")]
+pub async fn connect_session_quic(
+    config: &SmbSessionConfig,
+) -> Result<Connection<QuicTransport, Authenticated>, CoreError> {
+    let transport = QuicTransport::connect(config.transport_target()).await?;
+    connect_session_with_transport(transport, config).await
 }
 
 /// Authenticates a session over an already-created transport.
@@ -861,6 +885,7 @@ where
             &config.dialects,
             config.capabilities,
             config.compression.as_ref(),
+            config.transport_protocol(),
         ),
         dialects: config.dialects.clone(),
     };
@@ -892,9 +917,19 @@ pub async fn connect_tree(
             connect_tree_with_transport(transport, config, share).await
         }
         TransportProtocol::Quic => Err(CoreError::Unsupported(
-            "SMB over QUIC is not implemented yet",
+            "SMB over QUIC requires connect_tree_quic",
         )),
     }
+}
+
+/// Authenticates and tree-connects to the requested share over SMB over QUIC.
+#[cfg(feature = "quic")]
+pub async fn connect_tree_quic(
+    config: &SmbSessionConfig,
+    share: &str,
+) -> Result<Connection<QuicTransport, TreeConnected>, CoreError> {
+    let transport = QuicTransport::connect(config.transport_target()).await?;
+    connect_tree_with_transport(transport, config, share).await
 }
 
 /// Authenticates and tree-connects to the requested share over an already-created transport.
@@ -917,6 +952,7 @@ fn default_negotiate_contexts(
     dialects: &[Dialect],
     capabilities: GlobalCapabilities,
     compression: Option<&CompressionCapabilities>,
+    transport_protocol: TransportProtocol,
 ) -> Vec<NegotiateContext> {
     if !dialects.contains(&Dialect::Smb311) {
         return Vec::new();
@@ -940,6 +976,13 @@ fn default_negotiate_contexts(
             compression.clone(),
         ));
     }
+    if transport_protocol == TransportProtocol::Quic {
+        contexts.push(NegotiateContext::transport_capabilities(
+            TransportCapabilities {
+                flags: TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY,
+            },
+        ));
+    }
     contexts
 }
 
@@ -961,15 +1004,15 @@ mod tests {
     use std::collections::VecDeque;
 
     use async_trait::async_trait;
-    use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
+    use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
         CipherId, CloseResponse, Command, CreateResponse, Dialect, FileAttributes, FileId,
         FlushResponse, GlobalCapabilities, Header, MessageId, NegotiateRequest, NegotiateResponse,
         OplockLevel, ReadResponse, ReadResponseFlags, SessionFlags, SessionSetupRequest,
         SessionSetupResponse, SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode,
-        TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeId, WriteRequest,
-        WriteResponse,
+        TransportCapabilityFlags, TreeCapabilities, TreeConnectRequest, TreeConnectResponse,
+        TreeId, WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1003,8 +1046,12 @@ mod tests {
         let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"));
         assert!(config.capabilities.contains(GlobalCapabilities::ENCRYPTION));
 
-        let contexts =
-            super::default_negotiate_contexts(&config.dialects, config.capabilities, None);
+        let contexts = super::default_negotiate_contexts(
+            &config.dialects,
+            config.capabilities,
+            None,
+            config.transport_protocol(),
+        );
         assert_eq!(contexts.len(), 2);
         assert!(contexts[0]
             .as_preauth_integrity()
@@ -1033,6 +1080,7 @@ mod tests {
             &config.dialects,
             config.capabilities,
             config.compression_capabilities(),
+            config.transport_protocol(),
         );
         let compression = contexts[2]
             .as_compression_capabilities()
@@ -1059,17 +1107,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn quic_target_adds_transport_capabilities_context() {
+        let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
+            .with_transport_target(TransportTarget::quic("server"));
+
+        let contexts = super::default_negotiate_contexts(
+            &config.dialects,
+            config.capabilities,
+            config.compression_capabilities(),
+            config.transport_protocol(),
+        );
+
+        let transport = contexts
+            .iter()
+            .find_map(|context| {
+                context
+                    .as_transport_capabilities()
+                    .expect("transport context should decode cleanly")
+            })
+            .expect("quic target should add transport capabilities");
+        assert_eq!(
+            transport.flags,
+            TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY
+        );
+    }
+
     #[tokio::test]
-    async fn connect_session_rejects_quic_until_transport_exists() {
+    async fn connect_session_rejects_quic_without_explicit_quic_entrypoint() {
         let config = SmbSessionConfig::new("server", NtlmCredentials::new("user", "pass"))
             .with_transport_target(TransportTarget::quic("server"));
 
         let error = super::connect_session(&config)
             .await
-            .expect_err("quic dial path should reject until implemented");
+            .expect_err("tcp-only helper should reject quic targets");
         assert!(matches!(
             error,
-            CoreError::Unsupported("SMB over QUIC is not implemented yet")
+            CoreError::Unsupported("SMB over QUIC requires connect_session_quic")
         ));
     }
 

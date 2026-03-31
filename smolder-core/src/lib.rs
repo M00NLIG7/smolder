@@ -13,6 +13,7 @@
 //!   Kerberos implementation
 //! - `kerberos-gssapi`: Unix ticket-cache and keytab backend using system
 //!   GSS/Kerberos libraries
+//! - `quic`: feature-gated SMB over QUIC transport primitives
 //!
 //! The default build enables none of these features and stays the most
 //! static-friendly profile. `kerberos-gssapi` is intentionally independent from
@@ -128,16 +129,21 @@ pub mod prelude {
     };
     pub use crate::lsarpc::{LsaDomainInfo, LsaSid, LsarpcClient, DEFAULT_POLICY_ACCESS};
     pub use crate::pipe::{
-        connect_session, connect_session_with_transport, connect_tree,
-        connect_tree_with_transport, NamedPipe, PipeAccess, SmbSessionConfig,
+        connect_session, connect_session_with_transport, connect_tree, connect_tree_with_transport,
+        NamedPipe, PipeAccess, SmbSessionConfig,
     };
+    #[cfg(feature = "quic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+    pub use crate::pipe::{connect_session_quic, connect_tree_quic};
     pub use crate::rpc::PipeRpcClient;
     pub use crate::samr::{
         SamrClient, SamrDomain, SamrDomainClient, SamrServerRevision, SamrSid, SamrUser,
-        SamrUserClient, SamrUserInfo,
-        DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
+        SamrUserClient, SamrUserInfo, DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
     };
     pub use crate::srvsvc::{ServerInfo101, ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo};
+    #[cfg(feature = "quic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+    pub use crate::transport::QuicTransport;
     pub use crate::transport::{
         SmbTransport, TokioTcpTransport, Transport, TransportProtocol, TransportTarget,
     };

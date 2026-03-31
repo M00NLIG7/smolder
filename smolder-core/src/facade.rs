@@ -26,9 +26,13 @@ use crate::client::{
 use crate::error::CoreError;
 use crate::lsarpc::LsarpcClient;
 use crate::pipe::{connect_session, NamedPipe, PipeAccess, SmbSessionConfig};
+#[cfg(feature = "quic")]
+use crate::pipe::{connect_session_quic, connect_tree_quic};
 use crate::rpc::PipeRpcClient;
 use crate::samr::SamrClient;
 use crate::srvsvc::SrvsvcClient;
+#[cfg(feature = "quic")]
+use crate::transport::QuicTransport;
 use crate::transport::{TokioTcpTransport, Transport, TransportProtocol, TransportTarget};
 const MAX_IO_CHUNK_SIZE: usize = u16::MAX as usize;
 const FILE_READ_DATA: u32 = 0x0000_0001;
@@ -266,9 +270,42 @@ impl Client {
         })
     }
 
+    /// Connects and authenticates an SMB session over QUIC.
+    #[cfg(feature = "quic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+    pub async fn connect_quic(&self) -> Result<Session<QuicTransport>, CoreError> {
+        if self.config.transport_protocol() != TransportProtocol::Quic {
+            return Err(CoreError::InvalidInput(
+                "client is not configured for an SMB over QUIC transport target",
+            ));
+        }
+        let connection = connect_session_quic(&self.config).await?;
+        Ok(Session {
+            server: self.config.server().to_owned(),
+            connection,
+        })
+    }
+
     /// Connects, authenticates, and tree-connects to the requested share.
     pub async fn connect_share(&self, share: &str) -> Result<Share, CoreError> {
         self.connect().await?.connect_share(share).await
+    }
+
+    /// Connects, authenticates, and tree-connects to the requested share over QUIC.
+    #[cfg(feature = "quic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+    pub async fn connect_share_quic(&self, share: &str) -> Result<Share<QuicTransport>, CoreError> {
+        if self.config.transport_protocol() != TransportProtocol::Quic {
+            return Err(CoreError::InvalidInput(
+                "client is not configured for an SMB over QUIC transport target",
+            ));
+        }
+        let connection = connect_tree_quic(&self.config, share).await?;
+        Ok(Share {
+            server: self.config.server().to_owned(),
+            name: normalize_share_name(share)?,
+            connection,
+        })
     }
 
     /// Connects directly to `IPC$`.
@@ -276,14 +313,35 @@ impl Client {
         self.connect_share("IPC$").await
     }
 
+    /// Connects directly to `IPC$` over QUIC.
+    #[cfg(feature = "quic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+    pub async fn connect_ipc_quic(&self) -> Result<Share<QuicTransport>, CoreError> {
+        self.connect_share_quic("IPC$").await
+    }
+
     /// Connects, authenticates, opens `IPC$`, and binds a typed `lsarpc` client.
     pub async fn connect_lsarpc(&self) -> Result<LsarpcClient, CoreError> {
         self.connect().await?.connect_lsarpc().await
     }
 
+    /// Connects, authenticates, opens `IPC$`, and binds a typed `lsarpc` client over QUIC.
+    #[cfg(feature = "quic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+    pub async fn connect_lsarpc_quic(&self) -> Result<LsarpcClient<QuicTransport>, CoreError> {
+        self.connect_quic().await?.connect_lsarpc().await
+    }
+
     /// Connects, authenticates, opens `IPC$`, and binds a typed `srvsvc` client.
     pub async fn connect_srvsvc(&self) -> Result<SrvsvcClient, CoreError> {
         self.connect().await?.connect_srvsvc().await
+    }
+
+    /// Connects, authenticates, opens `IPC$`, and binds a typed `srvsvc` client over QUIC.
+    #[cfg(feature = "quic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+    pub async fn connect_srvsvc_quic(&self) -> Result<SrvsvcClient<QuicTransport>, CoreError> {
+        self.connect_quic().await?.connect_srvsvc().await
     }
 }
 
@@ -1222,8 +1280,8 @@ mod tests {
     #[cfg(feature = "kerberos-api")]
     use crate::auth::{KerberosCredentials, KerberosTarget};
     use crate::client::Connection;
-    use crate::transport::{TransportProtocol, TransportTarget};
     use crate::transport::Transport;
+    use crate::transport::{TransportProtocol, TransportTarget};
 
     use super::{
         normalize_pipe_name, normalize_share_name, normalize_share_path, Client, ClientBuilder,

@@ -24,8 +24,8 @@ use smolder_proto::smb::smb2::{
     QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
     ReadRequest, ReadResponse, ResumeKeyResponse, SessionFlags, SessionId, SessionSetupRequest,
     SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse, ShareFlags,
-    SigningMode, TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest,
-    TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
+    SigningMode, TransportCapabilityFlags, TreeConnectRequest, TreeConnectResponse,
+    TreeDisconnectRequest, TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
 use smolder_proto::smb::transform::{TransformHeader, TRANSFORM_PROTOCOL_ID};
@@ -748,7 +748,8 @@ where
                     compression,
                     ..
                 } = state;
-                let encryption_required = session_encryption_required(response.session_flags);
+                let encryption_required =
+                    session_encryption_required(&negotiated, response.session_flags)?;
                 return Ok(Connection {
                     transport,
                     next_message_id,
@@ -832,7 +833,7 @@ where
             compression,
             ..
         } = state;
-        let encryption_required = session_encryption_required(response.session_flags);
+        let encryption_required = session_encryption_required(&negotiated, response.session_flags)?;
 
         Ok(Connection {
             transport,
@@ -975,7 +976,7 @@ where
             compression,
         } = state;
         let encryption_required =
-            tree_encryption_required(session.session_flags, response.share_flags);
+            tree_encryption_required(&negotiated, session.session_flags, response.share_flags)?;
 
         Ok(Connection {
             transport,
@@ -1044,7 +1045,7 @@ where
             compression,
             ..
         } = state;
-        let encryption_required = session_encryption_required(session.session_flags);
+        let encryption_required = session_encryption_required(&negotiated, session.session_flags)?;
 
         Ok(Connection {
             transport,
@@ -2281,6 +2282,9 @@ fn derive_encryption_state(
     session_key: Option<&[u8]>,
     preauth_integrity: Option<&PreauthIntegrityState>,
 ) -> Result<Option<Arc<EncryptionState>>, CoreError> {
+    if transport_level_security_accepted(negotiated)? {
+        return Ok(None);
+    }
     let Some(session_key) = session_key else {
         return Ok(None);
     };
@@ -2304,6 +2308,28 @@ fn derive_encryption_state(
         negotiated.dialect_revision,
         keys,
     ))))
+}
+
+fn transport_level_security_accepted(negotiated: &NegotiateResponse) -> Result<bool, CoreError> {
+    if negotiated.dialect_revision != Dialect::Smb311 {
+        return Ok(false);
+    }
+
+    let mut accepted = false;
+    for context in &negotiated.negotiate_contexts {
+        let Some(capabilities) = context.as_transport_capabilities()? else {
+            continue;
+        };
+        if accepted {
+            return Err(CoreError::InvalidResponse(
+                "SMB 3.1.1 negotiate response contained multiple transport-capabilities contexts",
+            ));
+        }
+        accepted = capabilities
+            .flags
+            .contains(TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY);
+    }
+    Ok(accepted)
 }
 
 fn negotiated_cipher(negotiated: &NegotiateResponse) -> Result<Option<CipherId>, CoreError> {
@@ -2367,12 +2393,23 @@ fn session_signing_required(
         || server_signing_mode.contains(SigningMode::REQUIRED)
 }
 
-fn session_encryption_required(session_flags: SessionFlags) -> bool {
-    session_flags.contains(SessionFlags::ENCRYPT_DATA)
+fn session_encryption_required(
+    negotiated: &NegotiateResponse,
+    session_flags: SessionFlags,
+) -> Result<bool, CoreError> {
+    if transport_level_security_accepted(negotiated)? {
+        return Ok(false);
+    }
+    Ok(session_flags.contains(SessionFlags::ENCRYPT_DATA))
 }
 
-fn tree_encryption_required(session_flags: SessionFlags, share_flags: ShareFlags) -> bool {
-    session_encryption_required(session_flags) || share_flags.contains(ShareFlags::ENCRYPT_DATA)
+fn tree_encryption_required(
+    negotiated: &NegotiateResponse,
+    session_flags: SessionFlags,
+    share_flags: ShareFlags,
+) -> Result<bool, CoreError> {
+    Ok(session_encryption_required(negotiated, session_flags)?
+        || share_flags.contains(ShareFlags::ENCRYPT_DATA))
 }
 
 fn derive_key(
@@ -2437,11 +2474,11 @@ mod tests {
         CreateRequest, CreateResponse, Dialect, EchoResponse, EncryptionCapabilities,
         FileAttributes, FileId, FlushRequest, FlushResponse, GlobalCapabilities, Header,
         HeaderFlags, IoctlRequest, IoctlResponse, LockElement, LockFlags, LockRequest,
-        LockResponse, LogoffRequest, LogoffResponse, MessageId, NegotiateRequest,
-        NegotiateResponse, OplockLevel, PreauthIntegrityCapabilities,
-        PreauthIntegrityHashId, ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags,
-        SessionId, SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode,
-        ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectRequest,
+        LockResponse, LogoffRequest, LogoffResponse, MessageId, NegotiateContext, NegotiateRequest,
+        NegotiateResponse, OplockLevel, PreauthIntegrityCapabilities, PreauthIntegrityHashId,
+        ReadRequest, ReadResponse, ReadResponseFlags, SessionFlags, SessionId, SessionSetupRequest,
+        SessionSetupResponse, SessionSetupSecurityMode, ShareFlags, ShareType, SigningMode,
+        TransportCapabilities, TransportCapabilityFlags, TreeCapabilities, TreeConnectRequest,
         TreeConnectResponse, TreeDisconnectRequest, TreeId, WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
@@ -2467,6 +2504,63 @@ mod tests {
                 writes: Vec::new(),
             }
         }
+    }
+
+    fn smb311_response_with_transport_security() -> NegotiateResponse {
+        NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            server_guid: [0; 16],
+            capabilities: GlobalCapabilities::ENCRYPTION,
+            max_transact_size: 0x100000,
+            max_read_size: 0x100000,
+            max_write_size: 0x100000,
+            system_time: 0,
+            server_start_time: 0,
+            security_buffer: Vec::new(),
+            negotiate_contexts: vec![NegotiateContext::transport_capabilities(
+                TransportCapabilities {
+                    flags: TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY,
+                },
+            )],
+        }
+    }
+
+    #[test]
+    fn transport_security_disables_smb_encryption_requirement() {
+        let negotiated = smb311_response_with_transport_security();
+        let required = super::session_encryption_required(&negotiated, SessionFlags::ENCRYPT_DATA)
+            .expect("transport security should decode");
+        assert!(!required);
+    }
+
+    #[test]
+    fn transport_security_suppresses_derived_encryption_state() {
+        let negotiated = smb311_response_with_transport_security();
+        let encryption = super::derive_encryption_state(&negotiated, Some(&[0x11; 32]), None)
+            .expect("transport security should decode");
+        assert!(encryption.is_none());
+    }
+
+    #[test]
+    fn duplicate_transport_security_contexts_are_rejected() {
+        let mut negotiated = smb311_response_with_transport_security();
+        negotiated
+            .negotiate_contexts
+            .push(NegotiateContext::transport_capabilities(
+                TransportCapabilities {
+                    flags: TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY,
+                },
+            ));
+
+        let error = super::transport_level_security_accepted(&negotiated)
+            .expect_err("duplicate transport contexts should be rejected");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "SMB 3.1.1 negotiate response contained multiple transport-capabilities contexts"
+            )
+        ));
     }
 
     #[async_trait]
