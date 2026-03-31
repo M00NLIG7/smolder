@@ -1,6 +1,6 @@
 use smolder_core::auth::NtlmCredentials;
 use smolder_core::lsarpc::LsaServerRole;
-use smolder_core::prelude::{Client, CoreError, LsarpcClient};
+use smolder_core::prelude::{Client, CoreError, LsarpcClient, DEFAULT_POLICY_ACCESS};
 use smolder_proto::smb::status::NtStatus;
 
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
@@ -45,7 +45,10 @@ async fn queries_account_domain_info_when_configured() {
         .with_ntlm_credentials(credentials)
         .build()
         .expect("client should build");
-    let mut lsarpc = match client.connect_lsarpc().await {
+    let mut lsarpc = match client
+        .connect_lsarpc_with_access(DEFAULT_POLICY_ACCESS)
+        .await
+    {
         Ok(lsarpc) => lsarpc,
         Err(CoreError::UnexpectedStatus {
             status,
@@ -56,6 +59,11 @@ async fn queries_account_domain_info_when_configured() {
         }
         Err(error) => panic!("LSARPC connect should succeed: {error:?}"),
     };
+    assert_eq!(
+        lsarpc.desired_access(),
+        DEFAULT_POLICY_ACCESS,
+        "typed Windows LSARPC client should retain its requested policy access"
+    );
 
     let account_domain = lsarpc
         .account_domain_info()

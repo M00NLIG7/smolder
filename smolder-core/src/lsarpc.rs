@@ -140,7 +140,7 @@ where
         Self::bind_with_access(rpc, DEFAULT_POLICY_ACCESS).await
     }
 
-    /// Performs the default `lsarpc` bind and `LsarOpenPolicy2` with a caller-selected policy access mask.
+    /// Performs the `lsarpc` bind and `LsarOpenPolicy2` with a caller-selected policy access mask.
     pub async fn bind_with_access(
         mut rpc: PipeRpcClient<T>,
         desired_access: u32,

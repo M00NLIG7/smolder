@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use smolder_core::lsarpc::LsaServerRole;
-use smolder_core::prelude::{Client, LsarpcClient, NtlmCredentials};
+use smolder_core::prelude::{Client, LsarpcClient, NtlmCredentials, DEFAULT_POLICY_ACCESS};
 use smolder_proto::smb::status::NtStatus;
 use tokio::sync::Mutex;
 
@@ -70,12 +70,12 @@ async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
         .build()
         .expect("client builder should succeed");
     let mut lsarpc = client
-        .connect_lsarpc()
+        .connect_lsarpc_with_access(DEFAULT_POLICY_ACCESS)
         .await
         .expect("should bind and open lsarpc on Samba");
     assert_eq!(
         lsarpc.desired_access(),
-        smolder_core::prelude::DEFAULT_POLICY_ACCESS,
+        DEFAULT_POLICY_ACCESS,
         "typed Samba LSARPC client should retain its requested policy access"
     );
     let primary_domain = lsarpc
