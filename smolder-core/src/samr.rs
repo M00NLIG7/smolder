@@ -136,27 +136,17 @@ pub struct SamrDomainClient<T = TokioTcpTransport> {
 /// Typed `samr` user client over an already-open user handle.
 #[derive(Debug)]
 pub struct SamrUserClient<T = TokioTcpTransport> {
-    rpc: PipeRpcClient<T>,
-    context_id: u16,
-    server_handle: [u8; 20],
-    domain_handle: [u8; 20],
+    domain: SamrDomainState<T>,
     user_handle: [u8; 20],
     relative_id: u32,
-    domain_name: String,
-    domain_sid: SamrSid,
 }
 
 /// Typed `samr` alias client over an already-open alias handle.
 #[derive(Debug)]
 pub struct SamrAliasClient<T = TokioTcpTransport> {
-    rpc: PipeRpcClient<T>,
-    context_id: u16,
-    server_handle: [u8; 20],
-    domain_handle: [u8; 20],
+    domain: SamrDomainState<T>,
     alias_handle: [u8; 20],
     relative_id: u32,
-    domain_name: String,
-    domain_sid: SamrSid,
 }
 
 /// Typed `samr` client over an already-open RPC transport and server handle.
@@ -166,6 +156,41 @@ pub struct SamrClient<T = TokioTcpTransport> {
     context_id: u16,
     server_handle: [u8; 20],
     revision: SamrServerRevision,
+}
+
+#[derive(Debug)]
+struct SamrDomainState<T> {
+    rpc: PipeRpcClient<T>,
+    context_id: u16,
+    server_handle: [u8; 20],
+    domain_handle: [u8; 20],
+    domain_name: String,
+    domain_sid: SamrSid,
+}
+
+impl<T> SamrDomainState<T> {
+    fn domain_name(&self) -> &str {
+        &self.domain_name
+    }
+
+    fn domain_sid(&self) -> &SamrSid {
+        &self.domain_sid
+    }
+
+    fn rpc(&self) -> &PipeRpcClient<T> {
+        &self.rpc
+    }
+
+    fn into_domain_client(self) -> SamrDomainClient<T> {
+        SamrDomainClient {
+            rpc: self.rpc,
+            context_id: self.context_id,
+            server_handle: self.server_handle,
+            domain_handle: self.domain_handle,
+            domain_name: self.domain_name,
+            domain_sid: self.domain_sid,
+        }
+    }
 }
 
 impl<T> SamrClient<T> {
@@ -212,7 +237,6 @@ impl<T> SamrDomainClient<T> {
     pub fn rpc(&self) -> &PipeRpcClient<T> {
         &self.rpc
     }
-
 }
 
 impl<T> SamrUserClient<T> {
@@ -225,19 +249,19 @@ impl<T> SamrUserClient<T> {
     /// Returns the name of the currently-open domain.
     #[must_use]
     pub fn domain_name(&self) -> &str {
-        &self.domain_name
+        self.domain.domain_name()
     }
 
     /// Returns the SID of the currently-open domain.
     #[must_use]
     pub fn domain_sid(&self) -> &SamrSid {
-        &self.domain_sid
+        self.domain.domain_sid()
     }
 
     /// Returns the underlying RPC transport.
     #[must_use]
     pub fn rpc(&self) -> &PipeRpcClient<T> {
-        &self.rpc
+        self.domain.rpc()
     }
 }
 
@@ -251,21 +275,20 @@ impl<T> SamrAliasClient<T> {
     /// Returns the name of the currently-open domain.
     #[must_use]
     pub fn domain_name(&self) -> &str {
-        &self.domain_name
+        self.domain.domain_name()
     }
 
     /// Returns the SID of the currently-open domain.
     #[must_use]
     pub fn domain_sid(&self) -> &SamrSid {
-        &self.domain_sid
+        self.domain.domain_sid()
     }
 
     /// Returns the underlying RPC transport.
     #[must_use]
     pub fn rpc(&self) -> &PipeRpcClient<T> {
-        &self.rpc
+        self.domain.rpc()
     }
-
 }
 
 impl<T> SamrAliasClient<T>
@@ -273,16 +296,22 @@ where
     T: crate::transport::SmbTransport + Send,
 {
     /// Returns the members of the currently-open alias as SIDs.
-    pub async fn enumerate_members(&mut self) -> Result<Vec<SamrSid>, CoreError> {
+    pub async fn members(&mut self) -> Result<Vec<SamrSid>, CoreError> {
         let response = self
+            .domain
             .rpc
             .call(
-                self.context_id,
+                self.domain.context_id,
                 SAMR_GET_MEMBERS_IN_ALIAS_OPNUM,
                 encode_get_members_in_alias_request(self.alias_handle),
             )
             .await?;
         parse_get_members_in_alias_response(&response)
+    }
+
+    /// Returns the members of the currently-open alias as SIDs.
+    pub async fn enumerate_members(&mut self) -> Result<Vec<SamrSid>, CoreError> {
+        self.members().await
     }
 }
 
@@ -374,15 +403,7 @@ where
 
     /// Closes the server handle and returns the underlying RPC transport.
     pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_CLOSE_HANDLE_OPNUM,
-                encode_close_handle_request(self.server_handle),
-            )
-            .await?;
-        parse_close_handle_response(&response)?;
+        close_handle(&mut self.rpc, self.context_id, self.server_handle).await?;
         Ok(self.rpc)
     }
 }
@@ -445,23 +466,25 @@ where
             .call(
                 self.context_id,
                 SAMR_OPEN_ALIAS_OPNUM,
-                encode_open_alias_request(
+                encode_open_relative_id_request(
                     self.domain_handle,
                     ALIAS_READ_AND_LIST_MEMBERS,
                     relative_id,
                 ),
             )
             .await?;
-        let alias_handle = parse_open_alias_response(&response)?;
+        let alias_handle = parse_open_handle_response(&response, "SamrOpenAlias")?;
         Ok(SamrAliasClient {
-            rpc: self.rpc,
-            context_id: self.context_id,
-            server_handle: self.server_handle,
-            domain_handle: self.domain_handle,
+            domain: SamrDomainState {
+                rpc: self.rpc,
+                context_id: self.context_id,
+                server_handle: self.server_handle,
+                domain_handle: self.domain_handle,
+                domain_name: self.domain_name,
+                domain_sid: self.domain_sid,
+            },
             alias_handle,
             relative_id,
-            domain_name: self.domain_name,
-            domain_sid: self.domain_sid,
         })
     }
 
@@ -472,43 +495,28 @@ where
             .call(
                 self.context_id,
                 SAMR_OPEN_USER_OPNUM,
-                encode_open_user_request(self.domain_handle, USER_READ_GENERAL, relative_id),
+                encode_open_relative_id_request(self.domain_handle, USER_READ_GENERAL, relative_id),
             )
             .await?;
-        let user_handle = parse_open_user_response(&response)?;
+        let user_handle = parse_open_handle_response(&response, "SamrOpenUser")?;
         Ok(SamrUserClient {
-            rpc: self.rpc,
-            context_id: self.context_id,
-            server_handle: self.server_handle,
-            domain_handle: self.domain_handle,
+            domain: SamrDomainState {
+                rpc: self.rpc,
+                context_id: self.context_id,
+                server_handle: self.server_handle,
+                domain_handle: self.domain_handle,
+                domain_name: self.domain_name,
+                domain_sid: self.domain_sid,
+            },
             user_handle,
             relative_id,
-            domain_name: self.domain_name,
-            domain_sid: self.domain_sid,
         })
     }
 
     /// Closes the domain handle, then the server handle, and returns the underlying RPC transport.
     pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_CLOSE_HANDLE_OPNUM,
-                encode_close_handle_request(self.domain_handle),
-            )
-            .await?;
-        parse_close_handle_response(&response)?;
-
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_CLOSE_HANDLE_OPNUM,
-                encode_close_handle_request(self.server_handle),
-            )
-            .await?;
-        parse_close_handle_response(&response)?;
+        close_handle(&mut self.rpc, self.context_id, self.domain_handle).await?;
+        close_handle(&mut self.rpc, self.context_id, self.server_handle).await?;
         Ok(self.rpc)
     }
 }
@@ -520,9 +528,10 @@ where
     /// Queries `UserAccountNameInformation` for the current user handle.
     pub async fn query_account_name(&mut self) -> Result<SamrUserInfo, CoreError> {
         let response = self
+            .domain
             .rpc
             .call(
-                self.context_id,
+                self.domain.context_id,
                 SAMR_QUERY_INFORMATION_USER_OPNUM,
                 encode_query_user_request(self.user_handle, USER_ACCOUNT_NAME_INFORMATION_CLASS),
             )
@@ -532,23 +541,13 @@ where
 
     /// Closes the user handle and returns the domain-scoped client.
     pub async fn close(mut self) -> Result<SamrDomainClient<T>, CoreError> {
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_CLOSE_HANDLE_OPNUM,
-                encode_close_handle_request(self.user_handle),
-            )
-            .await?;
-        parse_close_handle_response(&response)?;
-        Ok(SamrDomainClient {
-            rpc: self.rpc,
-            context_id: self.context_id,
-            server_handle: self.server_handle,
-            domain_handle: self.domain_handle,
-            domain_name: self.domain_name,
-            domain_sid: self.domain_sid,
-        })
+        close_handle(
+            &mut self.domain.rpc,
+            self.domain.context_id,
+            self.user_handle,
+        )
+        .await?;
+        Ok(self.domain.into_domain_client())
     }
 }
 
@@ -559,9 +558,10 @@ where
     /// Queries `AliasGeneralInformation` for the current alias handle.
     pub async fn query_general_information(&mut self) -> Result<SamrAliasInfo, CoreError> {
         let response = self
+            .domain
             .rpc
             .call(
-                self.context_id,
+                self.domain.context_id,
                 SAMR_QUERY_INFORMATION_ALIAS_OPNUM,
                 encode_query_alias_request(self.alias_handle, ALIAS_GENERAL_INFORMATION_CLASS),
             )
@@ -571,23 +571,13 @@ where
 
     /// Closes the alias handle and returns the domain-scoped client.
     pub async fn close(mut self) -> Result<SamrDomainClient<T>, CoreError> {
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_CLOSE_HANDLE_OPNUM,
-                encode_close_handle_request(self.alias_handle),
-            )
-            .await?;
-        parse_close_handle_response(&response)?;
-        Ok(SamrDomainClient {
-            rpc: self.rpc,
-            context_id: self.context_id,
-            server_handle: self.server_handle,
-            domain_handle: self.domain_handle,
-            domain_name: self.domain_name,
-            domain_sid: self.domain_sid,
-        })
+        close_handle(
+            &mut self.domain.rpc,
+            self.domain.context_id,
+            self.alias_handle,
+        )
+        .await?;
+        Ok(self.domain.into_domain_client())
     }
 }
 
@@ -797,7 +787,7 @@ fn encode_enumeration_request(
     bytes
 }
 
-fn encode_open_user_request(
+fn encode_open_relative_id_request(
     domain_handle: [u8; 20],
     desired_access: u32,
     relative_id: u32,
@@ -809,52 +799,25 @@ fn encode_open_user_request(
     bytes
 }
 
-fn encode_open_alias_request(
-    domain_handle: [u8; 20],
-    desired_access: u32,
-    relative_id: u32,
-) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(28);
-    bytes.extend_from_slice(&domain_handle);
-    bytes.extend_from_slice(&desired_access.to_le_bytes());
-    bytes.extend_from_slice(&relative_id.to_le_bytes());
-    bytes
-}
-
-fn parse_open_user_response(response: &[u8]) -> Result<[u8; 20], CoreError> {
+fn parse_open_handle_response(
+    response: &[u8],
+    operation: &'static str,
+) -> Result<[u8; 20], CoreError> {
     if response.len() < 24 {
         return Err(CoreError::InvalidResponse(
-            "SamrOpenUser response was too short",
+            "SAMR open-handle response was too short",
         ));
     }
-    let mut user_handle = [0_u8; 20];
-    user_handle.copy_from_slice(&response[..20]);
+    let mut handle = [0_u8; 20];
+    handle.copy_from_slice(&response[..20]);
     let status = u32::from_le_bytes(response[20..24].try_into().expect("status slice"));
     if status != 0 {
         return Err(CoreError::RemoteOperation {
-            operation: "SamrOpenUser",
+            operation,
             code: status,
         });
     }
-    Ok(user_handle)
-}
-
-fn parse_open_alias_response(response: &[u8]) -> Result<[u8; 20], CoreError> {
-    if response.len() < 24 {
-        return Err(CoreError::InvalidResponse(
-            "SamrOpenAlias response was too short",
-        ));
-    }
-    let mut alias_handle = [0_u8; 20];
-    alias_handle.copy_from_slice(&response[..20]);
-    let status = u32::from_le_bytes(response[20..24].try_into().expect("status slice"));
-    if status != 0 {
-        return Err(CoreError::RemoteOperation {
-            operation: "SamrOpenAlias",
-            code: status,
-        });
-    }
-    Ok(alias_handle)
+    Ok(handle)
 }
 
 fn encode_query_user_request(user_handle: [u8; 20], info_class: u32) -> Vec<u8> {
@@ -1068,65 +1031,14 @@ fn parse_rid_enumeration_response(
 }
 
 fn parse_enumerate_domains_response(response: &[u8]) -> Result<Vec<SamrDomain>, CoreError> {
-    let mut reader = NdrReader::new(response);
-    let _enumeration_context = reader.read_u32("EnumerationContext")?;
-    let buffer_referent = reader.read_u32("BufferReferent")?;
-    let mut domains = Vec::new();
-    let count_returned;
-
-    if buffer_referent != 0 {
-        let entries_read = reader.read_u32("EntriesRead")? as usize;
-        let array_referent = reader.read_u32("RidEnumerationArray")?;
-        if entries_read > 0 && array_referent == 0 {
-            return Err(CoreError::InvalidResponse(
-                "SamrEnumerateDomainsInSamServer returned entries without an array",
-            ));
-        }
-        if array_referent != 0 {
-            let max_count = reader.read_u32("RidEnumerationMaxCount")? as usize;
-            if max_count < entries_read {
-                return Err(CoreError::InvalidResponse(
-                    "SamrEnumerateDomainsInSamServer returned fewer array slots than entries",
-                ));
-            }
-            let mut raw_entries = Vec::with_capacity(entries_read);
-            let mut headers = Vec::with_capacity(entries_read);
-            for _ in 0..entries_read {
-                raw_entries.push(RidEnumeration {
-                    relative_id: reader.read_u32("RelativeId")?,
-                    name: String::new(),
-                });
-                headers.push(reader.read_unicode_string_header("Name")?);
-            }
-            for (entry, header) in raw_entries.iter_mut().zip(headers) {
-                entry.name = reader.read_deferred_unicode_string(header, "Name")?;
-            }
-            domains = raw_entries
-                .into_iter()
-                .map(|entry| SamrDomain {
-                    relative_id: entry.relative_id,
-                    name: entry.name,
-                })
-                .collect();
-        }
-    }
-
-    count_returned = reader.read_u32("CountReturned")? as usize;
-    if count_returned != domains.len() {
-        return Err(CoreError::InvalidResponse(
-            "SamrEnumerateDomainsInSamServer count did not match returned entries",
-        ));
-    }
-
-    let status = reader.read_u32("SamrEnumerateDomainsInSamServerStatus")?;
-    if status != 0 && status != 0x0000_0105 {
-        return Err(CoreError::RemoteOperation {
-            operation: "SamrEnumerateDomainsInSamServer",
-            code: status,
-        });
-    }
-
-    Ok(domains)
+    let entries = parse_rid_enumeration_response(response, "SamrEnumerateDomainsInSamServer")?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| SamrDomain {
+            relative_id: entry.relative_id,
+            name: entry.name,
+        })
+        .collect())
 }
 
 fn encode_close_handle_request(handle: [u8; 20]) -> Vec<u8> {
@@ -1147,6 +1059,24 @@ fn parse_close_handle_response(response: &[u8]) -> Result<(), CoreError> {
         });
     }
     Ok(())
+}
+
+async fn close_handle<T>(
+    rpc: &mut PipeRpcClient<T>,
+    context_id: u16,
+    handle: [u8; 20],
+) -> Result<(), CoreError>
+where
+    T: crate::transport::SmbTransport + Send,
+{
+    let response = rpc
+        .call(
+            context_id,
+            SAMR_CLOSE_HANDLE_OPNUM,
+            encode_close_handle_request(handle),
+        )
+        .await?;
+    parse_close_handle_response(&response)
 }
 
 #[derive(Debug)]
@@ -1374,19 +1304,18 @@ impl NdrWriter {
 #[cfg(test)]
 mod tests {
     use super::{
+        ALIAS_GENERAL_INFORMATION_CLASS, ALIAS_READ_AND_LIST_MEMBERS, DEFAULT_DOMAIN_ACCESS,
+        DEFAULT_SERVER_ACCESS, SamrAlias, SamrAliasInfo, SamrDomain, SamrGroup, SamrServerRevision,
+        SamrSid, SamrUser, SamrUserInfo, USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
         encode_close_handle_request, encode_connect2_request, encode_connect5_request,
         encode_enumerate_users_request, encode_enumeration_request, encode_lookup_domain_request,
-        encode_open_alias_request, encode_open_domain_request, encode_open_user_request,
-        encode_query_alias_request, encode_query_user_request, parse_close_handle_response,
-        parse_connect2_response, parse_connect5_response, parse_enumerate_aliases_response,
+        encode_open_domain_request, encode_open_relative_id_request, encode_query_alias_request,
+        encode_query_user_request, parse_close_handle_response, parse_connect2_response,
+        parse_connect5_response, parse_enumerate_aliases_response,
         parse_enumerate_domains_response, parse_enumerate_groups_response,
         parse_enumerate_users_response, parse_get_members_in_alias_response,
-        parse_lookup_domain_response, parse_open_alias_response, parse_open_domain_response,
-        parse_open_user_response, parse_query_account_name_response,
-        parse_query_alias_general_response, SamrAlias, SamrAliasInfo, SamrDomain, SamrGroup,
-        SamrServerRevision, SamrSid, SamrUser, SamrUserInfo, ALIAS_GENERAL_INFORMATION_CLASS,
-        ALIAS_READ_AND_LIST_MEMBERS, DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
-        USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
+        parse_lookup_domain_response, parse_open_domain_response, parse_open_handle_response,
+        parse_query_account_name_response, parse_query_alias_general_response,
     };
     use crate::error::CoreError;
 
@@ -1830,7 +1759,7 @@ mod tests {
     #[test]
     fn open_user_request_encodes_handle_access_and_rid() {
         assert_eq!(
-            encode_open_user_request([0x12; 20], USER_READ_GENERAL, 500),
+            encode_open_relative_id_request([0x12; 20], USER_READ_GENERAL, 500),
             [
                 [0x12; 20].to_vec(),
                 USER_READ_GENERAL.to_le_bytes().to_vec(),
@@ -1843,7 +1772,7 @@ mod tests {
     #[test]
     fn open_alias_request_encodes_handle_access_and_rid() {
         assert_eq!(
-            encode_open_alias_request([0x24; 20], ALIAS_READ_AND_LIST_MEMBERS, 544),
+            encode_open_relative_id_request([0x24; 20], ALIAS_READ_AND_LIST_MEMBERS, 544),
             [
                 [0x24; 20].to_vec(),
                 ALIAS_READ_AND_LIST_MEMBERS.to_le_bytes().to_vec(),
@@ -1857,7 +1786,7 @@ mod tests {
     fn open_user_response_decodes_handle() {
         let response = [[0x66; 20].to_vec(), 0_u32.to_le_bytes().to_vec()].concat();
         assert_eq!(
-            parse_open_user_response(&response).expect("response should decode"),
+            parse_open_handle_response(&response, "SamrOpenUser").expect("response should decode"),
             [0x66; 20]
         );
     }
@@ -1866,7 +1795,7 @@ mod tests {
     fn open_alias_response_decodes_handle() {
         let response = [[0x67; 20].to_vec(), 0_u32.to_le_bytes().to_vec()].concat();
         assert_eq!(
-            parse_open_alias_response(&response).expect("response should decode"),
+            parse_open_handle_response(&response, "SamrOpenAlias").expect("response should decode"),
             [0x67; 20]
         );
     }
