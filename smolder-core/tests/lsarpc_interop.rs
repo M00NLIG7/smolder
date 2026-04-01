@@ -1,51 +1,24 @@
-use smolder_core::auth::NtlmCredentials;
 use smolder_core::lsarpc::LsaServerRole;
-use smolder_core::prelude::{Client, CoreError, LOOKUP_POLICY_ACCESS, LsarpcClient};
+use smolder_core::prelude::{CoreError, LOOKUP_POLICY_ACCESS, LsarpcClient};
 use smolder_proto::smb::status::NtStatus;
 
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
 const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
 
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-fn optional_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
+mod common;
+use common::WindowsNtlmConfig;
 
 #[tokio::test]
 async fn queries_account_domain_info_when_configured() {
-    let Some(host) = required_env("SMOLDER_WINDOWS_HOST") else {
-        eprintln!("skipping live LSARPC test: SMOLDER_WINDOWS_HOST not set");
+    let Some(config) = WindowsNtlmConfig::from_env() else {
+        eprintln!(
+            "skipping live LSARPC test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"
+        );
         return;
     };
-    let Some(username) = required_env("SMOLDER_WINDOWS_USERNAME") else {
-        eprintln!("skipping live LSARPC test: SMOLDER_WINDOWS_USERNAME not set");
-        return;
-    };
-    let Some(password) = required_env("SMOLDER_WINDOWS_PASSWORD") else {
-        eprintln!("skipping live LSARPC test: SMOLDER_WINDOWS_PASSWORD not set");
-        return;
-    };
-    let lookup_name = username.clone();
+    let lookup_name = config.username.clone();
 
-    let port = optional_env("SMOLDER_WINDOWS_PORT")
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(445);
-    let mut credentials = NtlmCredentials::new(username, password);
-    if let Some(domain) = optional_env("SMOLDER_WINDOWS_DOMAIN") {
-        credentials = credentials.with_domain(domain);
-    }
-    if let Some(workstation) = optional_env("SMOLDER_WINDOWS_WORKSTATION") {
-        credentials = credentials.with_workstation(workstation);
-    }
-
-    let client = Client::builder(host)
-        .with_port(port)
-        .with_ntlm_credentials(credentials)
-        .build()
-        .expect("client should build");
+    let client = config.client().expect("client should build");
     let mut lsarpc = match client
         .connect_lsarpc_with_access(LOOKUP_POLICY_ACCESS)
         .await

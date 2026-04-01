@@ -1,73 +1,25 @@
-use std::sync::OnceLock;
-
-use smolder_core::prelude::{Client, CoreError, NtlmCredentials};
+use smolder_core::prelude::{Client, CoreError};
 use smolder_proto::smb::smb2::Command;
 use smolder_proto::smb::status::NtStatus;
-use tokio::sync::Mutex;
 
 const SAMR_PIPE_CANDIDATES: &[&str] = &["samr", "lsarpc"];
 const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
 
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct WindowsSamrConfig {
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl WindowsSamrConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_WINDOWS_HOST")?,
-            port: required_env("SMOLDER_WINDOWS_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-            username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
-            domain: required_env("SMOLDER_WINDOWS_DOMAIN"),
-            workstation: required_env("SMOLDER_WINDOWS_WORKSTATION"),
-        })
-    }
-
-    fn credentials(&self) -> NtlmCredentials {
-        let mut credentials = NtlmCredentials::new(self.username.clone(), self.password.clone());
-        if let Some(domain) = &self.domain {
-            credentials = credentials.with_domain(domain.clone());
-        }
-        if let Some(workstation) = &self.workstation {
-            credentials = credentials.with_workstation(workstation.clone());
-        }
-        credentials
-    }
-}
-
-fn windows_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+mod common;
+use common::{WindowsNtlmConfig, windows_lock};
 
 #[tokio::test]
 async fn enumerates_windows_samr_domains_when_configured() {
     let _guard = windows_lock().lock().await;
-    let Some(config) = WindowsSamrConfig::from_env() else {
+    let Some(config) = WindowsNtlmConfig::from_env() else {
         eprintln!(
             "skipping live Windows SAMR test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"
         );
         return;
     };
 
-    let client = Client::builder(config.host.clone())
-        .with_port(config.port)
-        .with_ntlm_credentials(config.credentials())
-        .build()
-        .expect("client builder should succeed");
+    let client = config.client().expect("client builder should succeed");
 
     let mut samr = match connect_samr_from_client(&client).await {
         Ok(samr) => samr,
@@ -181,7 +133,9 @@ async fn enumerates_windows_samr_domains_when_configured() {
         Err(CoreError::RemoteOperation { code, .. })
             if code == STATUS_ACCESS_DENIED || code == STATUS_NOT_SUPPORTED =>
         {
-            eprintln!("skipping Builtin alias member enumeration: alias membership is not available");
+            eprintln!(
+                "skipping Builtin alias member enumeration: alias membership is not available"
+            );
             let builtin = alias
                 .close()
                 .await
@@ -202,7 +156,9 @@ async fn enumerates_windows_samr_domains_when_configured() {
             connection.logoff().await.expect("logoff should succeed");
             return;
         }
-        Err(error) => panic!("SamrGetMembersInAlias should succeed for Builtin Administrators: {error:?}"),
+        Err(error) => {
+            panic!("SamrGetMembersInAlias should succeed for Builtin Administrators: {error:?}")
+        }
     };
     assert!(
         !alias_members.is_empty(),

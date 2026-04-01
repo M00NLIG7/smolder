@@ -1,76 +1,24 @@
-use std::sync::OnceLock;
-
 use smolder_core::lsarpc::LsaServerRole;
-use smolder_core::prelude::{Client, LOOKUP_POLICY_ACCESS, LsarpcClient, NtlmCredentials};
+use smolder_core::prelude::{LOOKUP_POLICY_ACCESS, LsarpcClient};
 use smolder_proto::smb::status::NtStatus;
-use tokio::sync::Mutex;
 
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
 const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
 const STATUS_INVALID_INFO_CLASS: u32 = 0xc000_0003;
 
-fn optional_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct SambaLsarpcConfig {
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl SambaLsarpcConfig {
-    fn from_env() -> Option<Self> {
-        let host = optional_env("SMOLDER_SAMBA_HOST")?;
-        Some(Self {
-            host,
-            port: optional_env("SMOLDER_SAMBA_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-            username: optional_env("SMOLDER_SAMBA_USERNAME")
-                .unwrap_or_else(|| "smolder".to_owned()),
-            password: optional_env("SMOLDER_SAMBA_PASSWORD")
-                .unwrap_or_else(|| "smolderpass".to_owned()),
-            domain: optional_env("SMOLDER_SAMBA_DOMAIN").or_else(|| Some("WORKGROUP".to_owned())),
-            workstation: optional_env("SMOLDER_SAMBA_WORKSTATION"),
-        })
-    }
-
-    fn credentials(&self) -> NtlmCredentials {
-        let mut credentials = NtlmCredentials::new(self.username.clone(), self.password.clone());
-        if let Some(domain) = &self.domain {
-            credentials = credentials.with_domain(domain.clone());
-        }
-        if let Some(workstation) = &self.workstation {
-            credentials = credentials.with_workstation(workstation.clone());
-        }
-        credentials
-    }
-}
-
-fn samba_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+mod common;
+use common::{SambaNtlmConfig, samba_lock};
 
 #[tokio::test]
 async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
     let _guard = samba_lock().lock().await;
-    let Some(config) = SambaLsarpcConfig::from_env() else {
+    let Some(config) = SambaNtlmConfig::from_env_with_defaults() else {
         eprintln!("skipping live Samba LSARPC test: SMOLDER_SAMBA_HOST must be set");
         return;
     };
 
     let lookup_name = config.username.clone();
-    let credentials = config.credentials();
-    let client = Client::builder(config.host)
-        .with_port(config.port)
-        .with_ntlm_credentials(credentials)
-        .build()
-        .expect("client builder should succeed");
+    let client = config.client().expect("client builder should succeed");
     let mut lsarpc = client
         .connect_lsarpc_with_access(LOOKUP_POLICY_ACCESS)
         .await
