@@ -1,5 +1,6 @@
 //! High-level SMB2 file APIs built on top of the typestate client.
 
+mod open_options;
 mod remote_file;
 
 use std::future::Future;
@@ -14,9 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use smolder_core::auth::NtlmCredentials;
 #[cfg(feature = "kerberos")]
 use smolder_core::auth::{KerberosCredentials, KerberosTarget};
-use smolder_core::client::{
-    Authenticated, Connection, DurableHandle, DurableOpenOptions, TreeConnected,
-};
+use smolder_core::client::{Authenticated, Connection, DurableHandle, TreeConnected};
 use smolder_core::dfs::{DfsReferral, UncPath, referrals_from_response, resolve_unc_path};
 use smolder_core::error::CoreError;
 use smolder_core::facade::Client as CoreClient;
@@ -27,15 +26,15 @@ use smolder_proto::smb::smb2::{
     PreauthIntegrityHashId,
 };
 use smolder_proto::smb::smb2::{
-    CloseRequest, CloseResponse, Command, CreateContext, CreateDisposition, CreateOptions,
-    CreateRequest, DfsReferralRequest, Dialect, DispositionInformation, FileAttributes,
-    FileBasicInformation, FileId, FileInfoClass, FileStandardInformation, GlobalCapabilities,
-    IoctlRequest, LeaseFlags, LeaseState, LeaseV2, QueryDirectoryFlags, QueryDirectoryRequest,
-    QueryInfoRequest, RenameInformation, SetInfoRequest, ShareAccess, SigningMode,
-    TreeConnectRequest,
+    CloseRequest, CloseResponse, Command, CreateDisposition, CreateOptions, CreateRequest,
+    DfsReferralRequest, Dialect, DispositionInformation, FileAttributes, FileBasicInformation,
+    FileId, FileInfoClass, FileStandardInformation, GlobalCapabilities, IoctlRequest,
+    QueryDirectoryFlags, QueryDirectoryRequest, QueryInfoRequest, RenameInformation,
+    SetInfoRequest, ShareAccess, SigningMode, TreeConnectRequest,
 };
 use smolder_proto::smb::status::NtStatus;
 
+pub use self::open_options::{Lease, LeaseRequest, OpenOptions};
 pub use self::remote_file::RemoteFile;
 
 const DEFAULT_PORT: u16 = 445;
@@ -102,70 +101,6 @@ pub struct SmbDirectoryEntry {
     pub name: String,
     /// Entry metadata.
     pub metadata: SmbMetadata,
-}
-
-/// High-level lease request attached to an open operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LeaseRequest {
-    key: [u8; 16],
-    state: LeaseState,
-    parent_key: Option<[u8; 16]>,
-}
-
-impl LeaseRequest {
-    /// Builds a lease request with an explicit lease key and desired state.
-    #[must_use]
-    pub fn new(key: [u8; 16], state: LeaseState) -> Self {
-        Self {
-            key,
-            state,
-            parent_key: None,
-        }
-    }
-
-    /// Builds a lease request with a random lease key.
-    #[must_use]
-    pub fn random(state: LeaseState) -> Self {
-        Self::new(random(), state)
-    }
-
-    /// Associates a parent-directory lease key with the request.
-    #[must_use]
-    pub fn with_parent_key(mut self, parent_key: [u8; 16]) -> Self {
-        self.parent_key = Some(parent_key);
-        self
-    }
-
-    fn into_proto(self) -> LeaseV2 {
-        LeaseV2::new(self.key, self.state).with_parent_lease_key(self.parent_key)
-    }
-}
-
-/// Lease metadata granted by the server for an open handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Lease {
-    /// Lease owner key.
-    pub key: [u8; 16],
-    /// Granted lease state.
-    pub state: LeaseState,
-    /// Server-provided lease flags.
-    pub flags: LeaseFlags,
-    /// Parent lease key when present.
-    pub parent_key: Option<[u8; 16]>,
-    /// Lease epoch.
-    pub epoch: u16,
-}
-
-impl From<LeaseV2> for Lease {
-    fn from(value: LeaseV2) -> Self {
-        Self {
-            key: value.lease_key,
-            state: value.lease_state,
-            flags: value.flags,
-            parent_key: value.parent_lease_key,
-            epoch: value.epoch,
-        }
-    }
 }
 
 /// Builder for an authenticated SMB2 client session.
@@ -663,7 +598,7 @@ where
         path: impl AsRef<str>,
         options: OpenOptions,
     ) -> Result<RemoteFile<'a, T>, CoreError> {
-        if options.lease.is_some() {
+        if options.requests_lease() {
             self.ensure_lease_support()?;
         }
         let request = options.to_create_request(path.as_ref())?;
@@ -683,7 +618,7 @@ where
         } else {
             self.connection_mut().create(&request).await?
         };
-        let resilient = if let Some(timeout) = options.resilient_timeout {
+        let resilient = if let Some(timeout) = options.resilient_timeout() {
             Some(
                 self.connection_mut()
                     .request_resiliency(response.file_id, timeout)
@@ -1172,148 +1107,6 @@ where
         }
         Ok(())
     }
-}
-
-/// Rust-style options for opening a remote file.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OpenOptions {
-    read: bool,
-    write: bool,
-    create: bool,
-    truncate: bool,
-    create_new: bool,
-    lease: Option<LeaseRequest>,
-    durable: Option<DurableOpenOptions>,
-    resilient_timeout: Option<u32>,
-}
-
-impl OpenOptions {
-    /// Creates a new set of open options with all flags disabled.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Enables or disables read access.
-    #[must_use]
-    pub fn read(mut self, read: bool) -> Self {
-        self.read = read;
-        self
-    }
-
-    /// Enables or disables write access.
-    #[must_use]
-    pub fn write(mut self, write: bool) -> Self {
-        self.write = write;
-        self
-    }
-
-    /// Enables or disables create-if-missing behavior.
-    #[must_use]
-    pub fn create(mut self, create: bool) -> Self {
-        self.create = create;
-        self
-    }
-
-    /// Enables or disables truncation of an existing file.
-    #[must_use]
-    pub fn truncate(mut self, truncate: bool) -> Self {
-        self.truncate = truncate;
-        self
-    }
-
-    /// Enables or disables create-new semantics.
-    #[must_use]
-    pub fn create_new(mut self, create_new: bool) -> Self {
-        self.create_new = create_new;
-        self
-    }
-
-    /// Requests an SMB lease for the opened handle.
-    #[must_use]
-    pub fn lease(mut self, lease: LeaseRequest) -> Self {
-        self.lease = Some(lease);
-        self
-    }
-
-    /// Requests a durable handle for the opened file.
-    #[must_use]
-    pub fn durable(mut self, durable: DurableOpenOptions) -> Self {
-        self.durable = Some(durable);
-        self
-    }
-
-    /// Requests handle resiliency for the opened file.
-    #[must_use]
-    pub fn resilient(mut self, timeout: u32) -> Self {
-        self.resilient_timeout = Some(timeout);
-        self
-    }
-
-    fn to_create_request(&self, path: &str) -> Result<CreateRequest, CoreError> {
-        if !self.read && !self.write {
-            return Err(CoreError::InvalidInput(
-                "open options must request read and/or write access",
-            ));
-        }
-        if (self.truncate || self.create || self.create_new) && !self.write {
-            return Err(CoreError::InvalidInput(
-                "create and truncate operations require write access",
-            ));
-        }
-
-        let mut request = CreateRequest::from_path(&normalize_share_path(path)?);
-        request.desired_access = desired_access_mask(self);
-        request.share_access = ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE;
-        request.file_attributes = FileAttributes::NORMAL;
-        request.create_options = CreateOptions::NON_DIRECTORY_FILE;
-        request.create_disposition = create_disposition(self);
-        if let Some(lease) = self.lease {
-            request.requested_oplock_level = smolder_proto::smb::smb2::RequestedOplockLevel::Lease;
-            request.create_contexts = vec![CreateContext::lease_v2(lease.into_proto())];
-        }
-        Ok(request)
-    }
-
-    fn durable_options(&self, dialect: Dialect) -> Option<DurableOpenOptions> {
-        self.durable.clone().map(|durable| {
-            if dialect_supports_durable_v2(dialect) && durable.create_guid.is_none() {
-                durable.with_create_guid(random())
-            } else {
-                durable
-            }
-        })
-    }
-}
-
-fn desired_access_mask(options: &OpenOptions) -> u32 {
-    let mut desired_access = READ_CONTROL | SYNCHRONIZE;
-    if options.read {
-        desired_access |= FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES;
-    }
-    if options.write {
-        desired_access |=
-            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
-    }
-    desired_access
-}
-
-fn create_disposition(options: &OpenOptions) -> CreateDisposition {
-    if options.create_new {
-        CreateDisposition::Create
-    } else if options.create && options.truncate {
-        CreateDisposition::OverwriteIf
-    } else if options.create {
-        CreateDisposition::OpenIf
-    } else if options.truncate {
-        CreateDisposition::Overwrite
-    } else {
-        CreateDisposition::Open
-    }
-}
-
-fn dialect_supports_durable_v2(dialect: Dialect) -> bool {
-    matches!(dialect, Dialect::Smb300 | Dialect::Smb302 | Dialect::Smb311)
 }
 
 #[cfg(test)]
