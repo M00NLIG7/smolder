@@ -1,8 +1,8 @@
 //! Shared parsing and execution helpers for CLI binaries.
 
 use std::env;
-use std::path::{Path, PathBuf};
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::terminal;
@@ -10,9 +10,9 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+use smolder_core::auth::NtlmCredentials;
 #[cfg(feature = "kerberos")]
 use smolder_core::auth::{KerberosCredentials, KerberosTarget};
-use smolder_core::auth::NtlmCredentials;
 
 use crate::fs::{Share, SmbClient, SmbClientBuilder, SmbMetadata};
 use crate::remote_exec::{
@@ -61,6 +61,46 @@ pub(super) struct AuthOptions {
     pub(super) domain: Option<String>,
     pub(super) workstation: Option<String>,
     pub(super) kerberos: KerberosOptions,
+}
+
+impl AuthOptions {
+    fn ntlm_credentials(&self) -> NtlmCredentials {
+        let mut credentials = NtlmCredentials::new(&self.username, &self.password);
+        if let Some(domain) = &self.domain {
+            credentials = credentials.with_domain(domain.as_str());
+        }
+        if let Some(workstation) = &self.workstation {
+            credentials = credentials.with_workstation(workstation.as_str());
+        }
+        credentials
+    }
+
+    #[cfg(feature = "kerberos")]
+    fn kerberos_credentials(&self) -> KerberosCredentials {
+        let mut credentials = KerberosCredentials::new(&self.username, &self.password);
+        if let Some(domain) = &self.domain {
+            credentials = credentials.with_domain(domain.as_str());
+        }
+        if let Some(workstation) = &self.workstation {
+            credentials = credentials.with_workstation(workstation.as_str());
+        }
+        if let Some(kdc_url) = &self.kerberos.kdc_url {
+            credentials = credentials.with_kdc_url(kdc_url.as_str());
+        }
+        credentials
+    }
+
+    #[cfg(feature = "kerberos")]
+    fn kerberos_target(&self, default_host: &str) -> KerberosTarget {
+        let target_host = self.kerberos.target_host.as_deref().unwrap_or(default_host);
+        let mut target = KerberosTarget::for_smb_host(target_host);
+        if let Some(principal) = &self.kerberos.target_principal {
+            target = target.with_principal(principal.as_str());
+        } else if let Some(realm) = &self.kerberos.realm {
+            target = target.with_realm(realm.as_str());
+        }
+        target
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -220,43 +260,14 @@ fn share_builder(options: &AuthOptions, remote: &RemoteLocation) -> SmbClientBui
         .port(remote.port);
 
     match options.mode {
-        AuthMode::Ntlm => {
-            let mut credentials = NtlmCredentials::new(&options.username, &options.password);
-            if let Some(domain) = &options.domain {
-                credentials = credentials.with_domain(domain.as_str());
-            }
-            if let Some(workstation) = &options.workstation {
-                credentials = credentials.with_workstation(workstation.as_str());
-            }
-            builder.credentials(credentials)
-        }
+        AuthMode::Ntlm => builder.credentials(options.ntlm_credentials()),
         AuthMode::Kerberos => {
             #[cfg(feature = "kerberos")]
             {
-                let mut credentials = KerberosCredentials::new(&options.username, &options.password);
-                if let Some(domain) = &options.domain {
-                    credentials = credentials.with_domain(domain.as_str());
-                }
-                if let Some(workstation) = &options.workstation {
-                    credentials = credentials.with_workstation(workstation.as_str());
-                }
-                if let Some(kdc_url) = &options.kerberos.kdc_url {
-                    credentials = credentials.with_kdc_url(kdc_url.as_str());
-                }
-
-                let target_host = options
-                    .kerberos
-                    .target_host
-                    .as_deref()
-                    .unwrap_or(remote.host.as_str());
-                let mut target = KerberosTarget::for_smb_host(target_host);
-                if let Some(principal) = &options.kerberos.target_principal {
-                    target = target.with_principal(principal.as_str());
-                } else if let Some(realm) = &options.kerberos.realm {
-                    target = target.with_realm(realm.as_str());
-                }
-
-                builder.kerberos(credentials, target)
+                builder.kerberos(
+                    options.kerberos_credentials(),
+                    options.kerberos_target(remote.host.as_str()),
+                )
             }
             #[cfg(not(feature = "kerberos"))]
             {
@@ -301,8 +312,7 @@ pub(super) async fn connect_share_move_paths(
         || !share.name().eq_ignore_ascii_case(&source_share_name)
     {
         return Err(
-            "mv requires both SMB URLs to resolve to the same backend server and share"
-                .to_string(),
+            "mv requires both SMB URLs to resolve to the same backend server and share".to_string(),
         );
     }
 
@@ -321,43 +331,14 @@ pub(super) async fn connect_remote_exec(
         .mode(mode);
 
     match options.mode {
-        AuthMode::Ntlm => {
-            let mut credentials = NtlmCredentials::new(&options.username, &options.password);
-            if let Some(domain) = &options.domain {
-                credentials = credentials.with_domain(domain.as_str());
-            }
-            if let Some(workstation) = &options.workstation {
-                credentials = credentials.with_workstation(workstation.as_str());
-            }
-            builder = builder.credentials(credentials);
-        }
+        AuthMode::Ntlm => builder = builder.credentials(options.ntlm_credentials()),
         AuthMode::Kerberos => {
             #[cfg(feature = "kerberos")]
             {
-                let mut credentials = KerberosCredentials::new(&options.username, &options.password);
-                if let Some(domain) = &options.domain {
-                    credentials = credentials.with_domain(domain.as_str());
-                }
-                if let Some(workstation) = &options.workstation {
-                    credentials = credentials.with_workstation(workstation.as_str());
-                }
-                if let Some(kdc_url) = &options.kerberos.kdc_url {
-                    credentials = credentials.with_kdc_url(kdc_url.as_str());
-                }
-
-                let target_host = options
-                    .kerberos
-                    .target_host
-                    .as_deref()
-                    .unwrap_or(target.host.as_str());
-                let mut kerberos_target = KerberosTarget::for_smb_host(target_host);
-                if let Some(principal) = &options.kerberos.target_principal {
-                    kerberos_target = kerberos_target.with_principal(principal.as_str());
-                } else if let Some(realm) = &options.kerberos.realm {
-                    kerberos_target = kerberos_target.with_realm(realm.as_str());
-                }
-
-                builder = builder.kerberos(credentials, kerberos_target);
+                builder = builder.kerberos(
+                    options.kerberos_credentials(),
+                    options.kerberos_target(target.host.as_str()),
+                );
             }
             #[cfg(not(feature = "kerberos"))]
             {
@@ -376,11 +357,7 @@ pub(super) async fn connect_remote_exec(
     builder.connect().await.map_err(|error| error.to_string())
 }
 
-pub(super) fn next_value(
-    args: &[String],
-    index: &mut usize,
-    flag: &str,
-) -> Result<String, String> {
+pub(super) fn next_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, String> {
     *index += 1;
     args.get(*index)
         .cloned()
@@ -418,7 +395,7 @@ fn resolve_auth_mode(
         Some(other) => {
             return Err(format!(
                 "unsupported auth mode `{other}`; expected `ntlm` or `kerberos`"
-            ))
+            ));
         }
         None if inferred_kerberos => AuthMode::Kerberos,
         None => AuthMode::Ntlm,
@@ -666,8 +643,8 @@ async fn pump_local_stdin(
         if count == 0 {
             return stdin.close().await.map_err(|error| error.to_string());
         }
-        let saw_exit_command = close_on_exit_command
-            && update_exit_command_state(&mut pending_line, &buffer[..count]);
+        let saw_exit_command =
+            close_on_exit_command && update_exit_command_state(&mut pending_line, &buffer[..count]);
         stdin
             .write_all(&buffer[..count])
             .await
@@ -716,8 +693,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        parse_duration, parse_exec_target, parse_remote_location,
-        parse_remote_location_with_options, remote_unc, ExecTarget, RemoteLocation,
+        ExecTarget, RemoteLocation, parse_duration, parse_exec_target, parse_remote_location,
+        parse_remote_location_with_options, remote_unc,
     };
 
     #[test]
