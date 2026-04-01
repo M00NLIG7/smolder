@@ -1,39 +1,14 @@
-use smolder_core::auth::NtlmCredentials;
 use smolder_core::prelude::{Client, LOOKUP_POLICY_ACCESS};
 
-fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    std::env::var(name)
-        .map_err(|_| format!("{name} must be set").into())
-        .and_then(|value| {
-            if value.is_empty() {
-                Err(format!("{name} must not be empty").into())
-            } else {
-                Ok(value)
-            }
-        })
-}
-
-fn optional_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
+mod common;
+use common::{ntlm_credentials_from_env_prefix, optional_prefixed_u16_env, required_prefixed_env};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let host = required_env("SMOLDER_LSARPC_HOST")?;
-    let username = required_env("SMOLDER_LSARPC_USERNAME")?;
-    let password = required_env("SMOLDER_LSARPC_PASSWORD")?;
-    let lookup_name = username.clone();
-    let port = optional_env("SMOLDER_LSARPC_PORT")
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(445);
-
-    let mut credentials = NtlmCredentials::new(username, password);
-    if let Some(domain) = optional_env("SMOLDER_LSARPC_DOMAIN") {
-        credentials = credentials.with_domain(domain);
-    }
-    if let Some(workstation) = optional_env("SMOLDER_LSARPC_WORKSTATION") {
-        credentials = credentials.with_workstation(workstation);
-    }
+    let host = required_prefixed_env("SMOLDER_LSARPC", "HOST")?;
+    let lookup_name = required_prefixed_env("SMOLDER_LSARPC", "USERNAME")?;
+    let port = optional_prefixed_u16_env("SMOLDER_LSARPC", "PORT", 445)?;
+    let credentials = ntlm_credentials_from_env_prefix("SMOLDER_LSARPC")?;
 
     let client = Client::builder(host)
         .with_port(port)

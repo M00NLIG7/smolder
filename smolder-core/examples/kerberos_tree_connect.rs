@@ -25,43 +25,35 @@
 
 use smolder_core::prelude::{Client, KerberosCredentials, KerberosTarget};
 
-fn required_env(name: &str) -> Result<String, String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("missing required environment variable {name}"))
-}
-
-fn optional_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
+mod common;
+use common::{optional_prefixed_env, optional_prefixed_u16_env, required_prefixed_env};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let host = required_env("SMOLDER_KERBEROS_HOST")?;
-    let port = optional_env("SMOLDER_KERBEROS_PORT")
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(445);
-    let share = optional_env("SMOLDER_KERBEROS_SHARE").unwrap_or_else(|| "IPC$".to_owned());
-    let target_host = optional_env("SMOLDER_KERBEROS_TARGET_HOST").unwrap_or_else(|| host.clone());
-    let username = required_env("SMOLDER_KERBEROS_USERNAME")?;
-    let password = required_env("SMOLDER_KERBEROS_PASSWORD")?;
+    let host = required_prefixed_env("SMOLDER_KERBEROS", "HOST")?;
+    let port = optional_prefixed_u16_env("SMOLDER_KERBEROS", "PORT", 445)?;
+    let share =
+        optional_prefixed_env("SMOLDER_KERBEROS", "SHARE").unwrap_or_else(|| "IPC$".to_owned());
+    let target_host =
+        optional_prefixed_env("SMOLDER_KERBEROS", "TARGET_HOST").unwrap_or_else(|| host.clone());
+    let username = required_prefixed_env("SMOLDER_KERBEROS", "USERNAME")?;
+    let password = required_prefixed_env("SMOLDER_KERBEROS", "PASSWORD")?;
 
     let mut credentials = KerberosCredentials::new(username, password);
-    if let Some(domain) = optional_env("SMOLDER_KERBEROS_DOMAIN") {
+    if let Some(domain) = optional_prefixed_env("SMOLDER_KERBEROS", "DOMAIN") {
         credentials = credentials.with_domain(domain);
     }
-    if let Some(workstation) = optional_env("SMOLDER_KERBEROS_WORKSTATION") {
+    if let Some(workstation) = optional_prefixed_env("SMOLDER_KERBEROS", "WORKSTATION") {
         credentials = credentials.with_workstation(workstation);
     }
-    if let Some(kdc_url) = optional_env("SMOLDER_KERBEROS_KDC_URL") {
+    if let Some(kdc_url) = optional_prefixed_env("SMOLDER_KERBEROS", "KDC_URL") {
         credentials = credentials.with_kdc_url(kdc_url);
     }
 
     let mut target = KerberosTarget::for_smb_host(target_host.clone());
-    if let Some(principal) = optional_env("SMOLDER_KERBEROS_TARGET_PRINCIPAL") {
+    if let Some(principal) = optional_prefixed_env("SMOLDER_KERBEROS", "TARGET_PRINCIPAL") {
         target = target.with_principal(principal);
-    } else if let Some(realm) = optional_env("SMOLDER_KERBEROS_REALM") {
+    } else if let Some(realm) = optional_prefixed_env("SMOLDER_KERBEROS", "REALM") {
         target = target.with_realm(realm);
     }
 
