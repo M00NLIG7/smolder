@@ -99,6 +99,12 @@ impl SambaShareConfig {
         Self::from_env_with_port_var("SMOLDER_SAMBA_PORT", 445)
     }
 
+    pub fn encrypted_share_from_env() -> Option<Self> {
+        let mut config = Self::from_env()?;
+        config.share = required_env("SMOLDER_SAMBA_ENCRYPTED_SHARE")?;
+        Some(config)
+    }
+
     pub fn from_env_with_port_var(port_var: &str, default_port: u16) -> Option<Self> {
         Some(Self {
             host: required_env("SMOLDER_SAMBA_HOST")?,

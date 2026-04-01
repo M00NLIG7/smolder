@@ -1,68 +1,26 @@
-use std::sync::OnceLock;
+mod common;
 
+use common::{samba_lock, SambaNtlmConfig};
 use smolder_core::error::CoreError;
 use smolder_core::prelude::{
-    connect_tree, NtlmCredentials, PipeAccess, PipeRpcClient, SmbSessionConfig, SrvsvcClient,
+    connect_tree, PipeAccess, PipeRpcClient, SrvsvcClient,
 };
 use smolder_proto::smb::smb2::{SessionId, TreeId};
-use tokio::sync::Mutex;
 
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_LEVEL: u32 = 124;
 
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct SambaRpcEncryptionConfig {
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl SambaRpcEncryptionConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_SAMBA_HOST")?,
-            port: required_env("SMOLDER_SAMBA_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-            username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
-            domain: required_env("SMOLDER_SAMBA_DOMAIN"),
-            workstation: required_env("SMOLDER_SAMBA_WORKSTATION"),
-        })
-    }
-}
-
-fn samba_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 #[tokio::test]
 async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
     let _guard = samba_lock().lock().await;
-    let Some(config) = SambaRpcEncryptionConfig::from_env() else {
+    let Some(config) = SambaNtlmConfig::from_env_with_defaults() else {
         eprintln!(
             "skipping live Samba RPC encryption test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, and SMOLDER_SAMBA_PASSWORD must be set"
         );
         return;
     };
 
-    let mut credentials = NtlmCredentials::new(config.username, config.password);
-    if let Some(domain) = config.domain {
-        credentials = credentials.with_domain(domain);
-    }
-    if let Some(workstation) = config.workstation {
-        credentials = credentials.with_workstation(workstation);
-    }
-
-    let session = SmbSessionConfig::new(config.host, credentials).with_port(config.port);
-    let connection = connect_tree(&session, "IPC$")
+    let connection = connect_tree(&config.session(), "IPC$")
         .await
         .expect("should connect to encrypted IPC$ tree");
 

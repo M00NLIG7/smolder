@@ -1,8 +1,8 @@
-use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod common;
 
+use common::{samba_lock, unique_path_in_dir, SambaShareConfig};
 use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, NtlmCredentials, TokioTcpTransport, TreeConnected,
+    Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected,
 };
 use smolder_proto::smb::smb2::{
     CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect,
@@ -10,54 +10,6 @@ use smolder_proto::smb::smb2::{
     PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, SessionId, ShareAccess,
     SigningMode, TreeConnectRequest, TreeId, WriteRequest,
 };
-use tokio::sync::Mutex;
-
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct SambaEndpoint {
-    host: String,
-    port: u16,
-}
-
-impl SambaEndpoint {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_SAMBA_HOST")?,
-            port: required_env("SMOLDER_SAMBA_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-        })
-    }
-}
-
-struct SambaEncryptionConfig {
-    endpoint: SambaEndpoint,
-    username: String,
-    password: String,
-    share: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl SambaEncryptionConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            endpoint: SambaEndpoint::from_env()?,
-            username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
-            share: required_env("SMOLDER_SAMBA_ENCRYPTED_SHARE")?,
-            domain: required_env("SMOLDER_SAMBA_DOMAIN"),
-            workstation: required_env("SMOLDER_SAMBA_WORKSTATION"),
-        })
-    }
-}
-
-fn samba_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 fn negotiate_request() -> NegotiateRequest {
     NegotiateRequest {
@@ -80,20 +32,19 @@ fn negotiate_request() -> NegotiateRequest {
 }
 
 async fn authenticated_tree_connection() -> Option<(
-    SambaEncryptionConfig,
+    SambaShareConfig,
     Connection<TokioTcpTransport, TreeConnected>,
 )> {
-    let Some(config) = SambaEncryptionConfig::from_env() else {
+    let Some(config) = SambaShareConfig::encrypted_share_from_env() else {
         eprintln!(
             "skipping live Samba encryption test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, SMOLDER_SAMBA_PASSWORD, and SMOLDER_SAMBA_ENCRYPTED_SHARE must be set"
         );
         return None;
     };
 
-    let transport =
-        TokioTcpTransport::connect((config.endpoint.host.as_str(), config.endpoint.port))
-            .await
-            .expect("should connect to configured Samba endpoint");
+    let transport = TokioTcpTransport::connect((config.host.as_str(), config.port))
+        .await
+        .expect("should connect to configured Samba endpoint");
     let connection = Connection::new(transport);
 
     let connection = connection
@@ -101,38 +52,19 @@ async fn authenticated_tree_connection() -> Option<(
         .await
         .expect("Samba should respond to SMB3 negotiate with encryption support");
 
-    let mut credentials = NtlmCredentials::new(config.username.clone(), config.password.clone());
-    if let Some(domain) = &config.domain {
-        credentials = credentials.with_domain(domain.clone());
-    }
-    if let Some(workstation) = &config.workstation {
-        credentials = credentials.with_workstation(workstation.clone());
-    }
-
-    let mut auth = NtlmAuthenticator::new(credentials);
+    let mut auth = NtlmAuthenticator::new(config.credentials());
     let connection = connection
         .authenticate(&mut auth)
         .await
         .expect("Samba should accept NTLMv2 session setup");
 
-    let unc = format!(r"\\{}\{}", config.endpoint.host, config.share);
+    let unc = format!(r"\\{}\{}", config.host, config.share);
     let connection = connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
         .await
         .expect("Samba should allow tree connect to the encrypted share");
 
     Some((config, connection))
-}
-
-fn unique_test_file_path() -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    format!(
-        "smolder-samba-encryption-{}-{stamp}.txt",
-        std::process::id()
-    )
 }
 
 #[tokio::test]
@@ -155,7 +87,7 @@ async fn creates_writes_reads_and_closes_file_over_encrypted_tree_when_configure
         "encrypted Samba share should force encrypted SMB traffic"
     );
 
-    let path = unique_test_file_path();
+    let path = unique_path_in_dir("smolder-samba-encryption", "");
     let payload = b"smolder samba encrypted core io".to_vec();
 
     let mut create_request = CreateRequest::from_path(&path);
