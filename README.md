@@ -66,6 +66,7 @@ Pick the crate by the layer you actually need:
 If you are evaluating adoption, start with:
 
 - [docs/guide/examples.md](https://github.com/M00NLIG7/smolder/blob/main/docs/guide/examples.md)
+- [docs/reference/why-smolder.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/why-smolder.md)
 - [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md)
 - [docs/reference/versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md)
 
