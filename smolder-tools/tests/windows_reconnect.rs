@@ -1,78 +1,17 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use smolder_tools::prelude::{
-    DurableOpenOptions, NtlmCredentials, OpenOptions, ResilientHandle, ShareReconnectPlan,
-};
+use smolder_tools::prelude::{DurableOpenOptions, OpenOptions, ResilientHandle};
 use tokio::io::AsyncReadExt;
 
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
+mod common;
+use common::{WindowsConfig, unique_windows_path};
 
-#[derive(Debug, Clone)]
-struct WindowsConfig {
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
-    share: String,
-    test_dir: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl WindowsConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_WINDOWS_HOST")?,
-            port: required_env("SMOLDER_WINDOWS_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-            username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
-            share: required_env("SMOLDER_WINDOWS_SHARE").unwrap_or_else(|| "ADMIN$".to_string()),
-            test_dir: required_env("SMOLDER_WINDOWS_TEST_DIR")
-                .unwrap_or_else(|| "Temp".to_string()),
-            domain: required_env("SMOLDER_WINDOWS_DOMAIN"),
-            workstation: required_env("SMOLDER_WINDOWS_WORKSTATION"),
-        })
-    }
-}
-
-fn reconnect_plan() -> Option<(WindowsConfig, ShareReconnectPlan)> {
+fn reconnect_plan() -> Option<(WindowsConfig, smolder_tools::prelude::ShareReconnectPlan)> {
     let Some(config) = WindowsConfig::from_env() else {
         eprintln!(
             "skipping tools Windows reconnect test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"
         );
         return None;
     };
-
-    let mut credentials = NtlmCredentials::new(config.username.clone(), config.password.clone());
-    if let Some(domain) = &config.domain {
-        credentials = credentials.with_domain(domain.clone());
-    }
-    if let Some(workstation) = &config.workstation {
-        credentials = credentials.with_workstation(workstation.clone());
-    }
-
-    Some((
-        config.clone(),
-        ShareReconnectPlan::new(config.host.clone(), config.share.clone(), credentials)
-            .port(config.port),
-    ))
-}
-
-fn unique_test_file_path(test_dir: &str) -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    format!(
-        "{}\\smolder-tools-reconnect-{}-{}.txt",
-        test_dir.trim_matches(['\\', '/']),
-        std::process::id(),
-        stamp
-    )
+    Some((config.clone(), config.reconnect_plan()))
 }
 
 #[tokio::test]
@@ -82,7 +21,7 @@ async fn reconnect_plan_reopens_durable_handle_on_windows_when_configured() {
     };
 
     let timeout = 30_000;
-    let path = unique_test_file_path(&config.test_dir);
+    let path = unique_windows_path("smolder-tools-reconnect", &config.test_dir);
     let payload = b"smolder tools durable reconnect".to_vec();
 
     let mut share = plan

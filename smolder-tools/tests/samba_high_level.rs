@@ -1,78 +1,14 @@
 use std::fs;
-use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use smolder_proto::smb::smb2::LeaseState;
-use smolder_tools::prelude::{
-    LeaseRequest, NtlmCredentials, OpenOptions, Share, SmbClient, SmbDirectoryEntry,
-};
+use smolder_tools::prelude::{LeaseRequest, OpenOptions, Share, SmbDirectoryEntry};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-#[derive(Debug, Clone)]
-struct SambaConfig {
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
-    share: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl SambaConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_SAMBA_HOST")?,
-            port: required_env("SMOLDER_SAMBA_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-            username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
-            share: required_env("SMOLDER_SAMBA_SHARE")?,
-            domain: required_env("SMOLDER_SAMBA_DOMAIN"),
-            workstation: required_env("SMOLDER_SAMBA_WORKSTATION"),
-        })
-    }
-}
-
-fn encrypted_share_config() -> Option<SambaConfig> {
-    let mut config = SambaConfig::from_env()?;
-    config.share = required_env("SMOLDER_SAMBA_ENCRYPTED_SHARE")?;
-    Some(config)
-}
-
-async fn connect_share(config: &SambaConfig, require_encryption: bool) -> Share {
-    let mut credentials = NtlmCredentials::new(config.username.clone(), config.password.clone());
-    if let Some(domain) = &config.domain {
-        credentials = credentials.with_domain(domain.clone());
-    }
-    if let Some(workstation) = &config.workstation {
-        credentials = credentials.with_workstation(workstation.clone());
-    }
-
-    let mut builder = SmbClient::builder()
-        .server(config.host.clone())
-        .port(config.port)
-        .credentials(credentials);
-    if require_encryption {
-        builder = builder.require_encryption(true);
-    }
-
-    let client = builder
-        .connect()
-        .await
-        .expect("should connect high-level SMB client");
-    client
-        .share(config.share.clone())
-        .await
-        .expect("should connect high-level share")
-}
+mod common;
+use common::{SambaConfig, temp_path, unique_name};
 
 async fn connected_share() -> Option<(SambaConfig, Share)> {
     let Some(config) = SambaConfig::from_env() else {
@@ -81,25 +17,16 @@ async fn connected_share() -> Option<(SambaConfig, Share)> {
         );
         return None;
     };
-    let share = connect_share(&config, false).await;
+    let share = config
+        .connect_share(false)
+        .await
+        .expect("should connect high-level share");
     Some((config, share))
 }
 
 fn samba_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn unique_name(prefix: &str) -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    format!("{prefix}-{}-{stamp}.txt", std::process::id())
-}
-
-fn temp_path(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(unique_name(prefix))
 }
 
 async fn wait_for_listing_entry(
@@ -230,12 +157,16 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .await
         .expect("rename should succeed");
     let renamed_listing = wait_for_listing_entry(&mut share, &renamed_path, true).await;
-    assert!(!renamed_listing
-        .iter()
-        .any(|entry| entry.name == original_path));
-    assert!(renamed_listing
-        .iter()
-        .any(|entry| entry.name == renamed_path));
+    assert!(
+        !renamed_listing
+            .iter()
+            .any(|entry| entry.name == original_path)
+    );
+    assert!(
+        renamed_listing
+            .iter()
+            .any(|entry| entry.name == renamed_path)
+    );
 
     share
         .remove(&renamed_path)
@@ -333,14 +264,17 @@ async fn opens_file_with_lease_when_configured() {
 #[tokio::test]
 async fn writes_and_reads_with_required_encryption_when_configured() {
     let _guard = samba_lock().lock().await;
-    let Some(config) = encrypted_share_config() else {
+    let Some(config) = SambaConfig::encrypted_share_from_env() else {
         eprintln!(
             "skipping encrypted Samba test: SMOLDER_SAMBA_ENCRYPTED_SHARE must be set to a share that requires SMB encryption"
         );
         return;
     };
 
-    let mut share = connect_share(&config, true).await;
+    let mut share = config
+        .connect_share(true)
+        .await
+        .expect("should connect encrypted high-level share");
     let remote_path = unique_name("smolder-high-level-encrypted");
     let payload = b"smolder high level encrypted io";
 
