@@ -1,14 +1,12 @@
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use smolder_core::dfs::UncPath;
-use smolder_tools::prelude::{NtlmCredentials, SmbClient};
+use smolder_tools::prelude::SmbClient;
 use tokio::sync::Mutex;
 
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
+mod common;
+use common::{ntlm_credentials, optional_env, optional_u16_env, required_env, unique_name};
 
 #[derive(Debug, Clone)]
 struct WindowsDfsConfig {
@@ -23,26 +21,25 @@ struct WindowsDfsConfig {
 impl WindowsDfsConfig {
     fn from_env() -> Option<Self> {
         Some(Self {
-            port: required_env("SMOLDER_WINDOWS_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
+            port: optional_u16_env("SMOLDER_WINDOWS_PORT", 445),
             username: required_env("SMOLDER_WINDOWS_USERNAME")?,
             password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
             dfs_root: required_env("SMOLDER_WINDOWS_DFS_ROOT")?,
-            domain: required_env("SMOLDER_WINDOWS_DOMAIN"),
-            workstation: required_env("SMOLDER_WINDOWS_WORKSTATION"),
+            domain: optional_env("SMOLDER_WINDOWS_DOMAIN"),
+            workstation: optional_env("SMOLDER_WINDOWS_WORKSTATION"),
         })
     }
 
-    fn credentials(&self) -> NtlmCredentials {
-        let mut credentials = NtlmCredentials::new(self.username.clone(), self.password.clone());
-        if let Some(domain) = &self.domain {
-            credentials = credentials.with_domain(domain.clone());
-        }
-        if let Some(workstation) = &self.workstation {
-            credentials = credentials.with_workstation(workstation.clone());
-        }
-        credentials
+    fn builder(&self, root: &UncPath) -> smolder_tools::prelude::SmbClientBuilder {
+        SmbClient::builder()
+            .server(root.server())
+            .port(self.port)
+            .credentials(ntlm_credentials(
+                &self.username,
+                &self.password,
+                self.domain.as_deref(),
+                self.workstation.as_deref(),
+            ))
     }
 
     fn dfs_root_path(&self) -> Option<UncPath> {
@@ -59,14 +56,6 @@ impl WindowsDfsConfig {
 fn dfs_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn unique_name(prefix: &str) -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    format!("{prefix}-{}-{stamp}.txt", std::process::id())
 }
 
 fn join_unc(root: &str, leaf: &str) -> String {
@@ -106,7 +95,11 @@ fn configure_auth(command: &mut Command, config: &WindowsDfsConfig) {
     }
 }
 
-fn connected_builder() -> Option<(WindowsDfsConfig, UncPath, smolder_tools::prelude::SmbClientBuilder)> {
+fn connected_builder() -> Option<(
+    WindowsDfsConfig,
+    UncPath,
+    smolder_tools::prelude::SmbClientBuilder,
+)> {
     let Some(config) = WindowsDfsConfig::from_env() else {
         eprintln!(
             "skipping Windows DFS test: SMOLDER_WINDOWS_USERNAME, SMOLDER_WINDOWS_PASSWORD, and SMOLDER_WINDOWS_DFS_ROOT must be set"
@@ -117,10 +110,7 @@ fn connected_builder() -> Option<(WindowsDfsConfig, UncPath, smolder_tools::prel
         return None;
     };
 
-    let builder = SmbClient::builder()
-        .server(root.server())
-        .port(config.port)
-        .credentials(config.credentials());
+    let builder = config.builder(&root);
     Some((config, root, builder))
 }
 

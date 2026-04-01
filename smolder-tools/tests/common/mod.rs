@@ -14,7 +14,7 @@ pub fn optional_env(name: &str) -> Option<String> {
     required_env(name)
 }
 
-fn optional_u16_env(name: &str, default: u16) -> u16 {
+pub fn optional_u16_env(name: &str, default: u16) -> u16 {
     optional_env(name)
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(default)
