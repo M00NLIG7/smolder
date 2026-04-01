@@ -1,14 +1,12 @@
 use std::fs;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use smolder_proto::smb::smb2::LeaseState;
 use smolder_tools::prelude::{LeaseRequest, OpenOptions, Share, SmbDirectoryEntry};
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 mod common;
-use common::{SambaConfig, temp_path, unique_name};
+use common::{samba_lock, SambaConfig, temp_path, unique_name};
 
 async fn connected_share() -> Option<(SambaConfig, Share)> {
     let Some(config) = SambaConfig::from_env() else {
@@ -22,11 +20,6 @@ async fn connected_share() -> Option<(SambaConfig, Share)> {
         .await
         .expect("should connect high-level share");
     Some((config, share))
-}
-
-fn samba_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 async fn wait_for_listing_entry(

@@ -1,14 +1,8 @@
 use smolder_core::error::CoreError;
 use smolder_tools::prelude::Share;
-use tokio::sync::Mutex;
 
 mod common;
-use common::{WindowsConfig, unique_windows_path};
-
-fn windows_lock() -> &'static Mutex<()> {
-    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+use common::{unique_windows_path, windows_lock, WindowsConfig};
 
 async fn connected_share() -> Option<(WindowsConfig, Share)> {
     let Some(config) = WindowsConfig::encrypted_from_env() else {

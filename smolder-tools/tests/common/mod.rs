@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use smolder_core::error::CoreError;
 use smolder_tools::prelude::{NtlmCredentials, Share, ShareReconnectPlan, SmbClient};
+use tokio::sync::Mutex;
 
 pub fn required_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -188,4 +190,14 @@ pub fn unique_windows_path(prefix: &str, test_dir: &str) -> String {
     } else {
         format!("{}\\{file_name}", test_dir.trim_matches(['\\', '/']))
     }
+}
+
+pub fn samba_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub fn windows_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }

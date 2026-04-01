@@ -1,12 +1,10 @@
 use std::fs;
 use std::process::Command;
-use std::sync::OnceLock;
 
 use smolder_tools::prelude::Share;
-use tokio::sync::Mutex;
 
 mod common;
-use common::{SambaConfig, temp_path, unique_name};
+use common::{samba_lock, SambaConfig, temp_path, unique_name};
 
 async fn connected_share() -> Option<(SambaConfig, Share)> {
     let Some(config) = SambaConfig::from_env() else {
@@ -21,11 +19,6 @@ async fn connected_share() -> Option<(SambaConfig, Share)> {
         .expect("should connect high-level share");
 
     Some((config, share))
-}
-
-fn samba_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn smb_url(config: &SambaConfig, remote_path: &str) -> String {

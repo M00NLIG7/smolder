@@ -1,12 +1,12 @@
 use std::process::Command;
-use std::sync::OnceLock;
 
 use smolder_core::dfs::UncPath;
 use smolder_tools::prelude::SmbClient;
-use tokio::sync::Mutex;
 
 mod common;
-use common::{ntlm_credentials, optional_env, optional_u16_env, required_env, unique_name};
+use common::{
+    ntlm_credentials, optional_env, optional_u16_env, required_env, unique_name, windows_lock,
+};
 
 #[derive(Debug, Clone)]
 struct WindowsDfsConfig {
@@ -51,11 +51,6 @@ impl WindowsDfsConfig {
             }
         }
     }
-}
-
-fn dfs_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn join_unc(root: &str, leaf: &str) -> String {
@@ -116,7 +111,7 @@ fn connected_builder() -> Option<(
 
 #[tokio::test]
 async fn share_path_auto_reads_and_writes_through_live_windows_dfs_when_configured() {
-    let _guard = dfs_lock().lock().await;
+    let _guard = windows_lock().lock().await;
     let Some((config, _root, builder)) = connected_builder() else {
         return;
     };
@@ -152,7 +147,7 @@ async fn share_path_auto_reads_and_writes_through_live_windows_dfs_when_configur
 
 #[tokio::test]
 async fn cli_mv_renames_through_live_windows_dfs_when_configured() {
-    let _guard = dfs_lock().lock().await;
+    let _guard = windows_lock().lock().await;
     let Some((config, root, builder)) = connected_builder() else {
         return;
     };
