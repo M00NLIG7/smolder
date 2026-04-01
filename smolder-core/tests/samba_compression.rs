@@ -1,10 +1,12 @@
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod common;
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use common::{samba_lock, unique_path_in_dir, SambaShareConfig};
 use smolder_core::compression::CompressionState;
 use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, NtlmCredentials, TokioTcpTransport, Transport, TreeConnected,
+    Connection, NtlmAuthenticator, TokioTcpTransport, Transport, TreeConnected,
 };
 use smolder_proto::smb::compression::{
     CompressionAlgorithm, CompressionCapabilityFlags, CompressionTransformHeader,
@@ -18,48 +20,6 @@ use smolder_proto::smb::smb2::{
     WriteRequest,
 };
 use tokio::sync::Mutex;
-
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct SambaEndpoint {
-    host: String,
-    port: u16,
-}
-
-impl SambaEndpoint {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_SAMBA_HOST")?,
-            port: required_env("SMOLDER_SAMBA_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-        })
-    }
-}
-
-struct SambaCompressionConfig {
-    endpoint: SambaEndpoint,
-    username: String,
-    password: String,
-    share: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl SambaCompressionConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            endpoint: SambaEndpoint::from_env()?,
-            username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
-            share: required_env("SMOLDER_SAMBA_SHARE")?,
-            domain: required_env("SMOLDER_SAMBA_DOMAIN"),
-            workstation: required_env("SMOLDER_SAMBA_WORKSTATION"),
-        })
-    }
-}
 
 #[derive(Debug)]
 struct RecordingTransport<T> {
@@ -95,11 +55,6 @@ where
     }
 }
 
-fn samba_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 fn negotiate_request() -> NegotiateRequest {
     NegotiateRequest {
         security_mode: SigningMode::ENABLED,
@@ -111,10 +66,12 @@ fn negotiate_request() -> NegotiateRequest {
                 hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
                 salt: b"smolder-samba-compression-salt".to_vec(),
             }),
-            NegotiateContext::compression_capabilities(smolder_proto::smb::smb2::CompressionCapabilities {
-                compression_algorithms: vec![CompressionAlgorithm::Lznt1],
-                flags: CompressionCapabilityFlags::empty(),
-            }),
+            NegotiateContext::compression_capabilities(
+                smolder_proto::smb::smb2::CompressionCapabilities {
+                    compression_algorithms: vec![CompressionAlgorithm::Lznt1],
+                    flags: CompressionCapabilityFlags::empty(),
+                },
+            ),
         ],
     }
 }
@@ -123,17 +80,16 @@ async fn authenticated_tree_connection() -> Option<(
     Arc<Mutex<Vec<Vec<u8>>>>,
     Connection<RecordingTransport<TokioTcpTransport>, TreeConnected>,
 )> {
-    let Some(config) = SambaCompressionConfig::from_env() else {
+    let Some(config) = SambaShareConfig::from_env() else {
         eprintln!(
             "skipping live Samba compression test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, SMOLDER_SAMBA_PASSWORD, and SMOLDER_SAMBA_SHARE must be set"
         );
         return None;
     };
 
-    let transport =
-        TokioTcpTransport::connect((config.endpoint.host.as_str(), config.endpoint.port))
-            .await
-            .expect("should connect to configured Samba endpoint");
+    let transport = TokioTcpTransport::connect((config.host.as_str(), config.port))
+        .await
+        .expect("should connect to configured Samba endpoint");
     let (transport, writes) = RecordingTransport::new(transport);
     let connection = Connection::new(transport);
 
@@ -142,21 +98,13 @@ async fn authenticated_tree_connection() -> Option<(
         .await
         .expect("Samba should respond to SMB3 negotiate");
 
-    let mut credentials = NtlmCredentials::new(config.username.clone(), config.password.clone());
-    if let Some(domain) = &config.domain {
-        credentials = credentials.with_domain(domain.clone());
-    }
-    if let Some(workstation) = &config.workstation {
-        credentials = credentials.with_workstation(workstation.clone());
-    }
-
-    let mut auth = NtlmAuthenticator::new(credentials);
+    let mut auth = NtlmAuthenticator::new(config.credentials());
     let connection = connection
         .authenticate(&mut auth)
         .await
         .expect("Samba should accept NTLMv2 session setup");
 
-    let unc = format!(r"\\{}\{}", config.endpoint.host, config.share);
+    let unc = format!(r"\\{}\{}", config.host, config.share);
     let connection = connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
         .await
@@ -165,17 +113,12 @@ async fn authenticated_tree_connection() -> Option<(
     Some((writes, connection))
 }
 
-fn unique_test_file_path() -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    format!("smolder-samba-compression-{}-{stamp}.txt", std::process::id())
-}
-
 fn decode_recorded_payload(frame: &[u8], compression: &CompressionState) -> (Vec<u8>, bool) {
     let frame = SessionMessage::decode(frame).expect("frame should decode");
-    if frame.payload.starts_with(&COMPRESSION_TRANSFORM_PROTOCOL_ID) {
+    if frame
+        .payload
+        .starts_with(&COMPRESSION_TRANSFORM_PROTOCOL_ID)
+    {
         let transform = CompressionTransformHeader::decode(&frame.payload)
             .expect("compression header should decode");
         (
@@ -196,7 +139,10 @@ async fn writes_compressed_payloads_to_samba_when_negotiated() {
         return;
     };
 
-    if !matches!(connection.state().negotiated.dialect_revision, Dialect::Smb311) {
+    if !matches!(
+        connection.state().negotiated.dialect_revision,
+        Dialect::Smb311
+    ) {
         eprintln!("skipping Samba compression test: negotiated dialect is not SMB 3.1.1");
         return;
     }
@@ -206,7 +152,7 @@ async fn writes_compressed_payloads_to_samba_when_negotiated() {
         return;
     };
 
-    let path = unique_test_file_path();
+    let path = unique_path_in_dir("smolder-samba-compression", "");
     let payload = vec![b'B'; 32 * 1024];
 
     let mut create_request = CreateRequest::from_path(&path);
@@ -250,10 +196,9 @@ async fn writes_compressed_payloads_to_samba_when_negotiated() {
             .unwrap_or(false)
         })
         .expect("recorded SMB frames should include a write request");
-    let header = smolder_proto::smb::smb2::Header::decode(
-        &decoded[..smolder_proto::smb::smb2::Header::LEN],
-    )
-    .expect("header should decode");
+    let header =
+        smolder_proto::smb::smb2::Header::decode(&decoded[..smolder_proto::smb::smb2::Header::LEN])
+            .expect("header should decode");
     let request = WriteRequest::decode(&decoded[smolder_proto::smb::smb2::Header::LEN..])
         .expect("write request should decode");
 

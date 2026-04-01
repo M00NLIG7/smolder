@@ -1,66 +1,15 @@
-use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod common;
 
+use common::{unique_path_in_dir, windows_lock, WindowsNtlmConfig, WindowsShareConfig};
 use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, NtlmCredentials, TokioTcpTransport, TreeConnected,
+    Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected,
 };
 use smolder_proto::smb::smb2::{
-    CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect,
-    EchoResponse, EncryptionCapabilities, FlushRequest, GlobalCapabilities, NegotiateContext,
-    NegotiateRequest, PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest,
-    SessionId, ShareAccess, SigningMode, TreeConnectRequest, TreeId, WriteRequest,
+    CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, EchoResponse,
+    EncryptionCapabilities, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, SessionId, ShareAccess,
+    SigningMode, TreeConnectRequest, TreeId, WriteRequest,
 };
-use tokio::sync::Mutex;
-
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct WindowsEndpoint {
-    host: String,
-    port: u16,
-}
-
-impl WindowsEndpoint {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_WINDOWS_HOST")?,
-            port: required_env("SMOLDER_WINDOWS_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-        })
-    }
-}
-
-struct WindowsConfig {
-    endpoint: WindowsEndpoint,
-    username: String,
-    password: String,
-    share: String,
-    test_dir: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl WindowsConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            endpoint: WindowsEndpoint::from_env()?,
-            username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
-            share: required_env("SMOLDER_WINDOWS_SHARE").unwrap_or_else(|| "ADMIN$".to_string()),
-            test_dir: required_env("SMOLDER_WINDOWS_TEST_DIR")
-                .unwrap_or_else(|| "Temp".to_string()),
-            domain: required_env("SMOLDER_WINDOWS_DOMAIN"),
-            workstation: required_env("SMOLDER_WINDOWS_WORKSTATION"),
-        })
-    }
-}
-
-fn windows_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 fn negotiate_request() -> NegotiateRequest {
     NegotiateRequest {
@@ -82,42 +31,31 @@ fn negotiate_request() -> NegotiateRequest {
     }
 }
 
-async fn authenticated_tree_connection() -> Option<(
-    WindowsConfig,
-    Connection<TokioTcpTransport, TreeConnected>,
-)> {
-    let Some(config) = WindowsConfig::from_env() else {
+async fn authenticated_tree_connection(
+) -> Option<(WindowsShareConfig, Connection<TokioTcpTransport, TreeConnected>)> {
+    let Some(config) = WindowsShareConfig::from_env() else {
         eprintln!(
             "skipping live Windows interop test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"
         );
         return None;
     };
 
-    let transport =
-        TokioTcpTransport::connect((config.endpoint.host.as_str(), config.endpoint.port))
-            .await
-            .expect("should connect to configured Windows endpoint");
+    let transport = TokioTcpTransport::connect((config.host.as_str(), config.port))
+        .await
+        .expect("should connect to configured Windows endpoint");
     let connection = Connection::new(transport);
     let connection = connection
         .negotiate(&negotiate_request())
         .await
         .expect("Windows should respond to SMB2 negotiate");
 
-    let mut credentials = NtlmCredentials::new(config.username.clone(), config.password.clone());
-    if let Some(domain) = &config.domain {
-        credentials = credentials.with_domain(domain.clone());
-    }
-    if let Some(workstation) = &config.workstation {
-        credentials = credentials.with_workstation(workstation.clone());
-    }
-
-    let mut auth = NtlmAuthenticator::new(credentials);
+    let mut auth = NtlmAuthenticator::new(config.credentials());
     let connection = connection
         .authenticate(&mut auth)
         .await
         .expect("Windows should accept NTLMv2 session setup");
 
-    let unc = format!(r"\\{}\{}", config.endpoint.host, config.share);
+    let unc = format!(r"\\{}\{}", config.host, config.share);
     let connection = connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
         .await
@@ -126,28 +64,15 @@ async fn authenticated_tree_connection() -> Option<(
     Some((config, connection))
 }
 
-fn unique_test_file_path(test_dir: &str) -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    let file_name = format!("smolder-win-interop-{}-{stamp}.txt", std::process::id());
-    if test_dir.trim_matches(['\\', '/']).is_empty() {
-        file_name
-    } else {
-        format!("{}\\{file_name}", test_dir.trim_matches(['\\', '/']))
-    }
-}
-
 #[tokio::test]
 async fn negotiates_with_windows_when_configured() {
     let _guard = windows_lock().lock().await;
-    let Some(endpoint) = WindowsEndpoint::from_env() else {
+    let Some(config) = WindowsNtlmConfig::from_env() else {
         eprintln!("skipping live Windows negotiate test: SMOLDER_WINDOWS_HOST is not set");
         return;
     };
 
-    let transport = TokioTcpTransport::connect((endpoint.host.as_str(), endpoint.port))
+    let transport = TokioTcpTransport::connect((config.host.as_str(), config.port))
         .await
         .expect("should connect to configured Windows endpoint");
     let connection = Connection::new(transport);
@@ -198,7 +123,7 @@ async fn creates_writes_reads_and_closes_file_when_configured() {
         return;
     };
 
-    let path = unique_test_file_path(&config.test_dir);
+    let path = unique_path_in_dir("smolder-win-interop", &config.test_dir);
     let payload = b"smolder windows core interop".to_vec();
 
     let mut create_request = CreateRequest::from_path(&path);
@@ -243,7 +168,7 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
         return;
     };
 
-    let path = unique_test_file_path(&config.test_dir);
+    let path = unique_path_in_dir("smolder-win-interop", &config.test_dir);
     let payload = b"smolder windows lifecycle".to_vec();
 
     let mut create_request = CreateRequest::from_path(&path);

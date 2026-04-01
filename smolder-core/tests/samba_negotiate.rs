@@ -1,7 +1,10 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod common;
 
+use common::{
+    optional_u16_env, required_env, samba_lock, unique_path_in_dir, SambaShareConfig,
+};
 use smolder_core::prelude::{
-    Connection, CoreError, DurableOpenOptions, NtlmAuthenticator, NtlmCredentials, ResilientHandle,
+    Connection, CoreError, DurableOpenOptions, NtlmAuthenticator, ResilientHandle,
     TokioTcpTransport, TreeConnected,
 };
 use smolder_proto::smb::smb2::{
@@ -10,48 +13,6 @@ use smolder_proto::smb::smb2::{
     PreauthIntegrityCapabilities, PreauthIntegrityHashId, ReadRequest, RequestedOplockLevel,
     SessionId, ShareAccess, SigningMode, TreeConnectRequest, TreeId, WriteRequest,
 };
-
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct SambaEndpoint {
-    host: String,
-    port: u16,
-}
-
-impl SambaEndpoint {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_SAMBA_HOST")?,
-            port: required_env("SMOLDER_SAMBA_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-        })
-    }
-}
-
-struct SambaConfig {
-    endpoint: SambaEndpoint,
-    username: String,
-    password: String,
-    share: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl SambaConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            endpoint: SambaEndpoint::from_env()?,
-            username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
-            share: required_env("SMOLDER_SAMBA_SHARE")?,
-            domain: required_env("SMOLDER_SAMBA_DOMAIN"),
-            workstation: required_env("SMOLDER_SAMBA_WORKSTATION"),
-        })
-    }
-}
 
 fn negotiate_request() -> NegotiateRequest {
     NegotiateRequest {
@@ -69,18 +30,17 @@ fn negotiate_request() -> NegotiateRequest {
 }
 
 async fn authenticated_tree_connection(
-) -> Option<(SambaConfig, Connection<TokioTcpTransport, TreeConnected>)> {
-    let Some(config) = SambaConfig::from_env() else {
+) -> Option<(SambaShareConfig, Connection<TokioTcpTransport, TreeConnected>)> {
+    let Some(config) = SambaShareConfig::from_env() else {
         eprintln!(
             "skipping live Samba auth test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, SMOLDER_SAMBA_PASSWORD, and SMOLDER_SAMBA_SHARE must be set"
         );
         return None;
     };
 
-    let transport =
-        TokioTcpTransport::connect((config.endpoint.host.as_str(), config.endpoint.port))
-            .await
-            .expect("should connect to configured Samba endpoint");
+    let transport = TokioTcpTransport::connect((config.host.as_str(), config.port))
+        .await
+        .expect("should connect to configured Samba endpoint");
     let connection = Connection::new(transport);
 
     let connection = connection
@@ -88,35 +48,19 @@ async fn authenticated_tree_connection(
         .await
         .expect("Samba should respond to SMB2 negotiate");
 
-    let mut credentials = NtlmCredentials::new(config.username.clone(), config.password.clone());
-    if let Some(domain) = &config.domain {
-        credentials = credentials.with_domain(domain.clone());
-    }
-    if let Some(workstation) = &config.workstation {
-        credentials = credentials.with_workstation(workstation.clone());
-    }
-
-    let mut auth = NtlmAuthenticator::new(credentials);
+    let mut auth = NtlmAuthenticator::new(config.credentials());
     let connection = connection
         .authenticate(&mut auth)
         .await
         .expect("Samba should accept NTLMv2 session setup");
 
-    let unc = format!(r"\\{}\{}", config.endpoint.host, config.share);
+    let unc = format!(r"\\{}\{}", config.host, config.share);
     let connection = connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
         .await
         .expect("Samba should allow tree connect");
 
     Some((config, connection))
-}
-
-fn unique_test_file_path() -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    format!("smolder-interop-{}-{}.txt", std::process::id(), stamp)
 }
 
 async fn cleanup_test_file(
@@ -140,12 +84,14 @@ async fn cleanup_test_file(
 
 #[tokio::test]
 async fn negotiates_with_samba_when_configured() {
-    let Some(endpoint) = SambaEndpoint::from_env() else {
+    let _guard = samba_lock().lock().await;
+    let Some(host) = required_env("SMOLDER_SAMBA_HOST") else {
         eprintln!("skipping live Samba negotiate test: SMOLDER_SAMBA_HOST is not set");
         return;
     };
+    let port = optional_u16_env("SMOLDER_SAMBA_PORT", 445);
 
-    let transport = TokioTcpTransport::connect((endpoint.host.as_str(), endpoint.port))
+    let transport = TokioTcpTransport::connect((host.as_str(), port))
         .await
         .expect("should connect to configured Samba endpoint");
     let connection = Connection::new(transport);
@@ -164,6 +110,7 @@ async fn negotiates_with_samba_when_configured() {
 
 #[tokio::test]
 async fn authenticates_and_connects_tree_when_configured() {
+    let _guard = samba_lock().lock().await;
     let Some((_config, connection)) = authenticated_tree_connection().await else {
         return;
     };
@@ -176,11 +123,12 @@ async fn authenticates_and_connects_tree_when_configured() {
 
 #[tokio::test]
 async fn creates_writes_reads_and_closes_file_when_configured() {
+    let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
         return;
     };
 
-    let path = unique_test_file_path();
+    let path = unique_path_in_dir("smolder-interop", "");
     let payload = b"smolder samba io".to_vec();
 
     let mut create_request = CreateRequest::from_path(&path);
@@ -220,11 +168,12 @@ async fn creates_writes_reads_and_closes_file_when_configured() {
 
 #[tokio::test]
 async fn flushes_disconnects_and_logs_off_when_configured() {
+    let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
         return;
     };
 
-    let path = unique_test_file_path();
+    let path = unique_path_in_dir("smolder-interop", "");
     let payload = b"smolder lifecycle".to_vec();
 
     let mut create_request = CreateRequest::from_path(&path);
@@ -266,6 +215,7 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
 
 #[tokio::test]
 async fn queries_network_interfaces_with_ioctl_when_configured() {
+    let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
         return;
     };
@@ -298,11 +248,12 @@ async fn queries_network_interfaces_with_ioctl_when_configured() {
 
 #[tokio::test]
 async fn requests_resume_key_with_ioctl_when_configured() {
+    let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
         return;
     };
 
-    let path = unique_test_file_path();
+    let path = unique_path_in_dir("smolder-interop", "");
     let mut create_request = CreateRequest::from_path(&path);
     create_request.create_disposition = CreateDisposition::Create;
     create_request.create_options |= CreateOptions::DELETE_ON_CLOSE;
@@ -334,6 +285,7 @@ async fn requests_resume_key_with_ioctl_when_configured() {
 
 #[tokio::test]
 async fn grants_lease_on_create_when_configured() {
+    let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
         return;
     };
@@ -355,7 +307,7 @@ async fn grants_lease_on_create_when_configured() {
         return;
     }
 
-    let path = unique_test_file_path();
+    let path = unique_path_in_dir("smolder-interop", "");
     let lease_key = *b"lease-key-000000";
     let mut create_request = CreateRequest::from_path(&path);
     create_request.requested_oplock_level = RequestedOplockLevel::Lease;
@@ -399,6 +351,7 @@ async fn grants_lease_on_create_when_configured() {
 
 #[tokio::test]
 async fn reopens_durable_handle_after_transport_reconnect_when_configured() {
+    let _guard = samba_lock().lock().await;
     let Some((_config, mut connection_one)) = authenticated_tree_connection().await else {
         return;
     };
@@ -411,7 +364,7 @@ async fn reopens_durable_handle_after_transport_reconnect_when_configured() {
         return;
     }
 
-    let path = unique_test_file_path();
+    let path = unique_path_in_dir("smolder-interop", "");
     let payload = b"smolder durable reconnect live".to_vec();
     let timeout = 30_000;
     let create_guid = *b"durable-live-000";
@@ -428,7 +381,11 @@ async fn reopens_durable_handle_after_transport_reconnect_when_configured() {
         .await
         .expect("Samba should create a durable test file");
     connection_one
-        .write(&WriteRequest::for_file(durable.file_id(), 0, payload.clone()))
+        .write(&WriteRequest::for_file(
+            durable.file_id(),
+            0,
+            payload.clone(),
+        ))
         .await
         .expect("Samba should write the durable test payload");
     connection_one
@@ -454,39 +411,39 @@ async fn reopens_durable_handle_after_transport_reconnect_when_configured() {
         return;
     };
     let (reopened, resilient) = if durable.resilient_timeout().is_some() {
-        match connection_two.reconnect_durable_with_resiliency(&durable).await {
+        match connection_two
+            .reconnect_durable_with_resiliency(&durable)
+            .await
+        {
             Ok(result) => result,
             Err(CoreError::UnexpectedStatus { status, .. }) if status == 0xc000_0034 => {
                 eprintln!(
                     "skipping durable reopen assertion: Samba did not preserve reopen state after transport drop (0x{status:08x})"
                 );
                 if let Err(error) = cleanup_test_file(&mut connection_two, &path).await {
-                    eprintln!(
-                        "best-effort cleanup after skipped durable reopen failed: {error:?}"
-                    );
+                    eprintln!("best-effort cleanup after skipped durable reopen failed: {error:?}");
                 }
                 return;
             }
-            Err(error) => panic!("Samba should reopen the durable handle after reconnect: {error:?}"),
+            Err(error) => {
+                panic!("Samba should reopen the durable handle after reconnect: {error:?}")
+            }
         }
     } else {
-        match connection_two
-            .reconnect_durable(&durable)
-            .await
-        {
+        match connection_two.reconnect_durable(&durable).await {
             Ok(reopened) => (reopened, None),
             Err(CoreError::UnexpectedStatus { status, .. }) if status == 0xc000_0034 => {
                 eprintln!(
                     "skipping durable reopen assertion: Samba did not preserve reopen state after transport drop (0x{status:08x})"
                 );
                 if let Err(error) = cleanup_test_file(&mut connection_two, &path).await {
-                    eprintln!(
-                        "best-effort cleanup after skipped durable reopen failed: {error:?}"
-                    );
+                    eprintln!("best-effort cleanup after skipped durable reopen failed: {error:?}");
                 }
                 return;
             }
-            Err(error) => panic!("Samba should reopen the durable handle after reconnect: {error:?}"),
+            Err(error) => {
+                panic!("Samba should reopen the durable handle after reconnect: {error:?}")
+            }
         }
     };
     let read = connection_two

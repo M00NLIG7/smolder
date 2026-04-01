@@ -1,11 +1,13 @@
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod common;
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use common::{unique_path_in_dir, windows_lock, WindowsShareConfig};
 use smolder_core::compression::CompressionState;
 use smolder_core::crypto::EncryptionState;
 use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, NtlmCredentials, TokioTcpTransport, Transport, TreeConnected,
+    Connection, NtlmAuthenticator, TokioTcpTransport, Transport, TreeConnected,
 };
 use smolder_proto::smb::compression::{
     CompressionAlgorithm, CompressionCapabilityFlags, CompressionTransformHeader,
@@ -20,50 +22,6 @@ use smolder_proto::smb::smb2::{
 };
 use smolder_proto::smb::transform::{TransformHeader, TRANSFORM_PROTOCOL_ID};
 use tokio::sync::Mutex;
-
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct WindowsEndpoint {
-    host: String,
-    port: u16,
-}
-
-impl WindowsEndpoint {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_WINDOWS_HOST")?,
-            port: required_env("SMOLDER_WINDOWS_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-        })
-    }
-}
-
-struct WindowsCompressionConfig {
-    endpoint: WindowsEndpoint,
-    username: String,
-    password: String,
-    share: String,
-    test_dir: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl WindowsCompressionConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            endpoint: WindowsEndpoint::from_env()?,
-            username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
-            share: required_env("SMOLDER_WINDOWS_ENCRYPTED_SHARE")?,
-            test_dir: required_env("SMOLDER_WINDOWS_ENCRYPTED_TEST_DIR").unwrap_or_default(),
-            domain: required_env("SMOLDER_WINDOWS_DOMAIN"),
-            workstation: required_env("SMOLDER_WINDOWS_WORKSTATION"),
-        })
-    }
-}
 
 #[derive(Debug)]
 struct RecordingTransport<T> {
@@ -99,11 +57,6 @@ where
     }
 }
 
-fn windows_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 fn negotiate_request() -> NegotiateRequest {
     NegotiateRequest {
         security_mode: SigningMode::ENABLED,
@@ -120,30 +73,31 @@ fn negotiate_request() -> NegotiateRequest {
             NegotiateContext::encryption_capabilities(EncryptionCapabilities {
                 ciphers: vec![CipherId::Aes128Gcm, CipherId::Aes128Ccm],
             }),
-            NegotiateContext::compression_capabilities(smolder_proto::smb::smb2::CompressionCapabilities {
-                compression_algorithms: vec![CompressionAlgorithm::Lznt1],
-                flags: CompressionCapabilityFlags::empty(),
-            }),
+            NegotiateContext::compression_capabilities(
+                smolder_proto::smb::smb2::CompressionCapabilities {
+                    compression_algorithms: vec![CompressionAlgorithm::Lznt1],
+                    flags: CompressionCapabilityFlags::empty(),
+                },
+            ),
         ],
     }
 }
 
 async fn authenticated_tree_connection() -> Option<(
-    WindowsCompressionConfig,
+    WindowsShareConfig,
     Arc<Mutex<Vec<Vec<u8>>>>,
     Connection<RecordingTransport<TokioTcpTransport>, TreeConnected>,
 )> {
-    let Some(config) = WindowsCompressionConfig::from_env() else {
+    let Some(config) = WindowsShareConfig::encrypted_from_env() else {
         eprintln!(
             "skipping live Windows compression test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, SMOLDER_WINDOWS_PASSWORD, and SMOLDER_WINDOWS_ENCRYPTED_SHARE must be set"
         );
         return None;
     };
 
-    let transport =
-        TokioTcpTransport::connect((config.endpoint.host.as_str(), config.endpoint.port))
-            .await
-            .expect("should connect to configured Windows endpoint");
+    let transport = TokioTcpTransport::connect((config.host.as_str(), config.port))
+        .await
+        .expect("should connect to configured Windows endpoint");
     let (transport, writes) = RecordingTransport::new(transport);
     let connection = Connection::new(transport);
     let connection = connection
@@ -151,40 +105,19 @@ async fn authenticated_tree_connection() -> Option<(
         .await
         .expect("Windows should respond to SMB3 negotiate with compression support");
 
-    let mut credentials = NtlmCredentials::new(config.username.clone(), config.password.clone());
-    if let Some(domain) = &config.domain {
-        credentials = credentials.with_domain(domain.clone());
-    }
-    if let Some(workstation) = &config.workstation {
-        credentials = credentials.with_workstation(workstation.clone());
-    }
-
-    let mut auth = NtlmAuthenticator::new(credentials);
+    let mut auth = NtlmAuthenticator::new(config.credentials());
     let connection = connection
         .authenticate(&mut auth)
         .await
         .expect("Windows should accept NTLMv2 session setup");
 
-    let unc = format!(r"\\{}\{}", config.endpoint.host, config.share);
+    let unc = format!(r"\\{}\{}", config.host, config.share);
     let connection = connection
         .tree_connect(&TreeConnectRequest::from_unc(&unc))
         .await
         .expect("Windows should allow tree connect to the encrypted share");
 
     Some((config, writes, connection))
-}
-
-fn unique_test_file_path(test_dir: &str) -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    let file_name = format!("smolder-win-compression-{}-{stamp}.txt", std::process::id());
-    if test_dir.trim_matches(['\\', '/']).is_empty() {
-        file_name
-    } else {
-        format!("{}\\{file_name}", test_dir.trim_matches(['\\', '/']))
-    }
 }
 
 fn decode_recorded_payload(
@@ -235,7 +168,10 @@ async fn writes_compressed_payloads_to_windows_when_negotiated() {
         return;
     };
 
-    if !matches!(connection.state().negotiated.dialect_revision, Dialect::Smb311) {
+    if !matches!(
+        connection.state().negotiated.dialect_revision,
+        Dialect::Smb311
+    ) {
         eprintln!("skipping Windows compression test: negotiated dialect is not SMB 3.1.1");
         return;
     }
@@ -245,7 +181,7 @@ async fn writes_compressed_payloads_to_windows_when_negotiated() {
         return;
     };
 
-    let path = unique_test_file_path(&config.test_dir);
+    let path = unique_path_in_dir("smolder-win-compression", &config.test_dir);
     let payload = vec![b'A'; 32 * 1024];
 
     let mut create_request = CreateRequest::from_path(&path);
@@ -299,10 +235,9 @@ async fn writes_compressed_payloads_to_windows_when_negotiated() {
             .unwrap_or(false)
         })
         .expect("recorded SMB frames should include a write request");
-    let header = smolder_proto::smb::smb2::Header::decode(
-        &decoded[..smolder_proto::smb::smb2::Header::LEN],
-    )
-    .expect("header should decode");
+    let header =
+        smolder_proto::smb::smb2::Header::decode(&decoded[..smolder_proto::smb::smb2::Header::LEN])
+            .expect("header should decode");
     let request = WriteRequest::decode(&decoded[smolder_proto::smb::smb2::Header::LEN..])
         .expect("write request should decode");
 

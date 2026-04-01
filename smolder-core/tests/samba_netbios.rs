@@ -1,59 +1,12 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod common;
 
-use smolder_core::prelude::{Client, NtlmCredentials, TransportTarget};
-
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct SambaNetbiosConfig {
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
-    share: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl SambaNetbiosConfig {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_SAMBA_HOST")?,
-            port: required_env("SMOLDER_SAMBA_NETBIOS_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(1139),
-            username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
-            share: required_env("SMOLDER_SAMBA_SHARE")?,
-            domain: required_env("SMOLDER_SAMBA_DOMAIN"),
-            workstation: required_env("SMOLDER_SAMBA_WORKSTATION"),
-        })
-    }
-
-    fn credentials(&self) -> NtlmCredentials {
-        let mut credentials = NtlmCredentials::new(self.username.clone(), self.password.clone());
-        if let Some(domain) = &self.domain {
-            credentials = credentials.with_domain(domain.clone());
-        }
-        if let Some(workstation) = &self.workstation {
-            credentials = credentials.with_workstation(workstation.clone());
-        }
-        credentials
-    }
-}
-
-fn unique_test_file_path() -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_nanos();
-    format!("smolder-netbios-{}-{}.txt", std::process::id(), stamp)
-}
+use common::{unique_path_in_dir, SambaShareConfig};
+use smolder_core::prelude::{Client, TransportTarget};
 
 #[tokio::test]
 async fn authenticates_and_roundtrips_file_io_over_netbios_when_configured() {
-    let Some(config) = SambaNetbiosConfig::from_env() else {
+    let Some(config) = SambaShareConfig::from_env_with_port_var("SMOLDER_SAMBA_NETBIOS_PORT", 1139)
+    else {
         eprintln!(
             "skipping live Samba NetBIOS test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, SMOLDER_SAMBA_PASSWORD, and SMOLDER_SAMBA_SHARE must be set"
         );
@@ -73,10 +26,14 @@ async fn authenticates_and_roundtrips_file_io_over_netbios_when_configured() {
         .connect_share(&config.share)
         .await
         .expect("NetBIOS session should authenticate and tree-connect");
-    assert_ne!(share.session_id().0, 0, "NetBIOS session id should be non-zero");
+    assert_ne!(
+        share.session_id().0,
+        0,
+        "NetBIOS session id should be non-zero"
+    );
     assert_ne!(share.tree_id().0, 0, "NetBIOS tree id should be non-zero");
 
-    let path = unique_test_file_path();
+    let path = unique_path_in_dir("smolder-netbios", "");
     let payload = b"smolder samba netbios io".to_vec();
 
     share

@@ -1,74 +1,12 @@
-use std::sync::OnceLock;
+mod common;
 
+use common::{samba_lock, windows_lock, SambaNtlmConfig, WindowsNtlmConfig};
 use smolder_core::prelude::{
-    connect_tree, NamedPipe, NtlmCredentials, PipeAccess, SmbSessionConfig,
+    connect_tree, NamedPipe, PipeAccess, SmbSessionConfig,
 };
 use smolder_proto::rpc::{BindAckPdu, BindPdu, Packet, PacketFlags, SyntaxId, Uuid};
 use smolder_proto::smb::smb2::{SessionId, TreeId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
-
-fn required_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-struct LiveEndpointConfig {
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
-    domain: Option<String>,
-    workstation: Option<String>,
-}
-
-impl LiveEndpointConfig {
-    fn windows_from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_WINDOWS_HOST")?,
-            port: required_env("SMOLDER_WINDOWS_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-            username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
-            domain: required_env("SMOLDER_WINDOWS_DOMAIN"),
-            workstation: required_env("SMOLDER_WINDOWS_WORKSTATION"),
-        })
-    }
-
-    fn samba_from_env() -> Option<Self> {
-        Some(Self {
-            host: required_env("SMOLDER_SAMBA_HOST")?,
-            port: required_env("SMOLDER_SAMBA_PORT")
-                .and_then(|value| value.parse::<u16>().ok())
-                .unwrap_or(445),
-            username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
-            domain: required_env("SMOLDER_SAMBA_DOMAIN"),
-            workstation: required_env("SMOLDER_SAMBA_WORKSTATION"),
-        })
-    }
-
-    fn session(&self) -> SmbSessionConfig {
-        let mut credentials = NtlmCredentials::new(self.username.clone(), self.password.clone());
-        if let Some(domain) = &self.domain {
-            credentials = credentials.with_domain(domain.clone());
-        }
-        if let Some(workstation) = &self.workstation {
-            credentials = credentials.with_workstation(workstation.clone());
-        }
-        SmbSessionConfig::new(self.host.clone(), credentials).with_port(self.port)
-    }
-}
-
-fn windows_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn samba_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 const RPC_FRAGMENT_SIZE: u16 = 4_280;
 const SRVSVC_SYNTAX: SyntaxId = SyntaxId::new(
@@ -112,8 +50,8 @@ async fn read_rpc_pdu(pipe: &mut NamedPipe) -> Result<Vec<u8>, std::io::Error> {
     Ok(packet)
 }
 
-async fn bind_srvsvc_over_named_pipe(config: LiveEndpointConfig) {
-    let connection = connect_tree(&config.session(), "IPC$")
+async fn bind_srvsvc_over_named_pipe(config: SmbSessionConfig) {
+    let connection = connect_tree(&config, "IPC$")
         .await
         .expect("should connect to IPC$");
     assert_ne!(connection.session_id(), SessionId(0));
@@ -144,7 +82,10 @@ async fn bind_srvsvc_over_named_pipe(config: LiveEndpointConfig) {
         .tree_disconnect()
         .await
         .expect("should disconnect IPC$ tree");
-    connection.logoff().await.expect("should log off SMB session");
+    connection
+        .logoff()
+        .await
+        .expect("should log off SMB session");
 }
 
 fn assert_successful_bind_ack(bind_ack: BindAckPdu) {
@@ -155,25 +96,25 @@ fn assert_successful_bind_ack(bind_ack: BindAckPdu) {
 #[tokio::test]
 async fn exchanges_srvsvc_bind_over_windows_named_pipe_when_configured() {
     let _guard = windows_lock().lock().await;
-    let Some(config) = LiveEndpointConfig::windows_from_env() else {
+    let Some(config) = WindowsNtlmConfig::from_env() else {
         eprintln!(
             "skipping live Windows named-pipe test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"
         );
         return;
     };
 
-    bind_srvsvc_over_named_pipe(config).await;
+    bind_srvsvc_over_named_pipe(config.session()).await;
 }
 
 #[tokio::test]
 async fn exchanges_srvsvc_bind_over_samba_named_pipe_when_configured() {
     let _guard = samba_lock().lock().await;
-    let Some(config) = LiveEndpointConfig::samba_from_env() else {
+    let Some(config) = SambaNtlmConfig::from_env_with_defaults() else {
         eprintln!(
             "skipping live Samba named-pipe test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, and SMOLDER_SAMBA_PASSWORD must be set"
         );
         return;
     };
 
-    bind_srvsvc_over_named_pipe(config).await;
+    bind_srvsvc_over_named_pipe(config.session()).await;
 }
