@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use rand::random;
 use tokio::fs;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{sleep, timeout, Instant};
 
 use smolder_core::auth::NtlmCredentials;
 #[cfg(feature = "kerberos")]
@@ -22,16 +22,12 @@ use smolder_proto::smb::smb2::{Dialect, GlobalCapabilities, SigningMode};
 
 use self::admin_share::AdminShare;
 use self::command_support::{
-    CommandPaths, build_psexec_interactive_service_command, build_psexec_runner_script,
-    build_psexec_script, build_psexec_service_command, build_psexec_wrapper_script,
-    build_smbexec_runner_script, build_smbexec_script, build_smbexec_service_command,
-    escape_cmd_for_echo, is_end_of_file, is_not_found, is_pipe_not_ready,
-    normalize_remote_file_name, normalize_share_name, normalize_share_path, quote_windows_arg,
+    build_psexec_interactive_service_command, build_psexec_runner_script, build_psexec_script,
+    build_psexec_service_command, build_psexec_wrapper_script, build_smbexec_script,
+    build_smbexec_service_command, is_end_of_file, is_not_found, is_pipe_not_ready,
+    normalize_remote_file_name, normalize_share_name, normalize_share_path, CommandPaths,
 };
-use self::scmr_support::{
-    ScHandle, ScmClient, connect_pipe_with_retry, parse_create_service_response,
-    parse_open_handle_response,
-};
+use self::scmr_support::{connect_pipe_with_retry, ScHandle, ScmClient};
 
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -908,13 +904,16 @@ fn parse_exit_code(bytes: &[u8]) -> Result<i32, CoreError> {
 mod tests {
     use std::path::Path;
 
+    use super::command_support::{
+        build_smbexec_runner_script, escape_cmd_for_echo, quote_windows_arg,
+    };
+    use super::scmr_support::{parse_create_service_response, parse_open_handle_response};
     use super::{
-        CommandPaths, ExecMode, ExecRequest, RemoteExecBuilder,
         build_psexec_interactive_service_command, build_psexec_runner_script, build_psexec_script,
-        build_psexec_service_command, build_psexec_wrapper_script, build_smbexec_runner_script,
-        build_smbexec_script, build_smbexec_service_command, escape_cmd_for_echo,
-        is_pipe_not_ready, normalize_remote_file_name, parse_create_service_response,
-        parse_exit_code, parse_exit_control_line, parse_open_handle_response, quote_windows_arg,
+        build_psexec_service_command, build_psexec_wrapper_script, build_smbexec_script,
+        build_smbexec_service_command, is_pipe_not_ready, normalize_remote_file_name,
+        normalize_share_path, parse_exit_code, parse_exit_control_line, CommandPaths, ExecMode,
+        ExecRequest, RemoteExecBuilder,
     };
     use smolder_core::error::CoreError;
     #[cfg(feature = "kerberos")]
@@ -925,11 +924,9 @@ mod tests {
     #[test]
     fn remote_exec_builder_defaults_enable_encryption() {
         let builder = RemoteExecBuilder::new();
-        assert!(
-            builder
-                .capabilities
-                .contains(GlobalCapabilities::ENCRYPTION)
-        );
+        assert!(builder
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION));
     }
 
     #[test]
@@ -1138,6 +1135,17 @@ mod tests {
             error,
             smolder_core::error::CoreError::PathInvalid(_)
         ));
+    }
+
+    #[test]
+    fn remote_exec_staging_path_rejects_relative_segments() {
+        let dot_error =
+            normalize_share_path(r"Temp\.").expect_err("relative segment should be rejected");
+        assert!(matches!(dot_error, CoreError::PathInvalid(_)));
+
+        let dot_dot_error =
+            normalize_share_path(r"Temp\..\System32").expect_err("relative segment should fail");
+        assert!(matches!(dot_dot_error, CoreError::PathInvalid(_)));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use smolder_core::auth::NtlmCredentials;
 #[cfg(feature = "kerberos")]
 use smolder_core::auth::{KerberosCredentials, KerberosTarget};
 use smolder_core::client::{Authenticated, Connection, DurableHandle, TreeConnected};
-use smolder_core::dfs::{DfsReferral, UncPath, referrals_from_response};
+use smolder_core::dfs::{referrals_from_response, DfsReferral, UncPath};
 use smolder_core::error::CoreError;
 use smolder_core::facade::Client as CoreClient;
 use smolder_core::transport::{TokioTcpTransport, Transport};
@@ -1188,20 +1188,16 @@ mod tests {
     #[test]
     fn smb_client_builder_defaults_enable_encryption() {
         let builder = super::SmbClientBuilder::new();
-        assert!(
-            builder
-                .capabilities
-                .contains(GlobalCapabilities::ENCRYPTION)
-        );
+        assert!(builder
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION));
 
         let contexts = super::default_negotiate_contexts(&builder.dialects, builder.capabilities);
         assert_eq!(contexts.len(), 2);
-        assert!(
-            contexts[0]
-                .as_preauth_integrity()
-                .expect("preauth context should decode")
-                .is_some()
-        );
+        assert!(contexts[0]
+            .as_preauth_integrity()
+            .expect("preauth context should decode")
+            .is_some());
 
         let encryption = contexts[1]
             .as_encryption_capabilities()
@@ -1220,18 +1216,14 @@ mod tests {
         let contexts = super::default_negotiate_contexts(&builder.dialects, builder.capabilities);
 
         assert_eq!(contexts.len(), 1);
-        assert!(
-            contexts[0]
-                .as_preauth_integrity()
-                .expect("preauth context should decode")
-                .is_some()
-        );
-        assert!(
-            contexts[0]
-                .as_encryption_capabilities()
-                .expect("encryption context decode should succeed")
-                .is_none()
-        );
+        assert!(contexts[0]
+            .as_preauth_integrity()
+            .expect("preauth context should decode")
+            .is_some());
+        assert!(contexts[0]
+            .as_encryption_capabilities()
+            .expect("encryption context decode should succeed")
+            .is_none());
     }
 
     #[test]
@@ -1405,6 +1397,18 @@ mod tests {
             request.name,
             smolder_proto::smb::smb2::utf16le("docs\\nested\\file.txt")
         );
+
+        let dot_error = OpenOptions::new()
+            .read(true)
+            .to_create_request(r"docs\.\file.txt")
+            .expect_err("relative segments should fail");
+        assert!(matches!(dot_error, CoreError::PathInvalid(_)));
+
+        let dot_dot_error = OpenOptions::new()
+            .read(true)
+            .to_create_request(r"docs\..\secret.txt")
+            .expect_err("relative segments should fail");
+        assert!(matches!(dot_dot_error, CoreError::PathInvalid(_)));
     }
 
     #[tokio::test]
@@ -2561,11 +2565,9 @@ mod tests {
         assert_eq!(create.file_attributes, FileAttributes::DIRECTORY);
 
         let first_query = outbound_query_directory(&writes[4]);
-        assert!(
-            first_query
-                .flags
-                .contains(QueryDirectoryFlags::RESTART_SCANS)
-        );
+        assert!(first_query
+            .flags
+            .contains(QueryDirectoryFlags::RESTART_SCANS));
         assert_eq!(
             first_query.file_name,
             smolder_proto::smb::smb2::utf16le("*")

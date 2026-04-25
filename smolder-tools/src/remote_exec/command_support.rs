@@ -5,7 +5,7 @@ use rand::random;
 use smolder_core::error::CoreError;
 use smolder_proto::smb::status::NtStatus;
 
-use super::{ADMIN_SHARE_ROOT, ExecRequest};
+use super::{ExecRequest, ADMIN_SHARE_ROOT};
 
 #[derive(Debug, Clone)]
 pub(super) struct CommandPaths {
@@ -296,11 +296,20 @@ pub(super) fn normalize_share_path(path: &str) -> Result<String, CoreError> {
     if path.contains('\0') {
         return Err(CoreError::PathInvalid("path must not contain NUL bytes"));
     }
-    let normalized = path
+    let mut segments = Vec::new();
+    for segment in path
         .split(['\\', '/'])
         .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join("\\");
+    {
+        if segment == "." || segment == ".." {
+            return Err(CoreError::PathInvalid(
+                "path must not contain relative segments",
+            ));
+        }
+        segments.push(segment);
+    }
+
+    let normalized = segments.join("\\");
     if normalized.is_empty() {
         return Err(CoreError::PathInvalid("path must not be empty"));
     }

@@ -10,6 +10,8 @@ use smolder_proto::smb::compression::{
 
 use crate::error::CoreError;
 
+const MAX_DECOMPRESSED_MESSAGE_SIZE: usize = 0x00ff_ffff;
+
 /// Negotiated SMB compression state for one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressionState {
@@ -94,16 +96,30 @@ impl CompressionState {
 
         let prefix = message.prefix_data().map_err(CoreError::from)?;
         let compressed = message.compressed_data().map_err(CoreError::from)?;
+        let decompressed_len = usize::try_from(message.original_compressed_segment_size)
+            .map_err(|_| CoreError::InvalidResponse("SMB compressed response size was invalid"))?;
+        if prefix
+            .len()
+            .checked_add(decompressed_len)
+            .is_none_or(|len| len > MAX_DECOMPRESSED_MESSAGE_SIZE)
+        {
+            return Err(CoreError::InvalidResponse(
+                "SMB compressed response expanded beyond maximum message size",
+            ));
+        }
+
         let mut output = prefix.to_vec();
         let decompressed = match message.compression_algorithm {
             CompressionAlgorithm::Lznt1 => {
                 let mut buffer = Vec::new();
-                lznt1_decompress(compressed, &mut buffer)
-                    .map_err(|_| CoreError::InvalidResponse("SMB LZNT1 response could not be decompressed"))?;
+                lznt1_decompress(compressed, &mut buffer).map_err(|_| {
+                    CoreError::InvalidResponse("SMB LZNT1 response could not be decompressed")
+                })?;
                 buffer
             }
-            CompressionAlgorithm::Lz77 => lz77_decompress(compressed)
-                .map_err(|_| CoreError::InvalidResponse("SMB LZ77 response could not be decompressed"))?,
+            CompressionAlgorithm::Lz77 => lz77_decompress(compressed).map_err(|_| {
+                CoreError::InvalidResponse("SMB LZ77 response could not be decompressed")
+            })?,
             CompressionAlgorithm::None
             | CompressionAlgorithm::Lz77Huffman
             | CompressionAlgorithm::PatternV1
@@ -113,7 +129,7 @@ impl CompressionState {
                 ));
             }
         };
-        if decompressed.len() != message.original_compressed_segment_size as usize {
+        if decompressed.len() != decompressed_len {
             return Err(CoreError::InvalidResponse(
                 "SMB compressed response size did not match the transform header",
             ));
@@ -196,6 +212,26 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "invalid response: SMB response used a compression algorithm that was not negotiated"
+        );
+    }
+
+    #[test]
+    fn rejects_compressed_responses_that_expand_past_frame_limit() {
+        let state = CompressionState::new(CompressionAlgorithm::Lznt1, false);
+        let message = CompressionTransformHeader {
+            original_compressed_segment_size: 0x0100_0000,
+            compression_algorithm: CompressionAlgorithm::Lznt1,
+            flags: CompressionFlags::empty(),
+            offset_or_length: 0,
+            payload: Vec::new(),
+        };
+
+        let error = state
+            .decompress_message(&message)
+            .expect_err("oversized decompressed response should fail");
+        assert_eq!(
+            error.to_string(),
+            "invalid response: SMB compressed response expanded beyond maximum message size"
         );
     }
 }

@@ -184,6 +184,15 @@ where
         let message = SessionMessage::decode(&frame).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
         })?;
+        if message.message_type != SESSION_MESSAGE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "unexpected RFC1002 session message type 0x{:02x}",
+                    message.message_type
+                ),
+            ));
+        }
         Ok(message.payload)
     }
 }
@@ -224,12 +233,14 @@ impl TokioTcpTransport {
         }
 
         let mut stream = TcpStream::connect((target.connect_host(), target.port())).await?;
-        let request =
-            SessionMessage::session_request(default_netbios_called_name(target.server()), NETBIOS_CALLING_NAME)
-                .and_then(|message| message.encode())
-                .map_err(|error| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
-                })?;
+        let request = SessionMessage::session_request(
+            default_netbios_called_name(target.server()),
+            NETBIOS_CALLING_NAME,
+        )
+        .and_then(|message| message.encode())
+        .map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+        })?;
         stream.write_all(&request).await?;
 
         loop {
@@ -248,9 +259,7 @@ impl TokioTcpTransport {
                     let reason = payload.first().copied().unwrap_or_default();
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionRefused,
-                        format!(
-                            "NetBIOS session request was rejected with error 0x{reason:02x}"
-                        ),
+                        format!("NetBIOS session request was rejected with error 0x{reason:02x}"),
                     ));
                 }
                 SESSION_KEEP_ALIVE => continue,
@@ -501,8 +510,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use smolder_proto::smb::netbios::{
-        encode_name, SessionMessage, POSITIVE_SESSION_RESPONSE, SESSION_KEEP_ALIVE, SESSION_MESSAGE,
-        SESSION_REQUEST,
+        encode_name, SessionMessage, POSITIVE_SESSION_RESPONSE, SESSION_KEEP_ALIVE,
+        SESSION_MESSAGE, SESSION_REQUEST,
     };
 
     use super::{
@@ -554,13 +563,11 @@ mod tests {
             assert_eq!(payload.len(), 68);
             assert_eq!(
                 &payload[..34],
-                &encode_name("files", 0x20)
-                    .expect("called name should encode")
+                &encode_name("files", 0x20).expect("called name should encode")
             );
             assert_eq!(
                 &payload[34..],
-                &encode_name(NETBIOS_CALLING_NAME, 0x00)
-                    .expect("calling name should encode")
+                &encode_name(NETBIOS_CALLING_NAME, 0x00).expect("calling name should encode")
             );
 
             socket
@@ -602,6 +609,35 @@ mod tests {
             .send_message(b"PING")
             .await
             .expect("NetBIOS transport should send framed SMB payloads");
+
+        server.await.expect("server task should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn direct_tcp_transport_rejects_non_session_messages() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("listener should expose a local address");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("server should accept");
+            socket
+                .write_all(&[SESSION_KEEP_ALIVE, 0x00, 0x00, 0x00])
+                .await
+                .expect("keepalive frame should write");
+        });
+
+        let mut transport = TokioTcpTransport::connect(addr)
+            .await
+            .expect("client should connect");
+        let error = transport
+            .recv_message()
+            .await
+            .expect_err("non-session frame should fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 
         server.await.expect("server task should finish cleanly");
     }

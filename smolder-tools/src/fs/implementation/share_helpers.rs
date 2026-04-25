@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use smolder_core::dfs::{DfsReferral, UncPath, referrals_from_response, resolve_unc_path};
+use smolder_core::dfs::{referrals_from_response, resolve_unc_path, DfsReferral, UncPath};
 use smolder_core::error::CoreError;
 use smolder_core::transport::Transport;
 use smolder_proto::smb::smb2::{
@@ -11,8 +11,8 @@ use smolder_proto::smb::smb2::{
 use smolder_proto::smb::status::NtStatus;
 
 use super::{
-    DEFAULT_DFS_REFERRAL_MAX_HOPS, DEFAULT_DFS_REFERRAL_MAX_RESPONSE, SEC_TO_UNIX_EPOCH, Share,
-    SmbClient, SmbDirectoryEntry, SmbMetadata, WINDOWS_TICK,
+    Share, SmbClient, SmbDirectoryEntry, SmbMetadata, DEFAULT_DFS_REFERRAL_MAX_HOPS,
+    DEFAULT_DFS_REFERRAL_MAX_RESPONSE, SEC_TO_UNIX_EPOCH, WINDOWS_TICK,
 };
 
 pub(super) fn normalize_share_name(share: &str) -> Result<String, CoreError> {
@@ -43,11 +43,20 @@ pub(super) fn normalize_share_path_with_options(
         return Ok("\\".to_string());
     }
 
-    let normalized = path
+    let mut segments = Vec::new();
+    for segment in path
         .split(['\\', '/'])
         .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join("\\");
+    {
+        if segment == "." || segment == ".." {
+            return Err(CoreError::PathInvalid(
+                "path must not contain relative segments",
+            ));
+        }
+        segments.push(segment);
+    }
+
+    let normalized = segments.join("\\");
     if normalized.is_empty() && !allow_empty {
         return Err(CoreError::PathInvalid("path must not be empty"));
     }

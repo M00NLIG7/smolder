@@ -1375,11 +1375,20 @@ fn normalize_share_path(path: &str) -> Result<String, CoreError> {
         return Ok("\\".to_string());
     }
 
-    let normalized = path
+    let mut segments = Vec::new();
+    for segment in path
         .split(['\\', '/'])
         .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join("\\");
+    {
+        if segment == "." || segment == ".." {
+            return Err(CoreError::PathInvalid(
+                "path must not contain relative segments",
+            ));
+        }
+        segments.push(segment);
+    }
+
+    let normalized = segments.join("\\");
     if normalized.is_empty() {
         return Err(CoreError::PathInvalid("path must not be empty"));
     }
@@ -1809,6 +1818,8 @@ mod tests {
         );
         assert!(normalize_share_path("").is_err());
         assert!(normalize_share_path("\0bad").is_err());
+        assert!(normalize_share_path(r"docs\.\report.txt").is_err());
+        assert!(normalize_share_path(r"docs\..\secret.txt").is_err());
     }
 
     #[test]
