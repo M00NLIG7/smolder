@@ -1,16 +1,17 @@
 use std::time::Duration;
 
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 
 use smolder_core::error::CoreError;
 use smolder_core::pipe::{NamedPipe, PipeAccess, SmbSessionConfig};
 use smolder_core::rpc::PipeRpcClient;
+use smolder_core::transport::TokioTcpTransport;
 
 use super::{
-    ERROR_SERVICE_REQUEST_TIMEOUT, PIPE_CONNECT_RETRY_INTERVAL, SC_MANAGER_CONNECT,
-    SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_DEMAND_START, SERVICE_STOPPED,
-    SERVICE_WIN32_OWN_PROCESS, SVCCTL_CONNECT_TIMEOUT, SVCCTL_CONTEXT_ID, SVCCTL_SYNTAX,
-    is_pipe_not_ready,
+    is_pipe_not_ready, ERROR_SERVICE_REQUEST_TIMEOUT, PIPE_CONNECT_RETRY_INTERVAL,
+    SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_DEMAND_START,
+    SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, SVCCTL_CONNECT_TIMEOUT, SVCCTL_CONTEXT_ID,
+    SVCCTL_SYNTAX,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,7 +184,7 @@ pub(super) async fn connect_pipe_with_retry(
 ) -> Result<NamedPipe, CoreError> {
     let deadline = Instant::now() + timeout_budget;
     loop {
-        match NamedPipe::connect(config, ipc_share, pipe_name, access).await {
+        match NamedPipe::<TokioTcpTransport>::connect(config, ipc_share, pipe_name, access).await {
             Ok(pipe) => return Ok(pipe),
             Err(error) if is_pipe_not_ready(&error) && Instant::now() < deadline => {
                 sleep(PIPE_CONNECT_RETRY_INTERVAL).await;

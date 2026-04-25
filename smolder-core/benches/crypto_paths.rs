@@ -82,6 +82,12 @@ fn bench_message_sealing(c: &mut Criterion) {
             )
             .expect("benchmark profile should derive encryption keys");
             let state = EncryptionState::new(profile.dialect, keys);
+            let peer_state = EncryptionState {
+                dialect: state.dialect,
+                cipher: state.cipher,
+                encrypting_key: state.decrypting_key.clone(),
+                decrypting_key: state.encrypting_key.clone(),
+            };
             let transform = state
                 .encrypt_message(SESSION_ID, &message)
                 .expect("benchmark profile should encrypt a message");
@@ -103,7 +109,7 @@ fn bench_message_sealing(c: &mut Criterion) {
                 &transform,
                 |b, transform| {
                     b.iter(|| {
-                        state
+                        peer_state
                             .decrypt_message(black_box(transform))
                             .expect("benchmark profile should decrypt a message")
                     });
