@@ -62,10 +62,7 @@ impl RemoteExecTool {
 }
 
 /// Runs one standalone remote execution tool.
-pub async fn run_remote_exec_tool(
-    tool: RemoteExecTool,
-    args: Vec<String>,
-) -> Result<i32, String> {
+pub async fn run_remote_exec_tool(tool: RemoteExecTool, args: Vec<String>) -> Result<i32, String> {
     let parsed = parse_args(tool, args)?;
     let exec = connect_remote_exec(
         &parsed.auth,
@@ -79,7 +76,10 @@ pub async fn run_remote_exec_tool(
         return run_interactive_exec(&exec, parsed.request).await;
     }
 
-    let result = exec.run(parsed.request).await.map_err(|error| error.to_string())?;
+    let result = exec
+        .run(parsed.request)
+        .await
+        .map_err(|error| error.to_string())?;
     print!("{}", String::from_utf8_lossy(&result.stdout));
     if !result.stderr.is_empty() {
         eprint!("{}", String::from_utf8_lossy(&result.stderr));
@@ -159,7 +159,10 @@ fn parse_args(tool: RemoteExecTool, args: Vec<String>) -> Result<ParsedRemoteExe
                 interactive = true;
             }
             _ if token.starts_with("--") => {
-                return Err(format!("unknown option: {token}\n\n{}", tool.usage(&program)));
+                return Err(format!(
+                    "unknown option: {token}\n\n{}",
+                    tool.usage(&program)
+                ));
             }
             _ => {
                 positionals.push(token.as_str());
@@ -366,7 +369,10 @@ mod tests {
         )
         .expect("parser should accept kerberos smbexec arguments");
 
-        assert!(matches!(options.auth.mode, crate::cli::common::AuthMode::Kerberos));
+        assert!(matches!(
+            options.auth.mode,
+            crate::cli::common::AuthMode::Kerberos
+        ));
         assert_eq!(
             options.auth.kerberos.target_host.as_deref(),
             Some("DESKTOP-PTNJUS5.lab.example")

@@ -185,7 +185,9 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
         Err(CoreError::RemoteOperation { code, .. })
             if code == STATUS_ACCESS_DENIED || code == STATUS_NOT_SUPPORTED =>
         {
-            eprintln!("skipping Samba AD alias member enumeration: alias membership is not available");
+            eprintln!(
+                "skipping Samba AD alias member enumeration: alias membership is not available"
+            );
             let builtin = alias
                 .close()
                 .await

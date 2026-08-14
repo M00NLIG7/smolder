@@ -1,9 +1,9 @@
-use smolder_core::prelude::{NamedPipe, PipeAccess, PipeRpcClient, connect_tree};
+use smolder_core::prelude::{connect_tree, NamedPipe, PipeAccess, PipeRpcClient};
 use smolder_proto::smb::smb2::{SessionId, TreeId};
 mod common;
 use common::{
-    SVCCTL_CONTEXT_ID, SVCCTL_SYNTAX, WindowsNtlmConfig, open_sc_manager_stub,
-    parse_open_handle_response, windows_lock,
+    open_sc_manager_stub, parse_open_handle_response, windows_lock, WindowsNtlmConfig,
+    SVCCTL_CONTEXT_ID, SVCCTL_SYNTAX,
 };
 
 #[tokio::test]

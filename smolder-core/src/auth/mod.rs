@@ -4,10 +4,10 @@
 mod kerberos;
 #[cfg(all(unix, feature = "kerberos-gssapi"))]
 mod kerberos_gssapi;
-#[cfg(feature = "kerberos-sspi")]
-mod kerberos_sspi;
 #[cfg(feature = "kerberos-api")]
 mod kerberos_spn;
+#[cfg(feature = "kerberos-sspi")]
+mod kerberos_sspi;
 mod ntlm;
 mod ntlm_rpc;
 mod ntlm_rpc_bind;
@@ -22,8 +22,7 @@ use thiserror::Error;
     doc(cfg(any(feature = "kerberos", feature = "kerberos-gssapi")))
 )]
 pub use kerberos::{
-    KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind,
-    KerberosCredentials,
+    KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind, KerberosCredentials,
 };
 #[cfg(feature = "kerberos-api")]
 #[cfg_attr(
@@ -40,9 +39,7 @@ pub(crate) use ntlm_rpc_bind::NtlmRpcBindHandshake;
     not(feature = "kerberos-sspi"),
     not(all(unix, feature = "kerberos-gssapi"))
 ))]
-compile_error!(
-    "kerberos-api requires either kerberos-sspi or kerberos-gssapi on Unix"
-);
+compile_error!("kerberos-api requires either kerberos-sspi or kerberos-gssapi on Unix");
 
 /// SPNEGO mechanism identifiers supported by Smolder authentication helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

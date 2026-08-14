@@ -7,19 +7,18 @@
 //! not the intended starting point for new integrations.
 
 use smolder_proto::smb::smb2::{
-    ChangeNotifyRequest, ChangeNotifyResponse, CloseRequest, CloseResponse, Command,
-    CreateRequest, CreateResponse, EchoRequest, EchoResponse, FileId, FlushRequest,
-    FlushResponse, Header, HeaderFlags, IoctlRequest, IoctlResponse, LockRequest, LockResponse,
-    LogoffRequest, LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse,
-    NetworkInterfaceInfoResponse, QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest,
-    QueryInfoResponse, ReadRequest, ReadResponse, ResumeKeyResponse, SessionId,
-    SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest,
-    SetInfoResponse,
-    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse,
-    TreeId, WriteRequest, WriteResponse,
+    ChangeNotifyRequest, ChangeNotifyResponse, CloseRequest, CloseResponse, Command, CreateRequest,
+    CreateResponse, EchoRequest, EchoResponse, FileId, FlushRequest, FlushResponse, Header,
+    HeaderFlags, IoctlRequest, IoctlResponse, LockRequest, LockResponse, LogoffRequest,
+    LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
+    QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
+    ReadRequest, ReadResponse, ResumeKeyResponse, SessionId, SessionSetupRequest,
+    SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest, SetInfoResponse,
+    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse, TreeId,
+    WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
-use tracing::{Instrument, trace, trace_span};
+use tracing::{trace, trace_span, Instrument};
 
 use crate::auth::AuthProvider;
 use crate::error::CoreError;
@@ -31,9 +30,8 @@ mod state;
 use self::helpers::*;
 use self::state::RequestContext;
 pub use self::state::{
-    Authenticated, CompoundRequest, CompoundResponse, Connected, DurableHandle,
-    DurableOpenOptions, Negotiated, PreauthIntegrityState, ResilientHandle, SigningState,
-    TreeConnected,
+    Authenticated, CompoundRequest, CompoundResponse, Connected, DurableHandle, DurableOpenOptions,
+    Negotiated, PreauthIntegrityState, ResilientHandle, SigningState, TreeConnected,
 };
 
 /// A typestate SMB connection over an abstract transport.
@@ -62,7 +60,6 @@ impl TransactionFrames {
         (self.header, body)
     }
 }
-
 
 impl<T> Connection<T, Connected> {
     /// Creates a new SMB connection over the provided transport.
@@ -1250,8 +1247,8 @@ mod tests {
 
     use async_trait::async_trait;
     use smolder_proto::smb::compression::{
-        COMPRESSION_TRANSFORM_PROTOCOL_ID, CompressionAlgorithm, CompressionCapabilityFlags,
-        CompressionFlags, CompressionTransformHeader,
+        CompressionAlgorithm, CompressionCapabilityFlags, CompressionFlags,
+        CompressionTransformHeader, COMPRESSION_TRANSFORM_PROTOCOL_ID,
     };
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
@@ -1273,7 +1270,7 @@ mod tests {
     use crate::auth::{AuthError, AuthProvider};
     use crate::client::Connection;
     use crate::compression::CompressionState;
-    use crate::crypto::{EncryptionState, derive_encryption_keys};
+    use crate::crypto::{derive_encryption_keys, EncryptionState};
     use crate::error::CoreError;
     use crate::transport::Transport;
 

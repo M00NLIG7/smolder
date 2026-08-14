@@ -1,9 +1,7 @@
 mod common;
 
 use common::{unique_path_in_dir, windows_lock, WindowsShareConfig};
-use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected,
-};
+use smolder_core::prelude::{Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected};
 use smolder_proto::smb::smb2::{
     CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect,
     EncryptionCapabilities, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,

@@ -1,5 +1,5 @@
 use smolder_core::lsarpc::LsaServerRole;
-use smolder_core::prelude::{LOOKUP_POLICY_ACCESS, LsarpcClient};
+use smolder_core::prelude::{LsarpcClient, LOOKUP_POLICY_ACCESS};
 use smolder_proto::smb::status::NtStatus;
 
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
@@ -7,7 +7,7 @@ const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
 const STATUS_INVALID_INFO_CLASS: u32 = 0xc000_0003;
 
 mod common;
-use common::{SambaNtlmConfig, samba_lock};
+use common::{samba_lock, SambaNtlmConfig};
 
 #[tokio::test]
 async fn queries_and_closes_samba_lsarpc_policy_when_configured() {

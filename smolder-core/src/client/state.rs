@@ -5,9 +5,8 @@ use cmac::Cmac;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
 use smolder_proto::smb::smb2::{
-    Command, CreateRequest, CreateResponse, DurableHandleFlags, FileId, Header,
-    NegotiateResponse, PreauthIntegrityHashId, SessionId, SessionSetupResponse, TreeConnectResponse,
-    TreeId,
+    Command, CreateRequest, CreateResponse, DurableHandleFlags, FileId, Header, NegotiateResponse,
+    PreauthIntegrityHashId, SessionId, SessionSetupResponse, TreeConnectResponse, TreeId,
 };
 use smolder_proto::smb::status::NtStatus;
 

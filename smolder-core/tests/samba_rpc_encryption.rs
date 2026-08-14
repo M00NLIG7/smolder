@@ -2,9 +2,7 @@ mod common;
 
 use common::{samba_lock, SambaNtlmConfig};
 use smolder_core::error::CoreError;
-use smolder_core::prelude::{
-    connect_tree, PipeAccess, PipeRpcClient, SrvsvcClient,
-};
+use smolder_core::prelude::{connect_tree, PipeAccess, PipeRpcClient, SrvsvcClient};
 use smolder_proto::smb::smb2::{SessionId, TreeId};
 
 const ERROR_ACCESS_DENIED: u32 = 5;

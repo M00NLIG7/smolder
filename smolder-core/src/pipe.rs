@@ -565,7 +565,7 @@ where
                 None => {
                     return Err(CoreError::InvalidResponse(
                         "interactive control pipe closed with a truncated line",
-                    ))
+                    ));
                 }
             }
         }

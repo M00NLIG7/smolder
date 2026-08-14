@@ -14,9 +14,9 @@ use smolder_proto::smb::smb2::NegotiateResponse;
 
 #[cfg(all(unix, feature = "kerberos-gssapi"))]
 use super::kerberos_gssapi::GssapiKerberosBackend;
+use super::kerberos_spn::KerberosTarget;
 #[cfg(feature = "kerberos-sspi")]
 use super::kerberos_sspi::SspiNegotiateKerberosBackend;
-use super::kerberos_spn::KerberosTarget;
 use super::spnego::{
     encode_neg_token_init, encode_neg_token_resp, extract_mech_token, parse_neg_token_resp,
 };
@@ -533,7 +533,10 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                     extract_mech_token(incoming)?
                 };
                 match B::step(pending, &server_token, &self.target)? {
-                    KerberosStep::Finished { context, token: None } => {
+                    KerberosStep::Finished {
+                        context,
+                        token: None,
+                    } => {
                         self.session_key = Some(B::session_key(&context)?);
                         Ok(())
                     }
@@ -607,7 +610,10 @@ mod tests {
             assert_eq!(credentials.kdc_url(), Some("tcp://dc01.example.com:88"));
             #[cfg(feature = "kerberos-sspi")]
             assert_eq!(
-                credentials.username().expect("username should parse").inner(),
+                credentials
+                    .username()
+                    .expect("username should parse")
+                    .inner(),
                 "EXAMPLE.COM\\alice"
             );
             assert_eq!(
@@ -695,7 +701,8 @@ mod tests {
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
     #[test]
     fn ticket_cache_credentials_select_gssapi_backend() {
-        let credentials = KerberosCredentials::from_ticket_cache("alice").with_domain("EXAMPLE.COM");
+        let credentials =
+            KerberosCredentials::from_ticket_cache("alice").with_domain("EXAMPLE.COM");
 
         assert_eq!(credentials.backend_kind(), KerberosBackendKind::Gssapi);
         assert_eq!(
@@ -713,18 +720,15 @@ mod tests {
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
     #[test]
     fn keytab_credentials_select_gssapi_backend() {
-        let credentials =
-            KerberosCredentials::from_keytab("alice", "/tmp/alice.keytab").with_domain("EXAMPLE.COM");
+        let credentials = KerberosCredentials::from_keytab("alice", "/tmp/alice.keytab")
+            .with_domain("EXAMPLE.COM");
 
         assert_eq!(credentials.backend_kind(), KerberosBackendKind::Gssapi);
         assert_eq!(
             credentials.credential_source_kind(),
             KerberosCredentialSourceKind::Keytab
         );
-        assert_eq!(
-            credentials.keytab_name(),
-            Some("FILE:/tmp/alice.keytab")
-        );
+        assert_eq!(credentials.keytab_name(), Some("FILE:/tmp/alice.keytab"));
     }
 
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
@@ -751,12 +755,10 @@ mod tests {
                 .expect("default keytab should allow an unspecified principal"),
             None
         );
-        assert!(
-            credentials
-                .keytab_name()
-                .expect("keytab should be recorded")
-                .starts_with("FILE:")
-        );
+        assert!(credentials
+            .keytab_name()
+            .expect("keytab should be recorded")
+            .starts_with("FILE:"));
     }
 
     #[test]

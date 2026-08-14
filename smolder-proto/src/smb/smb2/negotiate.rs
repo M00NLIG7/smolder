@@ -810,9 +810,10 @@ mod tests {
 
     #[test]
     fn compression_capabilities_decode_accepts_single_algorithm_response_shape() {
-        let decoded =
-            CompressionCapabilities::decode(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00])
-                .expect("single-algorithm compression capabilities should decode");
+        let decoded = CompressionCapabilities::decode(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        ])
+        .expect("single-algorithm compression capabilities should decode");
         assert_eq!(
             decoded,
             CompressionCapabilities {

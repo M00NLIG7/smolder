@@ -362,15 +362,13 @@ async fn durable_v2_open_reconnects_with_saved_create_guid() {
     assert_eq!(reconnect_context.file_id, initial_file_id);
     assert_eq!(reconnect_context.create_guid, create_guid);
     assert_eq!(reconnect_context.flags, DurableHandleFlags::PERSISTENT);
-    assert!(
-        reconnect_request
-            .create_contexts
-            .iter()
-            .all(|context| context
-                .durable_handle_request_v2_data()
-                .expect("request context should decode")
-                .is_none())
-    );
+    assert!(reconnect_request
+        .create_contexts
+        .iter()
+        .all(|context| context
+            .durable_handle_request_v2_data()
+            .expect("request context should decode")
+            .is_none()));
 }
 
 #[tokio::test]
@@ -449,7 +447,10 @@ async fn durable_v1_open_reconnects_with_legacy_contexts_on_smb210() {
         .expect("tree connect should succeed");
 
     let durable = connection_one
-        .create_durable(&CreateRequest::from_path("legacy.txt"), DurableOpenOptions::new())
+        .create_durable(
+            &CreateRequest::from_path("legacy.txt"),
+            DurableOpenOptions::new(),
+        )
         .await
         .expect("legacy durable open should succeed");
     assert_eq!(durable.file_id(), initial_file_id);
@@ -592,7 +593,14 @@ async fn resilient_handle_request_uses_resiliency_fsctl() {
         smolder_proto::smb::smb2::CtlCode::FSCTL_LMR_REQUEST_RESILIENCY
     );
     assert_eq!(ioctl.file_id, file_id);
-    assert_eq!(ioctl.input, 30_000u32.to_le_bytes().into_iter().chain([0; 4]).collect::<Vec<_>>());
+    assert_eq!(
+        ioctl.input,
+        30_000u32
+            .to_le_bytes()
+            .into_iter()
+            .chain([0; 4])
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -917,5 +925,12 @@ async fn durable_reconnect_with_resiliency_reapplies_saved_timeout() {
         smolder_proto::smb::smb2::CtlCode::FSCTL_LMR_REQUEST_RESILIENCY
     );
     assert_eq!(ioctl.file_id, reopened_file_id);
-    assert_eq!(ioctl.input, 30_000u32.to_le_bytes().into_iter().chain([0; 4]).collect::<Vec<_>>());
+    assert_eq!(
+        ioctl.input,
+        30_000u32
+            .to_le_bytes()
+            .into_iter()
+            .chain([0; 4])
+            .collect::<Vec<_>>()
+    );
 }

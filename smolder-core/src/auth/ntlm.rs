@@ -12,9 +12,9 @@ use smolder_proto::smb::smb2::utf16le;
 use smolder_proto::smb::smb2::NegotiateResponse;
 
 use super::spnego::{
-    encode_mech_type_list, encode_neg_token_init, encode_neg_token_resp, encode_neg_token_resp_ntlm,
-    extract_mech_token, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE,
-    NEG_STATE_REJECT,
+    encode_mech_type_list, encode_neg_token_init, encode_neg_token_resp,
+    encode_neg_token_resp_ntlm, extract_mech_token, parse_neg_token_resp,
+    NEG_STATE_ACCEPT_COMPLETE, NEG_STATE_REJECT,
 };
 use super::{AuthError, AuthProvider, SpnegoMechanism};
 
@@ -244,7 +244,7 @@ impl AuthProvider for NtlmAuthenticator {
             NtlmState::Initial => {
                 return Err(AuthError::InvalidState(
                     "challenge received before initial token was sent",
-                ))
+                ));
             }
             NtlmState::WaitingForCompletion { flags } => {
                 let parsed = parse_neg_token_resp(incoming)?;
@@ -264,7 +264,7 @@ impl AuthProvider for NtlmAuthenticator {
                 ));
             }
             NtlmState::Complete => {
-                return Err(AuthError::InvalidState("authentication already finished"))
+                return Err(AuthError::InvalidState("authentication already finished"));
             }
         };
 
@@ -565,12 +565,11 @@ fn build_authenticate_message(
         &target_info,
     );
     let key_exchange_key = hmac_md5(&response_key_nt, &nt_response[..16]);
-    let (encrypted_random_session_key, session_key) =
-        encrypt_random_session_key(
-            negotiated_flags,
-            key_exchange_key,
-            exported_session_key_override,
-        );
+    let (encrypted_random_session_key, session_key) = encrypt_random_session_key(
+        negotiated_flags,
+        key_exchange_key,
+        exported_session_key_override,
+    );
     let lm_challenge_response = lmv2_response(
         &response_key_nt,
         challenge.server_challenge,
@@ -1336,9 +1335,7 @@ mod tests {
 
         hex.as_bytes()
             .chunks_exact(2)
-            .map(|chunk| {
-                (hex_nibble(chunk[0]) << 4) | hex_nibble(chunk[1])
-            })
+            .map(|chunk| (hex_nibble(chunk[0]) << 4) | hex_nibble(chunk[1]))
             .collect()
     }
 

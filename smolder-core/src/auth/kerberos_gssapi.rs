@@ -3,9 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use kenobi_unix::client::{
-    ClientBuilder, ClientContext, PendingClientContext, StepOut,
-};
+use kenobi_unix::client::{ClientBuilder, ClientContext, PendingClientContext, StepOut};
 use kenobi_unix::cred::{Credentials, Outbound};
 use kenobi_unix::mech::Mechanism;
 use kenobi_unix::typestate::{MaybeDelegation, MaybeEncryption, MaybeSigning};
@@ -14,8 +12,7 @@ use super::kerberos::{KerberosBackend, KerberosCredentials, KerberosStep};
 use super::kerberos_spn::KerberosTarget;
 use super::AuthError;
 
-type GssapiClientContext =
-    ClientContext<Outbound, MaybeSigning, MaybeEncryption, MaybeDelegation>;
+type GssapiClientContext = ClientContext<Outbound, MaybeSigning, MaybeEncryption, MaybeDelegation>;
 
 pub(super) struct GssapiKerberosBackend;
 

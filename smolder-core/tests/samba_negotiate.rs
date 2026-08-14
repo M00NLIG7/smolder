@@ -1,8 +1,6 @@
 mod common;
 
-use common::{
-    optional_u16_env, required_env, samba_lock, unique_path_in_dir, SambaShareConfig,
-};
+use common::{optional_u16_env, required_env, samba_lock, unique_path_in_dir, SambaShareConfig};
 use smolder_core::prelude::{
     Connection, CoreError, DurableOpenOptions, NtlmAuthenticator, ResilientHandle,
     TokioTcpTransport, TreeConnected,
@@ -29,8 +27,10 @@ fn negotiate_request() -> NegotiateRequest {
     }
 }
 
-async fn authenticated_tree_connection(
-) -> Option<(SambaShareConfig, Connection<TokioTcpTransport, TreeConnected>)> {
+async fn authenticated_tree_connection() -> Option<(
+    SambaShareConfig,
+    Connection<TokioTcpTransport, TreeConnected>,
+)> {
     let Some(config) = SambaShareConfig::from_env() else {
         eprintln!(
             "skipping live Samba auth test: SMOLDER_SAMBA_HOST, SMOLDER_SAMBA_USERNAME, SMOLDER_SAMBA_PASSWORD, and SMOLDER_SAMBA_SHARE must be set"

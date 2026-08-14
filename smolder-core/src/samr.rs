@@ -1304,9 +1304,6 @@ impl NdrWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALIAS_GENERAL_INFORMATION_CLASS, ALIAS_READ_AND_LIST_MEMBERS, DEFAULT_DOMAIN_ACCESS,
-        DEFAULT_SERVER_ACCESS, SamrAlias, SamrAliasInfo, SamrDomain, SamrGroup, SamrServerRevision,
-        SamrSid, SamrUser, SamrUserInfo, USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
         encode_close_handle_request, encode_connect2_request, encode_connect5_request,
         encode_enumerate_users_request, encode_enumeration_request, encode_lookup_domain_request,
         encode_open_domain_request, encode_open_relative_id_request, encode_query_alias_request,
@@ -1315,7 +1312,10 @@ mod tests {
         parse_enumerate_domains_response, parse_enumerate_groups_response,
         parse_enumerate_users_response, parse_get_members_in_alias_response,
         parse_lookup_domain_response, parse_open_domain_response, parse_open_handle_response,
-        parse_query_account_name_response, parse_query_alias_general_response,
+        parse_query_account_name_response, parse_query_alias_general_response, SamrAlias,
+        SamrAliasInfo, SamrDomain, SamrGroup, SamrServerRevision, SamrSid, SamrUser, SamrUserInfo,
+        ALIAS_GENERAL_INFORMATION_CLASS, ALIAS_READ_AND_LIST_MEMBERS, DEFAULT_DOMAIN_ACCESS,
+        DEFAULT_SERVER_ACCESS, USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
     };
     use crate::error::CoreError;
 

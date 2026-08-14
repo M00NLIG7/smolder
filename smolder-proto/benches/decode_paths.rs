@@ -6,10 +6,10 @@ use smolder_proto::rpc::{
 };
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    CipherId, Dialect, EncryptionCapabilities, GlobalCapabilities, NegotiateContext,
-    NegotiateContextType, NegotiateRequest, PreauthIntegrityCapabilities,
-    PreauthIntegrityHashId, SessionSetupRequest, SessionSetupSecurityMode, SigningMode, Command,
-    Header, HeaderFlags, MessageId, SessionId, TreeId,
+    CipherId, Command, Dialect, EncryptionCapabilities, GlobalCapabilities, Header, HeaderFlags,
+    MessageId, NegotiateContext, NegotiateContextType, NegotiateRequest,
+    PreauthIntegrityCapabilities, PreauthIntegrityHashId, SessionId, SessionSetupRequest,
+    SessionSetupSecurityMode, SigningMode, TreeId,
 };
 use smolder_proto::smb::transform::{TransformHeader, TransformValue};
 
@@ -74,9 +74,12 @@ fn bench_decode_paths(c: &mut Criterion) {
     );
 
     group.throughput(Throughput::Bytes(rpc_bind_bytes.len() as u64));
-    group.bench_function(BenchmarkId::new("rpc_bind_packet", rpc_bind_bytes.len()), |b| {
-        b.iter(|| Packet::decode(black_box(&rpc_bind_bytes)).expect("rpc bind should decode"));
-    });
+    group.bench_function(
+        BenchmarkId::new("rpc_bind_packet", rpc_bind_bytes.len()),
+        |b| {
+            b.iter(|| Packet::decode(black_box(&rpc_bind_bytes)).expect("rpc bind should decode"));
+        },
+    );
 
     group.throughput(Throughput::Bytes(rpc_request_bytes.len() as u64));
     group.bench_function(

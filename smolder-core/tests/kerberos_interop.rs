@@ -98,7 +98,9 @@ async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
         #[cfg(feature = "kerberos-sspi")]
         (None, Some(password)) => KerberosCredentials::new(config.username, password),
         #[cfg(not(feature = "kerberos-sspi"))]
-        (None, Some(_)) => panic!("SMOLDER_KERBEROS_PASSWORD requires the kerberos or kerberos-sspi feature"),
+        (None, Some(_)) => {
+            panic!("SMOLDER_KERBEROS_PASSWORD requires the kerberos or kerberos-sspi feature")
+        }
         (None, None) => unreachable!("config construction requires password or keytab"),
     };
     if let Some(domain) = config.domain {

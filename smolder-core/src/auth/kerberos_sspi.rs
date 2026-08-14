@@ -72,7 +72,10 @@ impl SspiKerberosContext {
         incoming: Option<&[u8]>,
     ) -> Result<(sspi::SecurityStatus, Vec<u8>), AuthError> {
         let target_name = Self::target_name(target)?;
-        let mut output = [sspi::SecurityBuffer::new(Vec::new(), sspi::BufferType::Token)];
+        let mut output = [sspi::SecurityBuffer::new(
+            Vec::new(),
+            sspi::BufferType::Token,
+        )];
         let mut input = [sspi::SecurityBuffer::new(
             incoming.unwrap_or_default().to_vec(),
             sspi::BufferType::Token,
@@ -134,9 +137,7 @@ impl KerberosBackend for SspiNegotiateKerberosBackend {
     ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError> {
         let (status, token) = pending.step(target, Some(incoming))?;
         match status {
-            sspi::SecurityStatus::ContinueNeeded => {
-                Ok(KerberosStep::Continue { pending, token })
-            }
+            sspi::SecurityStatus::ContinueNeeded => Ok(KerberosStep::Continue { pending, token }),
             sspi::SecurityStatus::Ok => Ok(KerberosStep::Finished {
                 context: pending,
                 token: (!token.is_empty()).then_some(token),

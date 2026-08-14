@@ -7,7 +7,7 @@ const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
 
 mod common;
-use common::{WindowsNtlmConfig, windows_lock};
+use common::{windows_lock, WindowsNtlmConfig};
 
 #[tokio::test]
 async fn enumerates_windows_samr_domains_when_configured() {

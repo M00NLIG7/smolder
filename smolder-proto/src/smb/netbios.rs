@@ -156,8 +156,8 @@ mod tests {
 
     #[test]
     fn session_request_roundtrips() {
-        let request =
-            SessionMessage::session_request("FILESERVER", "SMOLDER").expect("request should encode");
+        let request = SessionMessage::session_request("FILESERVER", "SMOLDER")
+            .expect("request should encode");
         let encoded = request.encode().expect("request should frame");
         let decoded = SessionMessage::decode(&encoded).expect("request should decode");
 

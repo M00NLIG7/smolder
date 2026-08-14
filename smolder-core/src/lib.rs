@@ -130,28 +130,28 @@ pub mod prelude {
         DurableOpenOptions, Negotiated, ResilientHandle, TreeConnected,
     };
     pub use crate::compression::CompressionState;
-    pub use crate::crypto::{EncryptionKeys, derive_encryption_keys};
-    pub use crate::dfs::{DfsReferral, UncPath, resolve_unc_path};
+    pub use crate::crypto::{derive_encryption_keys, EncryptionKeys};
+    pub use crate::dfs::{resolve_unc_path, DfsReferral, UncPath};
     pub use crate::error::CoreError;
     pub use crate::facade::{
         Client, ClientBuilder, DirectoryEntry, File, FileMetadata, OpenOptions, Session, Share,
     };
     pub use crate::lsarpc::{
-        DEFAULT_POLICY_ACCESS, LOOKUP_POLICY_ACCESS, LsaDomainInfo, LsaSid, LsaSidNameUse,
-        LsaTranslatedSid, LsarpcClient,
+        LsaDomainInfo, LsaSid, LsaSidNameUse, LsaTranslatedSid, LsarpcClient,
+        DEFAULT_POLICY_ACCESS, LOOKUP_POLICY_ACCESS,
     };
     pub use crate::pipe::{
-        NamedPipe, PipeAccess, SmbSessionConfig, connect_session, connect_session_with_transport,
-        connect_tree, connect_tree_with_transport,
+        connect_session, connect_session_with_transport, connect_tree, connect_tree_with_transport,
+        NamedPipe, PipeAccess, SmbSessionConfig,
     };
     #[cfg(feature = "quic")]
     #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
     pub use crate::pipe::{connect_session_quic, connect_tree_quic};
     pub use crate::rpc::PipeRpcClient;
     pub use crate::samr::{
-        DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS, SamrAlias, SamrAliasClient, SamrAliasInfo,
-        SamrClient, SamrDomain, SamrDomainClient, SamrGroup, SamrServerRevision, SamrSid, SamrUser,
-        SamrUserClient, SamrUserInfo,
+        SamrAlias, SamrAliasClient, SamrAliasInfo, SamrClient, SamrDomain, SamrDomainClient,
+        SamrGroup, SamrServerRevision, SamrSid, SamrUser, SamrUserClient, SamrUserInfo,
+        DEFAULT_DOMAIN_ACCESS, DEFAULT_SERVER_ACCESS,
     };
     pub use crate::srvsvc::{
         ServerInfo101, ServerInfo103, SessionInfo10, ShareInfo1, ShareInfo2, SrvsvcClient,

@@ -1,9 +1,7 @@
 mod common;
 
 use common::{samba_lock, windows_lock, SambaNtlmConfig, WindowsNtlmConfig};
-use smolder_core::prelude::{
-    connect_tree, NamedPipe, PipeAccess, SmbSessionConfig,
-};
+use smolder_core::prelude::{connect_tree, NamedPipe, PipeAccess, SmbSessionConfig};
 use smolder_proto::rpc::{BindAckPdu, BindPdu, Packet, PacketFlags, SyntaxId, Uuid};
 use smolder_proto::smb::smb2::{SessionId, TreeId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

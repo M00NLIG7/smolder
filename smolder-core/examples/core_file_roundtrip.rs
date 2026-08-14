@@ -24,7 +24,7 @@
 //! - `SMOLDER_EXAMPLE_DOMAIN`
 //! - `SMOLDER_EXAMPLE_WORKSTATION`
 
-use smolder_core::prelude::{SmbSessionConfig, connect_tree};
+use smolder_core::prelude::{connect_tree, SmbSessionConfig};
 use smolder_proto::smb::smb2::{
     CloseRequest, CreateOptions, CreateRequest, FlushRequest, ReadRequest, ShareAccess,
     WriteRequest,

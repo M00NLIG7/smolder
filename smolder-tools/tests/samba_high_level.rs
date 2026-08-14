@@ -6,7 +6,7 @@ use smolder_tools::prelude::{LeaseRequest, OpenOptions, Share, SmbDirectoryEntry
 use tokio::time::sleep;
 
 mod common;
-use common::{samba_lock, SambaConfig, temp_path, unique_name};
+use common::{samba_lock, temp_path, unique_name, SambaConfig};
 
 async fn connected_share() -> Option<(SambaConfig, Share)> {
     let Some(config) = SambaConfig::from_env() else {
@@ -150,16 +150,12 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .await
         .expect("rename should succeed");
     let renamed_listing = wait_for_listing_entry(&mut share, &renamed_path, true).await;
-    assert!(
-        !renamed_listing
-            .iter()
-            .any(|entry| entry.name == original_path)
-    );
-    assert!(
-        renamed_listing
-            .iter()
-            .any(|entry| entry.name == renamed_path)
-    );
+    assert!(!renamed_listing
+        .iter()
+        .any(|entry| entry.name == original_path));
+    assert!(renamed_listing
+        .iter()
+        .any(|entry| entry.name == renamed_path));
 
     share
         .remove(&renamed_path)

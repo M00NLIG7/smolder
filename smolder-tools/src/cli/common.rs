@@ -693,8 +693,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ExecTarget, RemoteLocation, parse_duration, parse_exec_target, parse_remote_location,
-        parse_remote_location_with_options, remote_unc,
+        parse_duration, parse_exec_target, parse_remote_location,
+        parse_remote_location_with_options, remote_unc, ExecTarget, RemoteLocation,
     };
 
     #[test]

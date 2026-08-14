@@ -860,14 +860,12 @@ impl NdrWriter {
 mod tests {
     use super::{
         encode_remote_tod_request, encode_server_get_info_level101_request,
-        encode_server_get_info_level103_request,
-        encode_session_enum_level10_request,
+        encode_server_get_info_level103_request, encode_session_enum_level10_request,
         encode_share_enum_level1_request, encode_share_get_info_level2_request,
         parse_remote_tod_response, parse_server_get_info_level101_response,
-        parse_server_get_info_level103_response,
-        parse_session_enum_level10_response, parse_share_enum_level1_response,
-        parse_share_get_info_level2_response, ServerInfo101, SessionInfo10, ShareInfo1,
-        ShareInfo2, ServerInfo103, TimeOfDayInfo,
+        parse_server_get_info_level103_response, parse_session_enum_level10_response,
+        parse_share_enum_level1_response, parse_share_get_info_level2_response, ServerInfo101,
+        ServerInfo103, SessionInfo10, ShareInfo1, ShareInfo2, TimeOfDayInfo,
     };
     use crate::error::CoreError;
 

@@ -133,20 +133,31 @@ pub async fn run_file_tool(tool: FileTool, args: Vec<String>) -> Result<i32, Str
             }
             FileTool::Remove => {
                 let (mut share, path) = connect_share_path(&auth, &remote).await?;
-                share.remove(&path).await.map_err(|error| error.to_string())?;
+                share
+                    .remove(&path)
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
             FileTool::Get | FileTool::Put | FileTool::Move => {
                 unreachable!("single-remote parser variant does not apply to this tool");
             }
         },
-        ParsedFileArgs::Get { auth, remote, local } => {
+        ParsedFileArgs::Get {
+            auth,
+            remote,
+            local,
+        } => {
             let (mut share, path) = connect_share_path(&auth, &remote).await?;
             share
                 .get(&path, local)
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        ParsedFileArgs::Put { auth, local, remote } => {
+        ParsedFileArgs::Put {
+            auth,
+            local,
+            remote,
+        } => {
             let (mut share, path) = connect_share_path(&auth, &remote).await?;
             share
                 .put(local, &path)
@@ -195,7 +206,10 @@ fn parse_args(tool: FileTool, args: Vec<String>) -> Result<ParsedFileArgs, Strin
             continue;
         }
         if token.starts_with("--") {
-            return Err(format!("unknown option: {token}\n\n{}", tool.usage(&program)));
+            return Err(format!(
+                "unknown option: {token}\n\n{}",
+                tool.usage(&program)
+            ));
         }
 
         positionals.push(token.as_str());

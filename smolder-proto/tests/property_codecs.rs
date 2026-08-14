@@ -5,9 +5,9 @@ use smolder_proto::rpc::{
 };
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    ChangeNotifyRequest, Command, CreateRequest, Header, HeaderFlags, IoctlRequest, LockRequest,
-    MessageId, NegotiateRequest, ReadRequest, SessionId, SessionSetupRequest, TreeConnectRequest,
-    TreeId, WriteRequest, utf16le, utf16le_string,
+    utf16le, utf16le_string, ChangeNotifyRequest, Command, CreateRequest, Header, HeaderFlags,
+    IoctlRequest, LockRequest, MessageId, NegotiateRequest, ReadRequest, SessionId,
+    SessionSetupRequest, TreeConnectRequest, TreeId, WriteRequest,
 };
 use smolder_proto::smb::transform::{TransformHeader, TransformValue};
 use smolder_proto::smb::ProtocolError;
@@ -330,5 +330,11 @@ proptest! {
 #[test]
 fn utf16le_rejects_odd_length_buffers() {
     let error = utf16le_string(&[0x41]).expect_err("odd-length UTF-16LE should fail");
-    assert!(matches!(error, ProtocolError::InvalidField { field: "utf16le_string", .. }));
+    assert!(matches!(
+        error,
+        ProtocolError::InvalidField {
+            field: "utf16le_string",
+            ..
+        }
+    ));
 }

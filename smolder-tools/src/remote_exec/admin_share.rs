@@ -1,6 +1,6 @@
 use smolder_core::client::{Connection, TreeConnected};
 use smolder_core::error::CoreError;
-use smolder_core::pipe::{SmbSessionConfig, connect_tree};
+use smolder_core::pipe::{connect_tree, SmbSessionConfig};
 use smolder_core::transport::TokioTcpTransport;
 use smolder_proto::smb::smb2::{
     CloseRequest, CreateDisposition, CreateOptions, CreateRequest, DispositionInformation,
@@ -9,8 +9,8 @@ use smolder_proto::smb::smb2::{
 };
 
 use super::{
-    DELETE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
-    READ_CONTROL, SYNCHRONIZE, is_end_of_file, is_not_found, normalize_share_path,
+    is_end_of_file, is_not_found, normalize_share_path, DELETE, FILE_READ_ATTRIBUTES,
+    FILE_READ_DATA, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, READ_CONTROL, SYNCHRONIZE,
 };
 
 pub(super) struct AdminShare {

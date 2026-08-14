@@ -967,16 +967,15 @@ impl<'a> NdrReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_POLICY_ACCESS, LOOKUP_POLICY_ACCESS, LsaDnsDomainInfo, LsaDomainInfo, LsaGuid,
-        LsaServerRole, LsaSid, LsaSidNameUse, LsaTranslatedSid,
-        POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS, POLICY_DNS_DOMAIN_INFORMATION_CLASS,
-        POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS, POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS,
-        RPC_S_OP_RANGE_ERROR, STATUS_NONE_MAPPED, encode_close_handle_request,
-        encode_lookup_names_request, encode_open_policy2_request, encode_query_policy_request,
-        parse_account_domain_info_response, parse_close_handle_response,
-        parse_dns_domain_info_response, parse_lookup_names_response, parse_open_policy2_response,
-        parse_primary_domain_info_response, parse_server_role_response,
-        should_retry_legacy_policy_query,
+        encode_close_handle_request, encode_lookup_names_request, encode_open_policy2_request,
+        encode_query_policy_request, parse_account_domain_info_response,
+        parse_close_handle_response, parse_dns_domain_info_response, parse_lookup_names_response,
+        parse_open_policy2_response, parse_primary_domain_info_response,
+        parse_server_role_response, should_retry_legacy_policy_query, LsaDnsDomainInfo,
+        LsaDomainInfo, LsaGuid, LsaServerRole, LsaSid, LsaSidNameUse, LsaTranslatedSid,
+        DEFAULT_POLICY_ACCESS, LOOKUP_POLICY_ACCESS, POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS,
+        POLICY_DNS_DOMAIN_INFORMATION_CLASS, POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS,
+        POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS, RPC_S_OP_RANGE_ERROR, STATUS_NONE_MAPPED,
     };
     use crate::error::CoreError;
 
@@ -1146,9 +1145,7 @@ mod tests {
         let handle = parse_open_policy2_response(&response).expect("handle should decode");
         assert_eq!(
             handle,
-            [
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
-            ]
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
     }
 
@@ -1427,11 +1424,9 @@ mod tests {
             STATUS_NONE_MAPPED.to_le_bytes().as_slice(),
         ]
         .concat();
-        assert!(
-            parse_lookup_names_response(&response)
-                .expect("none-mapped should still decode")
-                .is_empty()
-        );
+        assert!(parse_lookup_names_response(&response)
+            .expect("none-mapped should still decode")
+            .is_empty());
     }
 
     #[test]

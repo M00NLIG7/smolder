@@ -1,9 +1,7 @@
 mod common;
 
 use common::{unique_path_in_dir, windows_lock, WindowsNtlmConfig, WindowsShareConfig};
-use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected,
-};
+use smolder_core::prelude::{Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected};
 use smolder_proto::smb::smb2::{
     CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, EchoResponse,
     EncryptionCapabilities, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,
@@ -31,8 +29,10 @@ fn negotiate_request() -> NegotiateRequest {
     }
 }
 
-async fn authenticated_tree_connection(
-) -> Option<(WindowsShareConfig, Connection<TokioTcpTransport, TreeConnected>)> {
+async fn authenticated_tree_connection() -> Option<(
+    WindowsShareConfig,
+    Connection<TokioTcpTransport, TreeConnected>,
+)> {
     let Some(config) = WindowsShareConfig::from_env() else {
         eprintln!(
             "skipping live Windows interop test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"

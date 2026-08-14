@@ -1,5 +1,5 @@
 mod common;
-use common::{SambaNtlmConfig, samba_lock};
+use common::{samba_lock, SambaNtlmConfig};
 
 #[tokio::test]
 async fn enumerates_standalone_samba_samr_users_when_configured() {

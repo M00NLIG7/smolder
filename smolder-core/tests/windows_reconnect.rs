@@ -32,8 +32,10 @@ fn negotiate_request() -> NegotiateRequest {
     }
 }
 
-async fn authenticated_tree_connection(
-) -> Option<(WindowsShareConfig, Connection<TokioTcpTransport, TreeConnected>)> {
+async fn authenticated_tree_connection() -> Option<(
+    WindowsShareConfig,
+    Connection<TokioTcpTransport, TreeConnected>,
+)> {
     let Some(config) = WindowsShareConfig::from_env() else {
         eprintln!(
             "skipping live Windows reconnect test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"

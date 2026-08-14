@@ -3,7 +3,7 @@ use std::sync::Arc;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use smolder_proto::smb::compression::{
-    COMPRESSION_TRANSFORM_PROTOCOL_ID, CompressionCapabilityFlags, CompressionTransformHeader,
+    CompressionCapabilityFlags, CompressionTransformHeader, COMPRESSION_TRANSFORM_PROTOCOL_ID,
 };
 use smolder_proto::smb::smb2::{
     AsyncId, CipherId, CompressionCapabilities, CreateContext, CreateRequest, CreateResponse,
@@ -13,7 +13,7 @@ use smolder_proto::smb::smb2::{
     SessionSetupSecurityMode, ShareFlags, SigningMode, TransportCapabilityFlags,
 };
 use smolder_proto::smb::status::NtStatus;
-use smolder_proto::smb::transform::{TRANSFORM_PROTOCOL_ID, TransformHeader};
+use smolder_proto::smb::transform::{TransformHeader, TRANSFORM_PROTOCOL_ID};
 
 use crate::compression::CompressionState;
 use crate::crypto::{derive_encryption_keys, EncryptionState};
@@ -730,9 +730,7 @@ fn derive_key(
     Ok(derived)
 }
 
-pub(super) fn session_setup_security_mode(
-    signing_mode: SigningMode,
-) -> SessionSetupSecurityMode {
+pub(super) fn session_setup_security_mode(signing_mode: SigningMode) -> SessionSetupSecurityMode {
     let mut security_mode = SessionSetupSecurityMode::empty();
     if signing_mode.contains(SigningMode::ENABLED) {
         security_mode |= SessionSetupSecurityMode::SIGNING_ENABLED;

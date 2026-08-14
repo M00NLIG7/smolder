@@ -2,7 +2,7 @@ use smolder_tools::prelude::{DurableOpenOptions, OpenOptions, ResilientHandle};
 use tokio::io::AsyncReadExt;
 
 mod common;
-use common::{WindowsConfig, unique_windows_path};
+use common::{unique_windows_path, WindowsConfig};
 
 fn reconnect_plan() -> Option<(WindowsConfig, smolder_tools::prelude::ShareReconnectPlan)> {
     let Some(config) = WindowsConfig::from_env() else {

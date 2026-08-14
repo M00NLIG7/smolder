@@ -88,7 +88,8 @@ impl CompressionTransformHeader {
     /// Serializes the compression transform header and following payload.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = BytesMut::with_capacity(COMPRESSION_TRANSFORM_HEADER_LEN + self.payload.len());
+        let mut out =
+            BytesMut::with_capacity(COMPRESSION_TRANSFORM_HEADER_LEN + self.payload.len());
         out.extend_from_slice(&COMPRESSION_TRANSFORM_PROTOCOL_ID);
         out.put_u32_le(self.original_compressed_segment_size);
         out.put_u16_le(self.compression_algorithm as u16);
@@ -112,23 +113,22 @@ impl CompressionTransformHeader {
             });
         }
 
-        let flags =
-            CompressionFlags::from_bits(u16::from_le_bytes(packet[10..12].try_into().map_err(
-                |_| ProtocolError::UnexpectedEof { field: "flags" },
-            )?))
-            .ok_or(ProtocolError::InvalidField {
-                field: "flags",
-                reason: "unknown compression flags set",
-            })?;
+        let flags = CompressionFlags::from_bits(u16::from_le_bytes(
+            packet[10..12]
+                .try_into()
+                .map_err(|_| ProtocolError::UnexpectedEof { field: "flags" })?,
+        ))
+        .ok_or(ProtocolError::InvalidField {
+            field: "flags",
+            reason: "unknown compression flags set",
+        })?;
 
         Ok(Self {
-            original_compressed_segment_size: u32::from_le_bytes(
-                packet[4..8]
-                    .try_into()
-                    .map_err(|_| ProtocolError::UnexpectedEof {
-                        field: "original_compressed_segment_size",
-                    })?,
-            ),
+            original_compressed_segment_size: u32::from_le_bytes(packet[4..8].try_into().map_err(
+                |_| ProtocolError::UnexpectedEof {
+                    field: "original_compressed_segment_size",
+                },
+            )?),
             compression_algorithm: CompressionAlgorithm::try_from(u16::from_le_bytes(
                 packet[8..10]
                     .try_into()
@@ -206,7 +206,10 @@ mod tests {
 
         assert_eq!(encoded.len(), COMPRESSION_TRANSFORM_HEADER_LEN + 7);
         assert_eq!(&encoded[..4], &COMPRESSION_TRANSFORM_PROTOCOL_ID);
-        assert_eq!(decoded.prefix_data().expect("prefix should decode"), &[0xaa, 0xbb, 0xcc, 0xdd]);
+        assert_eq!(
+            decoded.prefix_data().expect("prefix should decode"),
+            &[0xaa, 0xbb, 0xcc, 0xdd]
+        );
         assert_eq!(
             decoded.compressed_data().expect("segment should decode"),
             &[0x11, 0x22, 0x33]

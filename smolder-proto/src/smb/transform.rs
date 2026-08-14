@@ -67,27 +67,29 @@ impl TransformHeader {
         }
 
         Ok(Self {
-            signature: packet[4..20].try_into().map_err(|_| ProtocolError::UnexpectedEof {
-                field: "signature",
-            })?,
-            nonce: packet[20..36].try_into().map_err(|_| ProtocolError::UnexpectedEof {
-                field: "nonce",
-            })?,
-            original_message_size: u32::from_le_bytes(
-                packet[36..40].try_into().map_err(|_| ProtocolError::UnexpectedEof {
+            signature: packet[4..20]
+                .try_into()
+                .map_err(|_| ProtocolError::UnexpectedEof { field: "signature" })?,
+            nonce: packet[20..36]
+                .try_into()
+                .map_err(|_| ProtocolError::UnexpectedEof { field: "nonce" })?,
+            original_message_size: u32::from_le_bytes(packet[36..40].try_into().map_err(|_| {
+                ProtocolError::UnexpectedEof {
                     field: "original_message_size",
-                })?,
-            ),
+                }
+            })?),
             flags_or_algorithm: TransformValue(u16::from_le_bytes(
-                packet[42..44].try_into().map_err(|_| ProtocolError::UnexpectedEof {
-                    field: "flags_or_algorithm",
-                })?,
+                packet[42..44]
+                    .try_into()
+                    .map_err(|_| ProtocolError::UnexpectedEof {
+                        field: "flags_or_algorithm",
+                    })?,
             )),
-            session_id: u64::from_le_bytes(
-                packet[44..52].try_into().map_err(|_| ProtocolError::UnexpectedEof {
+            session_id: u64::from_le_bytes(packet[44..52].try_into().map_err(|_| {
+                ProtocolError::UnexpectedEof {
                     field: "session_id",
-                })?,
-            ),
+                }
+            })?),
             encrypted_message: packet[TRANSFORM_HEADER_LEN..].to_vec(),
         })
     }

@@ -57,9 +57,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let session = client.spawn(request).await?;
     let (mut stdin, mut stdout, mut stderr, waiter) = session.into_parts();
 
-    let stdin_task = tokio::spawn(async move {
-        pump_local_stdin(&mut stdin, close_on_exit_command).await
-    });
+    let stdin_task =
+        tokio::spawn(async move { pump_local_stdin(&mut stdin, close_on_exit_command).await });
     let stdout_task =
         tokio::spawn(async move { pump_remote_output(&mut stdout, tokio::io::stdout()).await });
     let stderr_task =
@@ -95,8 +94,8 @@ async fn pump_local_stdin(
             stdin.close().await?;
             return Ok(());
         }
-        let saw_exit_command = close_on_exit_command
-            && update_exit_command_state(&mut pending_line, &buffer[..count]);
+        let saw_exit_command =
+            close_on_exit_command && update_exit_command_state(&mut pending_line, &buffer[..count]);
         stdin.write_all(&buffer[..count]).await?;
         if saw_exit_command {
             stdin.close().await?;

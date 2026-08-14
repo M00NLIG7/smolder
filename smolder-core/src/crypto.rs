@@ -3,14 +3,14 @@
 use aes::{Aes128, Aes256};
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce as GcmNonce};
-use ccm::consts::{U11, U16};
 use ccm::aead::generic_array::GenericArray;
+use ccm::consts::{U11, U16};
 use ccm::Ccm;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use smolder_proto::smb::transform::{TransformHeader, TransformValue};
-use smolder_proto::smb::smb2::{CipherId, Dialect};
 use rand::random;
+use sha2::Sha256;
+use smolder_proto::smb::smb2::{CipherId, Dialect};
+use smolder_proto::smb::transform::{TransformHeader, TransformValue};
 
 use crate::error::CoreError;
 
@@ -417,9 +417,9 @@ fn derive_key(
         ));
     }
 
-    let output_bits = output_bytes
-        .checked_mul(8)
-        .ok_or(CoreError::InvalidInput("derived SMB key length was too large"))?;
+    let output_bits = output_bytes.checked_mul(8).ok_or(CoreError::InvalidInput(
+        "derived SMB key length was too large",
+    ))?;
     let blocks = output_bytes.div_ceil(32);
     let mut derived = Vec::with_capacity(blocks * 32);
 
@@ -600,7 +600,10 @@ mod tests {
             .decrypt_message(&transform)
             .expect("message should decrypt");
 
-        assert_eq!(transform.flags_or_algorithm, TransformValue(CipherId::Aes128Ccm as u16));
+        assert_eq!(
+            transform.flags_or_algorithm,
+            TransformValue(CipherId::Aes128Ccm as u16)
+        );
         assert_eq!(transform.original_message_size, message.len() as u32);
         assert_eq!(plaintext, message);
     }

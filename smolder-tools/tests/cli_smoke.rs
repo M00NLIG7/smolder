@@ -4,7 +4,7 @@ use std::process::Command;
 use smolder_tools::prelude::Share;
 
 mod common;
-use common::{samba_lock, SambaConfig, temp_path, unique_name};
+use common::{samba_lock, temp_path, unique_name, SambaConfig};
 
 async fn connected_share() -> Option<(SambaConfig, Share)> {
     let Some(config) = SambaConfig::from_env() else {
