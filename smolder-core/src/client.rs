@@ -1294,11 +1294,8 @@ where
             let request_header = Header::decode(&request_packet[..Header::LEN])?;
             let response_header = Header::decode(&response_packet[..Header::LEN])?;
             validate_response_identity(&response_header, request.command, &context)?;
-            if response_header.credit_charge.0 != request_header.credit_charge.0 {
-                return Err(CoreError::InvalidResponse(
-                    "compound response credit charge did not match its request element",
-                ));
-            }
+            // MS-SMB2 requires clients to ignore CreditCharge in responses. Credit grants are
+            // accounted independently through CreditRequestResponse below.
             if response_header.command != request.command {
                 return Err(CoreError::UnexpectedCommand {
                     expected: request.command,
@@ -1488,11 +1485,8 @@ where
 
             let response_header = Header::decode(&response_payload[..Header::LEN])?;
             validate_response_identity(&response_header, command, &context)?;
-            if response_header.credit_charge.0 != header.credit_charge.0 {
-                return Err(CoreError::InvalidResponse(
-                    "response credit charge did not match the request",
-                ));
-            }
+            // CreditCharge is server advisory data in a response and MUST be ignored by clients;
+            // the grant in CreditRequestResponse remains independently validated and applied.
             if response_header.command != command {
                 return Err(CoreError::UnexpectedCommand {
                     expected: command,
@@ -2152,6 +2146,23 @@ mod tests {
             .expect("response should frame")
     }
 
+    fn response_frame_without_credit_charge_echo(
+        command: Command,
+        status: u32,
+        message_id: u64,
+        session_id: u64,
+        tree_id: u32,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
+        let mut packet = response_packet(command, status, message_id, session_id, tree_id, body);
+        let mut header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
+        header.credit_charge.0 = 0;
+        packet[..Header::LEN].copy_from_slice(&header.encode());
+        SessionMessage::new(packet)
+            .encode()
+            .expect("response should frame")
+    }
+
     fn response_packet(
         command: Command,
         status: u32,
@@ -2313,17 +2324,22 @@ mod tests {
             .expect("signed response should frame")
     }
 
-    type CompoundResponseElement = (Command, u32, u64, u64, u32, u16, Vec<u8>);
+    type CompoundResponseElement = (Command, u32, u64, u64, u32, u16, u16, Vec<u8>);
 
     fn compound_response_frame(elements: Vec<CompoundResponseElement>) -> Vec<u8> {
         let mut payload = Vec::new();
         let total = elements.len();
-        for (index, (command, status, message_id, session_id, tree_id, credits, body)) in
-            elements.into_iter().enumerate()
+        for (
+            index,
+            (command, status, message_id, session_id, tree_id, credits, credit_charge, body),
+        ) in elements.into_iter().enumerate()
         {
             let mut packet = response_packet_with_credits(
                 command, status, message_id, session_id, tree_id, credits, body,
             );
+            let mut header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
+            header.credit_charge.0 = credit_charge;
+            packet[..Header::LEN].copy_from_slice(&header.encode());
             let is_last = index + 1 == total;
             if !is_last {
                 let packet_len =
@@ -3990,6 +4006,7 @@ mod tests {
                     55,
                     9,
                     1,
+                    0,
                     WriteResponse { count: 5 }.encode(),
                 ),
                 (
@@ -3999,6 +4016,7 @@ mod tests {
                     55,
                     9,
                     1,
+                    0,
                     FlushResponse.encode(),
                 ),
             ]),
@@ -4123,6 +4141,7 @@ mod tests {
                     55,
                     9,
                     1,
+                    0,
                     Vec::new(),
                 ),
                 (
@@ -4132,6 +4151,7 @@ mod tests {
                     55,
                     9,
                     1,
+                    0,
                     FlushResponse.encode(),
                 ),
             ]),
@@ -4388,7 +4408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_echo_uses_session_context() {
+    async fn authenticated_echo_ignores_response_credit_charge_and_uses_session_context() {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb302,
@@ -4423,7 +4443,7 @@ mod tests {
                 0,
                 session_response.encode(),
             ),
-            response_frame(
+            response_frame_without_credit_charge_echo(
                 Command::Echo,
                 NtStatus::SUCCESS.to_u32(),
                 2,
@@ -4461,6 +4481,7 @@ mod tests {
         let transport = connection.into_transport();
         let header = outbound_header(&transport.writes[2]);
         assert_eq!(header.command, Command::Echo);
+        assert_eq!(header.credit_charge.0, 1);
         assert_eq!(header.session_id, SessionId(44));
         assert_eq!(header.tree_id, TreeId(0));
     }
