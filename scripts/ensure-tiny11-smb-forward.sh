@@ -10,7 +10,23 @@ guest_port="${SMOLDER_WINDOWS_GUEST_PORT:-445}"
 smb_wait_seconds="${SMOLDER_WINDOWS_SMB_WAIT_SECONDS:-45}"
 initial_smb_wait_seconds="${SMOLDER_WINDOWS_SMB_INITIAL_WAIT_SECONDS:-30}"
 windows_username="${SMOLDER_WINDOWS_USERNAME:-}"
-windows_password="${SMOLDER_WINDOWS_PASSWORD:-}"
+password_input_file="${SMOLDER_WINDOWS_PASSWORD_FILE:-}"
+if [[ -n "${password_input_file}" ]]; then
+  if [[ ! -f "${password_input_file}" || -L "${password_input_file}" ]]; then
+    printf 'SMOLDER_WINDOWS_PASSWORD_FILE must identify a regular, non-symlink file\n' >&2
+    exit 1
+  fi
+  windows_password="$(<"${password_input_file}")"
+else
+  windows_password="${SMOLDER_WINDOWS_PASSWORD:-}"
+fi
+password_file=""
+cleanup_password_file() {
+  if [[ -n "$password_file" ]]; then
+    rm -f -- "$password_file"
+  fi
+}
+trap cleanup_password_file EXIT
 
 if ! command -v VBoxManage >/dev/null 2>&1; then
   printf 'VBoxManage is required to manage the Tiny11 fixture\n' >&2
@@ -61,6 +77,11 @@ if [[ -z "$windows_username" || -z "$windows_password" ]]; then
   exit 1
 fi
 
+password_file="$(mktemp "${TMPDIR:-/tmp}/smolder-windows-password.XXXXXX")"
+chmod 600 "$password_file"
+printf '%s' "$windows_password" >"$password_file"
+unset windows_password SMOLDER_WINDOWS_PASSWORD
+
 powershell_exe='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 powershell_cmd="\$ErrorActionPreference = 'Continue'; try { Set-Service -Name LanmanServer -StartupType Automatic } catch { Write-Warning ('Set-Service LanmanServer failed: ' + \$_.Exception.Message) }; try { if ((Get-Service -Name LanmanServer).Status -ne 'Running') { Start-Service -Name LanmanServer } } catch { Write-Warning ('Start-Service LanmanServer failed: ' + \$_.Exception.Message) }; try { Set-SmbServerConfiguration -EncryptData \$true -Force | Out-Null } catch { Write-Warning ('Set-SmbServerConfiguration failed: ' + \$_.Exception.Message) }; try { Enable-NetFirewallRule -DisplayGroup 'File and Printer Sharing' | Out-Null } catch { Write-Warning ('Enable-NetFirewallRule failed: ' + \$_.Exception.Message) }; Write-Output ((Get-Service -Name LanmanServer).Status)"
 
@@ -68,7 +89,7 @@ printf 'Configuring Tiny11 SMB service and firewall rules via guestcontrol\n'
 if ! VBoxManage guestcontrol "$vm_name" run \
   --exe "$powershell_exe" \
   --username "$windows_username" \
-  --password "$windows_password" \
+  --passwordfile "$password_file" \
   --wait-stdout \
   --wait-stderr \
   -- -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$powershell_cmd"; then

@@ -1,7 +1,6 @@
 .cross-target-static/
 .tmp/
 target/
-Cargo.lock
 docker/cross/private/
 docker/cross/*.local
 docker/samba/data/cache/

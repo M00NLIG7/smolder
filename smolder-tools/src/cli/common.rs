@@ -1,7 +1,8 @@
 //! Shared parsing and execution helpers for CLI binaries.
 
 use std::env;
-use std::io::IsTerminal;
+use std::fmt;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use crossterm::terminal;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use zeroize::Zeroize as _;
 
 use smolder_core::auth::NtlmCredentials;
 #[cfg(feature = "kerberos")]
@@ -53,7 +55,7 @@ pub(super) struct KerberosOptions {
     pub(super) kdc_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct AuthOptions {
     pub(super) mode: AuthMode,
     pub(super) username: String,
@@ -61,6 +63,26 @@ pub(super) struct AuthOptions {
     pub(super) domain: Option<String>,
     pub(super) workstation: Option<String>,
     pub(super) kerberos: KerberosOptions,
+}
+
+impl fmt::Debug for AuthOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthOptions")
+            .field("mode", &self.mode)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("domain", &self.domain)
+            .field("workstation", &self.workstation)
+            .field("kerberos", &self.kerberos)
+            .finish()
+    }
+}
+
+impl Drop for AuthOptions {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
 }
 
 impl AuthOptions {
@@ -103,18 +125,38 @@ impl AuthOptions {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub(super) struct AuthArgAccumulator {
     auth_mode: Option<String>,
     kerberos: bool,
     username: Option<String>,
-    password: Option<String>,
+    password_file: Option<PathBuf>,
+    password_stdin: bool,
     domain: Option<String>,
     workstation: Option<String>,
     target_host: Option<String>,
     target_principal: Option<String>,
     realm: Option<String>,
     kdc_url: Option<String>,
+}
+
+impl fmt::Debug for AuthArgAccumulator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthArgAccumulator")
+            .field("auth_mode", &self.auth_mode)
+            .field("kerberos", &self.kerberos)
+            .field("username", &self.username)
+            .field("password_file", &self.password_file)
+            .field("password_stdin", &self.password_stdin)
+            .field("domain", &self.domain)
+            .field("workstation", &self.workstation)
+            .field("target_host", &self.target_host)
+            .field("target_principal", &self.target_principal)
+            .field("realm", &self.realm)
+            .field("kdc_url", &self.kdc_url)
+            .finish()
+    }
 }
 
 impl AuthArgAccumulator {
@@ -136,8 +178,18 @@ impl AuthArgAccumulator {
             self.username = Some(value.to_string());
             return Ok(true);
         }
-        if let Some(value) = token.strip_prefix("--password=") {
-            self.password = Some(value.to_string());
+        if token.starts_with("--password=") {
+            return Err(
+                "--password is unsafe because process arguments are observable; use --password-stdin or --password-file"
+                    .to_string(),
+            );
+        }
+        if let Some(value) = token.strip_prefix("--password-file=") {
+            self.password_file = Some(PathBuf::from(value));
+            return Ok(true);
+        }
+        if token == "--password-stdin" {
+            self.password_stdin = true;
             return Ok(true);
         }
         if let Some(value) = token.strip_prefix("--domain=") {
@@ -174,8 +226,16 @@ impl AuthArgAccumulator {
                 self.username = Some(next_value(args, index, "--username")?);
                 Ok(true)
             }
-            "--password" => {
-                self.password = Some(next_value(args, index, "--password")?);
+            "--password" => Err(
+                "--password is unsafe because process arguments are observable; use --password-stdin or --password-file"
+                    .to_string(),
+            ),
+            "--password-file" => {
+                self.password_file = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--password-file",
+                )?));
                 Ok(true)
             }
             "--domain" => {
@@ -207,14 +267,28 @@ impl AuthArgAccumulator {
     }
 
     pub(super) fn resolve(self, usage: &str) -> Result<AuthOptions, String> {
+        let kdc_url = self.kdc_url.or_else(|| env_value(&ENV_KERBEROS_KDC_URL));
+        if kdc_url.is_some() {
+            return Err(
+                "custom KDC URLs are not supported by the native Kerberos backends; configure the system Kerberos provider before starting Smolder"
+                    .to_string(),
+            );
+        }
+
         let username = self
             .username
             .or_else(|| env_value(&ENV_USERNAME))
             .ok_or_else(|| missing_env_error("username", &ENV_USERNAME, usage))?;
-        let password = self
-            .password
-            .or_else(|| env_value(&ENV_PASSWORD))
-            .ok_or_else(|| missing_env_error("password", &ENV_PASSWORD, usage))?;
+        if self.password_stdin && self.password_file.is_some() {
+            return Err("use only one of --password-stdin or --password-file".to_string());
+        }
+        let mut password = if self.password_stdin {
+            read_password_stdin()?
+        } else if let Some(path) = self.password_file {
+            read_password_file(&path)?
+        } else {
+            env_value(&ENV_PASSWORD).ok_or_else(|| missing_password_error(&ENV_PASSWORD, usage))?
+        };
 
         let kerberos = KerberosOptions {
             target_host: self
@@ -224,10 +298,16 @@ impl AuthArgAccumulator {
                 .target_principal
                 .or_else(|| env_value(&ENV_KERBEROS_TARGET_PRINCIPAL)),
             realm: self.realm.or_else(|| env_value(&ENV_KERBEROS_REALM)),
-            kdc_url: self.kdc_url.or_else(|| env_value(&ENV_KERBEROS_KDC_URL)),
+            kdc_url: None,
         };
 
-        let mode = resolve_auth_mode(self.auth_mode, self.kerberos, &kerberos)?;
+        let mode = match resolve_auth_mode(self.auth_mode, self.kerberos, &kerberos) {
+            Ok(mode) => mode,
+            Err(error) => {
+                password.zeroize();
+                return Err(error);
+            }
+        };
 
         Ok(AuthOptions {
             mode,
@@ -410,6 +490,118 @@ fn resolve_auth_mode(
     }
 
     Ok(mode)
+}
+
+fn normalize_password(mut password: String, source: &str) -> Result<String, String> {
+    while password.ends_with('\n') || password.ends_with('\r') {
+        password.pop();
+    }
+    if password.is_empty() {
+        password.zeroize();
+        return Err(format!("{source} did not contain a password"));
+    }
+    if password.contains('\0') {
+        password.zeroize();
+        return Err(format!("{source} contained a NUL byte"));
+    }
+    Ok(password)
+}
+
+fn read_password_stdin() -> Result<String, String> {
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(
+            "--password-stdin requires redirected/provided stdin so the password is not echoed"
+                .to_string(),
+        );
+    }
+    let mut password = String::new();
+    stdin
+        .read_to_string(&mut password)
+        .map_err(|error| format!("failed to read password from stdin: {error}"))?;
+    normalize_password(password, "stdin")
+}
+
+fn read_password_file(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "failed to inspect password file {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "password path {} must be a regular, non-symlink file",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "password file {} must not grant group or other permissions",
+                path.display()
+            ));
+        }
+    }
+    let password = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read password file {}: {error}", path.display()))?;
+    normalize_password(password, "password file")
+}
+
+fn missing_password_error(keys: &[&str], usage: &str) -> String {
+    format!(
+        "missing password; use --password-stdin, --password-file, or a configured secret provider: {}\n\n{usage}",
+        keys.join(", ")
+    )
+}
+
+#[cfg(test)]
+pub(super) struct TestPasswordFile {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl TestPasswordFile {
+    pub(super) fn new(password: &str) -> Self {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-passwords");
+        std::fs::create_dir_all(&directory).expect("test password directory should be created");
+        let path = directory.join(format!(
+            "password-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&path)
+            .expect("test password file should be private and unique");
+        file.write_all(password.as_bytes())
+            .expect("test password should be written");
+        Self { path }
+    }
+
+    pub(super) fn argument(&self) -> String {
+        format!("--password-file={}", self.path.display())
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestPasswordFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn missing_env_error(field: &str, keys: &[&str], usage: &str) -> String {
@@ -694,7 +886,8 @@ mod tests {
 
     use super::{
         parse_duration, parse_exec_target, parse_remote_location,
-        parse_remote_location_with_options, remote_unc, ExecTarget, RemoteLocation,
+        parse_remote_location_with_options, remote_unc, AuthArgAccumulator, AuthMode, AuthOptions,
+        ExecTarget, KerberosOptions, RemoteLocation,
     };
 
     #[test]
@@ -745,6 +938,37 @@ mod tests {
             path: String::new(),
         };
         assert_eq!(remote_unc(&root), r"\\server\share");
+    }
+
+    #[test]
+    fn custom_kdc_url_is_rejected_before_reading_credentials() {
+        let mut auth = AuthArgAccumulator::default();
+        let args = vec!["--kdc-url=tcp://dc.example:88".to_owned()];
+        let mut index = 0;
+        auth.parse_flag(&args, &mut index, &args[0])
+            .expect("flag parser should recognize the compatibility option");
+
+        let error = auth
+            .resolve("usage")
+            .expect_err("native backends must not accept a process-global KDC override");
+        assert!(error.contains("custom KDC URLs are not supported"));
+    }
+
+    #[test]
+    fn auth_debug_redacts_password() {
+        const SECRET: &str = "AUDIT-SUPER-SECRET";
+        let options = AuthOptions {
+            mode: AuthMode::Ntlm,
+            username: "alice".to_owned(),
+            password: SECRET.to_owned(),
+            domain: Some("EXAMPLE".to_owned()),
+            workstation: None,
+            kerberos: KerberosOptions::default(),
+        };
+
+        let debug = format!("{options:?}");
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]

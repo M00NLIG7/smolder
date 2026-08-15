@@ -38,10 +38,11 @@ kerberos = ["smolder-core/kerberos"]
 [dependencies]
 bytes = "1"
 crossterm = "0.28"
-rand = "0.8"
+rand = "0.8.7"
 smolder-core = { package = "smolder-smb-core", path = "../smolder-core", version = "0.3.0" }
 smolder-proto = { path = "../smolder-proto", version = "0.3.0" }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt", "sync", "time"] }
+zeroize = "1.8"
 
 [dev-dependencies]
 async-trait = "0.1"

@@ -59,10 +59,11 @@ export SMOLDER_SAMBA_PORT=445
 Then run:
 
 ```bash
-cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --ignored --nocapture
 ```
 
-If `SMOLDER_SAMBA_HOST` is unset, the test exits early and reports that it was skipped.
+Live tests carry `#[ignore]`, so ordinary test runs report them as ignored rather than claiming
+fixture coverage. The explicit command above requires the target environment to be configured.
 
 To run the authenticated tree-connect path, also set:
 
@@ -105,7 +106,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --ignored --nocapture
 ```
 
 Run the NetBIOS facade gate with:
@@ -117,7 +118,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-smb-core --test samba_netbios -- --nocapture
+cargo test -p smolder-smb-core --test samba_netbios -- --ignored --nocapture
 ```
 
 Run the high-level API gates with the same environment:
@@ -129,7 +130,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-smb-core --test samba_high_level -- --nocapture
+cargo test -p smolder --test samba_high_level -- --ignored --nocapture
 ```
 
 Run the CLI smoke tests:
@@ -141,7 +142,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder --test cli_smoke -- --nocapture --test-threads=1
+cargo test -p smolder --test cli_smoke -- --ignored --nocapture --test-threads=1
 ```
 
 You can also drive the CLI manually:

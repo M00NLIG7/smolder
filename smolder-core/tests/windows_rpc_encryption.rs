@@ -7,6 +7,7 @@ use common::{
 };
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn opens_sc_manager_over_encrypted_windows_ipc_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some(config) = WindowsNtlmConfig::from_env() else {

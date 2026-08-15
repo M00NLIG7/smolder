@@ -10,6 +10,7 @@ mod common;
 use common::{samba_lock, SambaNtlmConfig};
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn queries_and_closes_samba_lsarpc_policy_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaNtlmConfig::from_env_with_defaults() else {

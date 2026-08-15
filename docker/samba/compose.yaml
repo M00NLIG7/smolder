@@ -1,6 +1,6 @@
 services:
   samba:
-    image: crazymax/samba:latest
+    image: crazymax/samba@sha256:75f5037770eab774b82f298268305af8a18a01a1daad679f8d2d17c54059c847
     container_name: smolder-samba
     environment:
       TZ: UTC
@@ -13,7 +13,7 @@ services:
       - ./share:/samba/share
       - ./share-encrypted:/samba/share-encrypted
   samba-netbios:
-    image: crazymax/samba:latest
+    image: crazymax/samba@sha256:75f5037770eab774b82f298268305af8a18a01a1daad679f8d2d17c54059c847
     container_name: smolder-samba-netbios
     environment:
       TZ: UTC
@@ -25,7 +25,7 @@ services:
       - ./data-netbios:/data
       - ./share:/samba/share
   samba-global-encryption:
-    image: crazymax/samba:latest
+    image: crazymax/samba@sha256:75f5037770eab774b82f298268305af8a18a01a1daad679f8d2d17c54059c847
     container_name: smolder-samba-global-encryption
     environment:
       TZ: UTC

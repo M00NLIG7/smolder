@@ -5,7 +5,7 @@ use bytes::{BufMut, BytesMut};
 
 use super::create::{FileAttributes, FileId};
 use super::{
-    check_fixed_structure_size, get_u16, get_u32, get_u64, slice_from_offset, utf16le,
+    check_fixed_structure_size, copy_bytes, get_u16, get_u32, get_u64, slice_from_offset, utf16le,
     utf16le_string, HEADER_LEN,
 };
 use crate::smb::ProtocolError;
@@ -116,7 +116,10 @@ impl QueryDirectoryRequest {
         let file_name = if file_name_offset == 0 || file_name_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(body, file_name_offset, file_name_length, "file_name")?.to_vec()
+            copy_bytes(
+                slice_from_offset(body, file_name_offset, file_name_length, "file_name")?,
+                "file_name",
+            )?
         };
 
         Ok(Self {
@@ -194,13 +197,15 @@ impl QueryDirectoryResponse {
         let output_buffer = if output_buffer_offset == 0 || output_buffer_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(
-                body,
-                output_buffer_offset,
-                output_buffer_length,
+            copy_bytes(
+                slice_from_offset(
+                    body,
+                    output_buffer_offset,
+                    output_buffer_length,
+                    "output_buffer",
+                )?,
                 "output_buffer",
             )?
-            .to_vec()
         };
 
         Ok(Self { output_buffer })
@@ -209,6 +214,11 @@ impl QueryDirectoryResponse {
     /// Decodes all returned `FileDirectoryInformation` entries.
     pub fn directory_entries(&self) -> Result<Vec<DirectoryInformationEntry>, ProtocolError> {
         let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(self.output_buffer.len() / 64)
+            .map_err(|_| ProtocolError::SizeLimitExceeded {
+                field: "directory_information_entries",
+            })?;
         let mut cursor = self.output_buffer.as_slice();
 
         while !cursor.is_empty() {
@@ -402,13 +412,15 @@ impl QueryInfoRequest {
         let input_buffer = if input_buffer_offset == 0 || input_buffer_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(
-                body,
-                input_buffer_offset,
-                input_buffer_length,
+            copy_bytes(
+                slice_from_offset(
+                    body,
+                    input_buffer_offset,
+                    input_buffer_length,
+                    "input_buffer",
+                )?,
                 "input_buffer",
             )?
-            .to_vec()
         };
 
         Ok(Self {
@@ -456,13 +468,15 @@ impl QueryInfoResponse {
         let output_buffer = if output_buffer_offset == 0 || output_buffer_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(
-                body,
-                output_buffer_offset,
-                output_buffer_length,
+            copy_bytes(
+                slice_from_offset(
+                    body,
+                    output_buffer_offset,
+                    output_buffer_length,
+                    "output_buffer",
+                )?,
                 "output_buffer",
             )?
-            .to_vec()
         };
 
         Ok(Self { output_buffer })
@@ -681,7 +695,10 @@ impl SetInfoRequest {
         let buffer = if buffer_offset == 0 || buffer_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(body, buffer_offset, buffer_length, "buffer")?.to_vec()
+            copy_bytes(
+                slice_from_offset(body, buffer_offset, buffer_length, "buffer")?,
+                "buffer",
+            )?
         };
 
         Ok(Self {

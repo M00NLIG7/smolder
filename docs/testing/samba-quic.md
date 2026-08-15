@@ -159,7 +159,7 @@ scripts/run-samba-quic-interop.sh
 That runs:
 
 ```bash
-cargo test -p smolder-smb-core --features quic --test samba_quic -- --nocapture
+cargo test -p smolder-smb-core --features quic --test samba_quic -- --ignored --nocapture
 ```
 
 ## Harness Coverage

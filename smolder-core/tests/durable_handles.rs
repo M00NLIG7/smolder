@@ -207,6 +207,7 @@ fn tree_response() -> TreeConnectResponse {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn durable_v2_open_reconnects_with_saved_create_guid() {
     let create_guid = *b"durable-guid-020";
     let initial_file_id = FileId {
@@ -372,6 +373,7 @@ async fn durable_v2_open_reconnects_with_saved_create_guid() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn durable_v1_open_reconnects_with_legacy_contexts_on_smb210() {
     let initial_file_id = FileId {
         persistent: 0x55,
@@ -517,6 +519,7 @@ async fn durable_v1_open_reconnects_with_legacy_contexts_on_smb210() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn resilient_handle_request_uses_resiliency_fsctl() {
     let file_id = FileId {
         persistent: 0xaa,
@@ -604,6 +607,7 @@ async fn resilient_handle_request_uses_resiliency_fsctl() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn durable_v2_open_falls_back_to_requested_state_without_response_context() {
     let create_guid = *b"durable-guid-021";
     let initial_file_id = FileId {
@@ -749,6 +753,7 @@ async fn durable_v2_open_falls_back_to_requested_state_without_response_context(
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn durable_reconnect_with_resiliency_reapplies_saved_timeout() {
     let create_guid = *b"durable-guid-021";
     let initial_file_id = FileId {

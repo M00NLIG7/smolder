@@ -15,10 +15,19 @@ cd "${REPO_ROOT}"
 
 docker compose -f "${COMPOSE_FILE}" up -d samba
 
-docker exec smolder-samba sh -lc \
-  "rpcclient -U '${SMOLDER_SAMBA_USERNAME}%${SMOLDER_SAMBA_PASSWORD}' localhost -c lsaquery"
-docker exec smolder-samba sh -lc \
-  "rpcclient -U '${SMOLDER_SAMBA_USERNAME}%${SMOLDER_SAMBA_PASSWORD}' localhost -c enumdomusers"
+printf '%s' "${SMOLDER_SAMBA_PASSWORD}" | \
+  docker exec -i -e PASSWD_FD=0 smolder-samba \
+    rpcclient -U "${SMOLDER_SAMBA_USERNAME}" localhost -c lsaquery
+printf '%s' "${SMOLDER_SAMBA_PASSWORD}" | \
+  docker exec -i -e PASSWD_FD=0 smolder-samba \
+    rpcclient -U "${SMOLDER_SAMBA_USERNAME}" localhost -c enumdomusers
 
-cargo test -p smolder-smb-core --test samba_lsarpc_interop -- --nocapture
-cargo test -p smolder-smb-core --test samba_samr_standalone_interop -- --nocapture
+password_file="$(mktemp "${TMPDIR:-/tmp}/smolder-samba-password.XXXXXX")"
+trap 'rm -f -- "${password_file}"' EXIT
+chmod 600 "${password_file}"
+printf '%s' "${SMOLDER_SAMBA_PASSWORD}" >"${password_file}"
+export SMOLDER_SAMBA_PASSWORD_FILE="${password_file}"
+unset SMOLDER_SAMBA_PASSWORD
+
+cargo test -p smolder-smb-core --test samba_lsarpc_interop -- --ignored --nocapture
+cargo test -p smolder-smb-core --test samba_samr_standalone_interop -- --ignored --nocapture

@@ -19,7 +19,6 @@
 //! - `SMOLDER_KERBEROS_DOMAIN`
 //! - `SMOLDER_KERBEROS_WORKSTATION`
 //! - `SMOLDER_KERBEROS_REALM`
-//! - `SMOLDER_KERBEROS_KDC_URL`
 //! - `SMOLDER_KERBEROS_TARGET_HOST`
 //! - `SMOLDER_KERBEROS_TARGET_PRINCIPAL`
 
@@ -46,10 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(workstation) = optional_prefixed_env("SMOLDER_KERBEROS", "WORKSTATION") {
         credentials = credentials.with_workstation(workstation);
     }
-    if let Some(kdc_url) = optional_prefixed_env("SMOLDER_KERBEROS", "KDC_URL") {
-        credentials = credentials.with_kdc_url(kdc_url);
-    }
-
     let mut target = KerberosTarget::for_smb_host(target_host.clone());
     if let Some(principal) = optional_prefixed_env("SMOLDER_KERBEROS", "TARGET_PRINCIPAL") {
         target = target.with_principal(principal);

@@ -86,9 +86,14 @@ impl SessionMessage {
             });
         }
 
+        let mut payload = Vec::new();
+        payload
+            .try_reserve_exact(payload_len)
+            .map_err(|_| ProtocolError::SizeLimitExceeded { field: "payload" })?;
+        payload.extend_from_slice(input);
         Ok(Self {
             message_type,
-            payload: input.to_vec(),
+            payload,
         })
     }
 

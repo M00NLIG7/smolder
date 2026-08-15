@@ -68,6 +68,7 @@ async fn authenticated_tree_connection() -> Option<(
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn reopens_durable_handle_after_transport_reconnect_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((config, mut connection_one)) = authenticated_tree_connection().await else {

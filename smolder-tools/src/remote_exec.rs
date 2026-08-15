@@ -288,7 +288,7 @@ impl Default for RemoteExecBuilder {
             server: None,
             port: DEFAULT_PORT,
             auth: None,
-            signing_mode: SigningMode::ENABLED,
+            signing_mode: SigningMode::ENABLED | SigningMode::REQUIRED,
             capabilities: GlobalCapabilities::LARGE_MTU
                 | GlobalCapabilities::LEASING
                 | GlobalCapabilities::ENCRYPTION,
@@ -500,18 +500,6 @@ impl RemoteExecClient {
 
         let scm_handle = scm.open_sc_manager().await?;
         let service_command = build_psexec_interactive_service_command(&request, &command_paths);
-        if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
-            eprintln!(
-                "interactive psexec service={} stdin={} stdout={} stderr={} control={} debug={} command={}",
-                command_paths.service_name,
-                command_paths.stdin_pipe_name(),
-                command_paths.stdout_pipe_name(),
-                command_paths.stderr_pipe_name(),
-                command_paths.control_pipe_name(),
-                command_paths.debug_relative,
-                service_command
-            );
-        }
         let service_handle = match scm
             .create_service(&scm_handle, &command_paths.service_name, &service_command)
             .await
@@ -705,19 +693,6 @@ impl RemoteExecClient {
                     &command_paths,
                 ),
             };
-            if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
-                eprintln!(
-                    "remote exec mode={:?} service={} script={} runner={} stdout={} stderr={} exit={} command={}",
-                    mode,
-                    service_name,
-                    command_paths.script_relative,
-                    command_paths.runner_relative,
-                    command_paths.stdout_relative,
-                    command_paths.stderr_relative,
-                    command_paths.exit_relative,
-                    service_command
-                );
-            }
 
             let scm_handle = scm.open_sc_manager().await?;
             let service_handle = scm
@@ -756,15 +731,12 @@ impl RemoteExecClient {
             let _ = admin.try_remove(&command_paths.stdout_relative).await;
             let _ = admin.try_remove(&command_paths.stderr_relative).await;
             let _ = admin.try_remove(&command_paths.exit_relative).await;
-            let _ = admin.try_remove(&command_paths.debug_relative).await;
             let _ = admin.try_remove(&command_paths.runner_relative).await;
             let _ = admin.try_remove(&command_paths.script_relative).await;
-            if matches!(mode, ExecMode::PsExec) {
-                if self.psexec_service_binary.is_some() {
-                    let _ = admin
-                        .try_remove(&command_paths.service_binary_relative)
-                        .await;
-                }
+            if matches!(mode, ExecMode::PsExec) && self.psexec_service_binary.is_some() {
+                let _ = admin
+                    .try_remove(&command_paths.service_binary_relative)
+                    .await;
             }
         }
 
@@ -927,6 +899,7 @@ mod tests {
         assert!(builder
             .capabilities
             .contains(GlobalCapabilities::ENCRYPTION));
+        assert!(builder.signing_mode.contains(super::SigningMode::REQUIRED));
     }
 
     #[test]

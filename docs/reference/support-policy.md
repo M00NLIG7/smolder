@@ -118,7 +118,11 @@ Not guaranteed:
 
 ## Target Support
 
-### Supported and live-tested
+### Explicit live-fixture support matrix
+
+The lanes below are represented by ignored live tests and dedicated workflows. They count as
+live-validated for a release only when those fixture workflows run and pass; ordinary unit and
+workspace test runs report them as ignored and do not establish live coverage.
 
 - Windows / Tiny11:
   - SMB session/file flows
@@ -158,21 +162,37 @@ Not guaranteed:
 Supported in `0.3.x`:
 
 - NTLMv2 over SPNEGO for SMB `SESSION_SETUP`
+- NTLM Authenticate MIC binding when `MsvAvFlags` requires it
 - session-key derivation feeding SMB signing and SMB3 encryption
 - Windows interop as part of the normal release gates
+
+Raw Type 1/2/3 token diagnostics are absent unless the deliberately dangerous
+`dangerous-ntlm-diagnostics` build feature is enabled and
+`SMOLDER_NTLM_DEBUG=UNSAFE_RAW_TOKENS` is also set at runtime. Those diagnostics must never be
+used with real credentials.
+
+Credentialed constructors require signing and reject guest/null fallback by default. The explicit
+`SecurityPolicy::pandora()` construction path additionally requires SMB 3.1.1 and requires SMB
+encryption unless the physical connection is certificate-authenticated SMB over QUIC. Negotiation
+selections are checked against the immutable client offer and trusted transport identity before any
+session typestate is constructed.
 
 ### Kerberos
 
 Supported in `0.3.x`, but feature-gated:
 
-- enable with `kerberos`
-- default documented backend path is the password-backed `kerberos-sspi` lane
-- Unix ticket-cache and keytab lanes exist behind `kerberos-gssapi`
+- `kerberos` is the target-selecting umbrella: native SSPI on Windows and the
+  internal bounded GSSAPI wrapper on Unix
+- `kerberos-sspi` is a Windows-only password-backed lane
+- `kerberos-gssapi` is a Unix-only password/ticket-cache lane and supports
+  client keytabs outside macOS
 - Kerberos support includes session-key export for SMB signing and encryption
 
 Current constraints:
 
 - `kerberos-gssapi` is not the static-friendly build path
+- native GSSAPI and SSPI backends reject per-operation custom KDC URLs; configure the native
+  provider before process launch rather than mutating process-global Kerberos state
 - backend-specific capability growth should preserve
   `KerberosCredentials` / `KerberosAuthenticator`
 
@@ -187,13 +207,21 @@ Supported in `0.3.x`:
 - SMB over NetBIOS session service
 - SMB over QUIC
 - named pipes over `IPC$`
-- DCE/RPC bind/call transport over named pipes
-- typed `srvsvc` coverage for share enumeration/info plus server/session query
-  operations
+- DCE/RPC bind/call transport over named pipes, including bounded FIRST/LAST fragment reassembly,
+  buffered coalesced PDUs, and call/context correlation
+- typed `srvsvc` coverage for paginated share/session enumeration plus share/server query operations
 - typed `lsarpc` coverage for policy open/query and name lookup operations
-- typed `samr` coverage for domain, user, and alias-member enumeration
+- typed `samr` coverage for paginated domain, user, group, and alias enumeration plus alias members
 - DFS referral resolution
 - durable/resilient reconnect primitives
+- explicit remote-resource maxima for transport frames, authentication tokens/keys, RPC stubs/pages,
+  NDR collections/strings, whole-file helpers, directory enumeration, control records, and credits
+
+Every SMB request has an internal end-to-end deadline. Once a request write can have started, the
+connection remains poisoned until the complete correlated response has been drained and validated.
+Dropping or externally cancelling that future therefore makes the connection non-reusable; callers
+must discard it. Responses are checked for server direction, message/async identity, active
+session/tree identity, credit accounting, and signing/encryption policy before reuse is allowed.
 
 Explicitly not promised yet:
 
@@ -208,12 +236,13 @@ The default build is intended to stay as static-friendly as practical.
 Current rule:
 
 - default build: no Unix GSS/Kerberos native-linking dependency
-- `kerberos`: documented stable Kerberos feature surface
-- `kerberos-gssapi`: explicit native-linking exception for Unix ticket-cache and
-  keytab support
+- `kerberos`: documented target-selecting Kerberos feature surface
+- `kerberos-sspi`: Windows OS-ABI backend; no pure-Rust network sidecar
+- `kerberos-gssapi`: explicit Unix native-linking exception
 
-This means a fully self-contained static story is not guaranteed once
-`kerberos-gssapi` is enabled.
+This means a fully self-contained static Unix story is not guaranteed once
+`kerberos` or `kerberos-gssapi` is enabled. Pandora's static path must either
+use Windows SSPI or leave Unix GSS Kerberos disabled.
 
 ## Release Gates Required By This Policy
 
@@ -221,6 +250,11 @@ The policy is only as strong as the gates behind it.
 
 ### Required before release
 
+- deterministic verification workflow green (MSRV, all features/targets, unit/release/property,
+  docs, extracted packages, and installed cross targets):
+  - [verify.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/verify.yml)
+- locked offline supply-chain checks recorded as described in
+  [release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md)
 - Samba interop workflow green:
   - [interop-samba.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/interop-samba.yml)
 - Windows release gate green:

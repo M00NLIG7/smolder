@@ -61,7 +61,7 @@ until host -t SRV _ldap._tcp.lab.example "${DC_FQDN}" >/dev/null 2>&1; do
     sleep 2
 done
 
-net ads join -U "Administrator%${ADMIN_PASSWORD}"
+printf '%s' "${ADMIN_PASSWORD}" | PASSWD_FD=0 net ads join -U Administrator
 
 winbindd -D
 until wbinfo -t >/dev/null 2>&1; do

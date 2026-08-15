@@ -170,7 +170,7 @@ Baseline SMB session/file path:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test windows_interop -- --nocapture
+cargo test -p smolder-smb-core --test windows_interop -- --ignored --nocapture
 ```
 
 Durable reconnect:
@@ -179,7 +179,7 @@ Durable reconnect:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test windows_reconnect -- --nocapture
+cargo test -p smolder-smb-core --test windows_reconnect -- --ignored --nocapture
 ```
 
 Encrypted file I/O:
@@ -189,7 +189,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-smb-core --test windows_encryption -- --nocapture
+cargo test -p smolder-smb-core --test windows_encryption -- --ignored --nocapture
 ```
 
 Named-pipe interop:
@@ -199,7 +199,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test named_pipe_interop \
-  exchanges_srvsvc_bind_over_windows_named_pipe_when_configured -- --nocapture
+  exchanges_srvsvc_bind_over_windows_named_pipe_when_configured -- --ignored --nocapture
 ```
 
 RPC interop:
@@ -208,7 +208,7 @@ RPC interop:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test rpc_interop -- --nocapture
+cargo test -p smolder-smb-core --test rpc_interop -- --ignored --nocapture
 ```
 
 Encrypted `IPC$` / RPC interop:
@@ -217,7 +217,7 @@ Encrypted `IPC$` / RPC interop:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test windows_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test windows_rpc_encryption -- --ignored --nocapture
 ```
 
 Kerberos over Windows AD member SMB:
@@ -238,7 +238,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --ignored --nocapture
 ```
 
 Encrypted file I/O:
@@ -249,7 +249,7 @@ SMOLDER_SAMBA_PORT=1445 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-smb-core --test samba_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_encryption -- --ignored --nocapture
 ```
 
 Kerberos over Samba AD member SMB:
@@ -266,7 +266,7 @@ SMOLDER_SAMBA_PORT=1446 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 cargo test -p smolder-smb-core --test named_pipe_interop \
-  exchanges_srvsvc_bind_over_samba_named_pipe_when_configured -- --nocapture
+  exchanges_srvsvc_bind_over_samba_named_pipe_when_configured -- --ignored --nocapture
 ```
 
 Encrypted `srvsvc` RPC call:
@@ -276,7 +276,7 @@ SMOLDER_SAMBA_HOST=127.0.0.1 \
 SMOLDER_SAMBA_PORT=1446 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
-cargo test -p smolder-smb-core --test samba_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_rpc_encryption -- --ignored --nocapture
 ```
 
 ## Tools Commands
@@ -290,7 +290,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder --test windows_encryption -- --nocapture
+cargo test -p smolder --test windows_encryption -- --ignored --nocapture
 ```
 
 Reconnect helper:
@@ -299,7 +299,7 @@ Reconnect helper:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder --test windows_reconnect -- --nocapture
+cargo test -p smolder --test windows_reconnect -- --ignored --nocapture
 ```
 
 DFS path resolution:
@@ -309,14 +309,17 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_DFS_ROOT='\\\\127.0.0.1\\your-dfs-root' \
-cargo test -p smolder --test windows_dfs -- --nocapture
+cargo test -p smolder --test windows_dfs -- --ignored --nocapture
 ```
 
 Remote execution smoke checks:
 
 ```bash
-target/debug/smolder smbexec smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
-target/debug/smolder psexec smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
+# Password is supplied on protected stdin, never a process argument.
+printf '%s' "$SMOLDER_WINDOWS_PASSWORD" | target/debug/smolder smbexec \
+  smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password-stdin
+printf '%s' "$SMOLDER_WINDOWS_PASSWORD" | target/debug/smolder psexec \
+  smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password-stdin
 ```
 
 ### Samba
@@ -330,7 +333,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder --test samba_high_level -- --nocapture
+cargo test -p smolder --test samba_high_level -- --ignored --nocapture
 ```
 
 CLI smoke:
@@ -342,7 +345,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder --test cli_smoke -- --nocapture --test-threads=1
+cargo test -p smolder --test cli_smoke -- --ignored --nocapture --test-threads=1
 ```
 
 ## Expected Policy Boundaries

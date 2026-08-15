@@ -1,5 +1,6 @@
 //! NTLMv2 message generation for SMB session setup.
 
+use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitflags::bitflags;
@@ -7,14 +8,14 @@ use hmac::{Hmac, Mac};
 use md4::{Digest as _, Md4};
 use md5::Md5;
 use rand::random;
+use zeroize::{Zeroize, Zeroizing};
 
 use smolder_proto::smb::smb2::utf16le;
 use smolder_proto::smb::smb2::NegotiateResponse;
 
 use super::spnego::{
     encode_mech_type_list, encode_neg_token_init, encode_neg_token_resp,
-    encode_neg_token_resp_ntlm, extract_mech_token, parse_neg_token_resp,
-    NEG_STATE_ACCEPT_COMPLETE, NEG_STATE_REJECT,
+    encode_neg_token_resp_ntlm, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE, NEG_STATE_REJECT,
 };
 use super::{AuthError, AuthProvider, SpnegoMechanism};
 
@@ -24,6 +25,8 @@ const NTLM_MESSAGE_CHALLENGE: u32 = 2;
 const NTLM_MESSAGE_AUTHENTICATE: u32 = 3;
 const WINDOWS_TICK: u64 = 10_000_000;
 const SEC_TO_UNIX_EPOCH: u64 = 11_644_473_600;
+const MSV_AV_FLAGS_MIC_PRESENT: u32 = 0x0000_0002;
+const MAX_NTLM_TARGET_INFO_SIZE: usize = 60 * 1024;
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     struct NegotiateFlags: u32 {
@@ -54,6 +57,7 @@ impl AvId {
     #[cfg(test)]
     const NB_DOMAIN_NAME: Self = Self(0x0002);
     const DNS_COMPUTER_NAME: Self = Self(0x0003);
+    const FLAGS: Self = Self(0x0006);
     #[cfg(test)]
     const DNS_DOMAIN_NAME: Self = Self(0x0004);
     const TIMESTAMP: Self = Self(0x0007);
@@ -88,7 +92,7 @@ struct NegotiateMessage {
     flags: NegotiateFlags,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct AuthenticateMessage {
     lm_challenge_response: Vec<u8>,
     nt_challenge_response: Vec<u8>,
@@ -101,21 +105,40 @@ struct AuthenticateMessage {
     mic: Option<[u8; 16]>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum NtlmState {
     Initial,
     WaitingForChallenge { negotiate_message: Vec<u8> },
     WaitingForCompletion { flags: NegotiateFlags },
+    WaitingForFinalSuccess,
     Complete,
 }
 
 /// Username, password, and optional domain/workstation information for NTLM.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NtlmCredentials {
     username: String,
     password: String,
     domain: String,
     workstation: String,
+}
+
+impl fmt::Debug for NtlmCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NtlmCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("domain", &self.domain)
+            .field("workstation", &self.workstation)
+            .finish()
+    }
+}
+
+impl Drop for NtlmCredentials {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
 }
 
 impl NtlmCredentials {
@@ -145,7 +168,7 @@ impl NtlmCredentials {
 }
 
 /// NTLMv2 authentication provider for SMB `SESSION_SETUP`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NtlmAuthenticator {
     credentials: NtlmCredentials,
     client_challenge: [u8; 8],
@@ -153,6 +176,37 @@ pub struct NtlmAuthenticator {
     state: NtlmState,
     session_key: Option<[u8; 16]>,
     exported_session_key_override: Option<[u8; 16]>,
+}
+
+impl fmt::Debug for NtlmAuthenticator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NtlmAuthenticator")
+            .field("credentials", &self.credentials)
+            .field("state", &ntlm_state_name(&self.state))
+            .field(
+                "session_key",
+                &self.session_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for NtlmAuthenticator {
+    fn drop(&mut self) {
+        self.session_key.zeroize();
+        self.exported_session_key_override.zeroize();
+    }
+}
+
+fn ntlm_state_name(state: &NtlmState) -> &'static str {
+    match state {
+        NtlmState::Initial => "initial",
+        NtlmState::WaitingForChallenge { .. } => "waiting-for-challenge",
+        NtlmState::WaitingForCompletion { .. } => "waiting-for-completion",
+        NtlmState::WaitingForFinalSuccess => "waiting-for-final-success",
+        NtlmState::Complete => "complete",
+    }
 }
 
 impl NtlmAuthenticator {
@@ -221,6 +275,7 @@ impl AuthProvider for NtlmAuthenticator {
             flags: self.negotiate_flags(),
         };
         let negotiate_message = negotiate.encode();
+        #[cfg(feature = "dangerous-ntlm-diagnostics")]
         if ntlm_debug_enabled() {
             eprintln!(
                 "ntlm type1 flags=0x{:08x} len={} token={}",
@@ -248,6 +303,7 @@ impl AuthProvider for NtlmAuthenticator {
             }
             NtlmState::WaitingForCompletion { flags } => {
                 let parsed = parse_neg_token_resp(incoming)?;
+                validate_ntlm_spnego_response(&parsed)?;
                 if matches!(parsed.neg_state, Some(NEG_STATE_REJECT)) {
                     return Err(AuthError::InvalidToken("authentication was rejected"));
                 }
@@ -256,11 +312,16 @@ impl AuthProvider for NtlmAuthenticator {
                     "session key missing during completion",
                 ))?;
                 let mech_list_mic = mech_list_mic(session_key, *flags);
-                self.state = NtlmState::Complete;
+                self.state = NtlmState::WaitingForFinalSuccess;
                 return Ok(encode_neg_token_resp(
                     Some(NEG_STATE_ACCEPT_COMPLETE),
                     None,
                     Some(&mech_list_mic),
+                ));
+            }
+            NtlmState::WaitingForFinalSuccess => {
+                return Err(AuthError::InvalidState(
+                    "server requested another NTLM token after mechanism completion",
                 ));
             }
             NtlmState::Complete => {
@@ -269,8 +330,16 @@ impl AuthProvider for NtlmAuthenticator {
         };
 
         let negotiate_flags = NegotiateMessage::decode(&negotiate_message)?.flags;
-        let challenge_message = extract_mech_token(incoming)?;
+        let parsed = parse_neg_token_resp(incoming)?;
+        validate_ntlm_spnego_response(&parsed)?;
+        if matches!(parsed.neg_state, Some(NEG_STATE_REJECT)) {
+            return Err(AuthError::InvalidToken("authentication was rejected"));
+        }
+        let challenge_message = parsed
+            .response_token
+            .ok_or(AuthError::InvalidToken("SPNEGO response token missing"))?;
         let challenge = ChallengeMessage::decode(&challenge_message)?;
+        #[cfg(feature = "dangerous-ntlm-diagnostics")]
         if ntlm_debug_enabled() {
             eprintln!(
                 "ntlm type2 flags=0x{:08x} challenge={} len={} av_pairs={} token={}",
@@ -283,15 +352,18 @@ impl AuthProvider for NtlmAuthenticator {
         }
         let (authenticate, session_key) = build_authenticate_message(
             &self.credentials,
-            &challenge,
-            negotiate_flags,
-            &negotiate_message,
-            &challenge_message,
-            self.client_challenge,
-            self.timestamp,
-            self.exported_session_key_override,
+            AuthenticateMessageInput {
+                challenge: &challenge,
+                negotiate_flags,
+                negotiate_message: &negotiate_message,
+                challenge_message: &challenge_message,
+                client_challenge: self.client_challenge,
+                fallback_timestamp: self.timestamp,
+                exported_session_key_override: self.exported_session_key_override,
+            },
         )?;
-        let authenticate_message = authenticate.encode();
+        let authenticate_message = authenticate.encode()?;
+        #[cfg(feature = "dangerous-ntlm-diagnostics")]
         if ntlm_debug_enabled() {
             eprintln!(
                 "ntlm type3 flags=0x{:08x} len={} lm_len={} nt_len={} domain_len={} workstation_len={} token={}",
@@ -314,8 +386,13 @@ impl AuthProvider for NtlmAuthenticator {
     }
 
     fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
-        if matches!(self.state, NtlmState::Complete) {
-            return Ok(());
+        if !matches!(
+            self.state,
+            NtlmState::WaitingForCompletion { .. } | NtlmState::WaitingForFinalSuccess
+        ) {
+            return Err(AuthError::InvalidState(
+                "NTLM final token received outside the completion state",
+            ));
         }
 
         if incoming.is_empty() {
@@ -324,8 +401,16 @@ impl AuthProvider for NtlmAuthenticator {
         }
 
         let parsed = parse_neg_token_resp(incoming)?;
-        if matches!(parsed.neg_state, Some(NEG_STATE_REJECT)) {
-            return Err(AuthError::InvalidToken("authentication was rejected"));
+        validate_ntlm_spnego_response(&parsed)?;
+        if parsed.neg_state != Some(NEG_STATE_ACCEPT_COMPLETE) {
+            return Err(AuthError::InvalidToken(
+                "final NTLM SPNEGO token did not accept authentication",
+            ));
+        }
+        if parsed.response_token.is_some() {
+            return Err(AuthError::InvalidToken(
+                "final NTLM SPNEGO token carried an unexpected mechanism token",
+            ));
         }
 
         self.state = NtlmState::Complete;
@@ -335,6 +420,18 @@ impl AuthProvider for NtlmAuthenticator {
     fn session_key(&self) -> Option<&[u8]> {
         self.session_key.as_ref().map(|value| value.as_slice())
     }
+}
+
+fn validate_ntlm_spnego_response(response: &super::spnego::NegTokenResp) -> Result<(), AuthError> {
+    if response
+        .supported_mech
+        .is_some_and(|mechanism| mechanism != SpnegoMechanism::Ntlm)
+    {
+        return Err(AuthError::InvalidToken(
+            "SPNEGO selected a mechanism other than NTLM",
+        ));
+    }
+    Ok(())
 }
 
 impl NegotiateMessage {
@@ -409,7 +506,8 @@ impl ChallengeMessage {
 
     #[cfg(test)]
     fn encode_for_test(&self) -> Vec<u8> {
-        let target_info = encode_target_info(&self.target_info);
+        let target_info = encode_target_info(&self.target_info)
+            .expect("test challenge target info should encode");
         let target_info_len = u16::try_from(target_info.len()).expect("target info too large");
         let target_info_offset = 48u32;
 
@@ -431,25 +529,31 @@ impl ChallengeMessage {
 }
 
 impl AuthenticateMessage {
-    fn encode(&self) -> Vec<u8> {
+    fn encode(&self) -> Result<Vec<u8>, AuthError> {
         let mut offset = 64u32;
         let version = self.version.as_ref();
         if version.is_some() {
-            offset += 8;
+            offset = offset.checked_add(8).ok_or(AuthError::InvalidToken(
+                "authenticate message length overflowed",
+            ))?;
         }
         let mic = self.mic.as_ref();
         if mic.is_some() {
-            offset += 16;
+            offset = offset.checked_add(16).ok_or(AuthError::InvalidToken(
+                "authenticate message length overflowed",
+            ))?;
         }
-        let domain_buffer = next_security_buffer(&mut offset, &self.domain_name);
-        let user_buffer = next_security_buffer(&mut offset, &self.user_name);
-        let workstation_buffer = next_security_buffer(&mut offset, &self.workstation);
-        let lm_buffer = next_security_buffer(&mut offset, &self.lm_challenge_response);
-        let nt_buffer = next_security_buffer(&mut offset, &self.nt_challenge_response);
+        let domain_buffer = next_security_buffer(&mut offset, &self.domain_name)?;
+        let user_buffer = next_security_buffer(&mut offset, &self.user_name)?;
+        let workstation_buffer = next_security_buffer(&mut offset, &self.workstation)?;
+        let lm_buffer = next_security_buffer(&mut offset, &self.lm_challenge_response)?;
+        let nt_buffer = next_security_buffer(&mut offset, &self.nt_challenge_response)?;
         let session_key_buffer =
-            next_security_buffer(&mut offset, &self.encrypted_random_session_key);
+            next_security_buffer(&mut offset, &self.encrypted_random_session_key)?;
 
         let mut out = Vec::new();
+        out.try_reserve_exact(offset as usize)
+            .map_err(|_| AuthError::InvalidToken("authenticate message allocation failed"))?;
         out.extend_from_slice(NTLMSSP_SIGNATURE);
         out.extend_from_slice(&NTLM_MESSAGE_AUTHENTICATE.to_le_bytes());
         for buffer in [
@@ -481,7 +585,7 @@ impl AuthenticateMessage {
         ] {
             out.extend_from_slice(buffer);
         }
-        out
+        Ok(out)
     }
 
     #[cfg(test)]
@@ -522,8 +626,9 @@ impl AuthenticateMessage {
         } else {
             None
         };
-        let mic = if payload_offset >= 88 {
-            Some(read_array::<16>(message, 72)?)
+        let mic_offset = if version.is_some() { 72 } else { 64 };
+        let mic = if payload_offset >= mic_offset + 16 {
+            Some(read_array::<16>(message, mic_offset)?)
         } else {
             None
         };
@@ -542,41 +647,55 @@ impl AuthenticateMessage {
     }
 }
 
-fn build_authenticate_message(
-    credentials: &NtlmCredentials,
-    challenge: &ChallengeMessage,
+struct AuthenticateMessageInput<'a> {
+    challenge: &'a ChallengeMessage,
     negotiate_flags: NegotiateFlags,
-    _negotiate_message: &[u8],
-    _challenge_message: &[u8],
+    negotiate_message: &'a [u8],
+    challenge_message: &'a [u8],
     client_challenge: [u8; 8],
     fallback_timestamp: u64,
     exported_session_key_override: Option<[u8; 16]>,
+}
+
+fn build_authenticate_message(
+    credentials: &NtlmCredentials,
+    input: AuthenticateMessageInput<'_>,
 ) -> Result<(AuthenticateMessage, [u8; 16]), AuthError> {
+    let AuthenticateMessageInput {
+        challenge,
+        negotiate_flags,
+        negotiate_message,
+        challenge_message,
+        client_challenge,
+        fallback_timestamp,
+        exported_session_key_override,
+    } = input;
     let negotiated_flags = authenticate_flags(negotiate_flags, challenge.flags);
-    let target_info = ntlmv2_target_info(&challenge.target_info, fallback_timestamp);
+    let target_info = ntlmv2_target_info(&challenge.target_info, fallback_timestamp)?;
     let timestamp = target_info_timestamp(&target_info).unwrap_or(fallback_timestamp);
 
-    let response_key_nt = ntowfv2(credentials);
+    let response_key_nt = Zeroizing::new(ntowfv2(credentials));
     let nt_response = ntlmv2_response(
         &response_key_nt,
         challenge.server_challenge,
         client_challenge,
         timestamp,
         &target_info,
-    );
-    let key_exchange_key = hmac_md5(&response_key_nt, &nt_response[..16]);
+    )?;
+    let key_exchange_key = Zeroizing::new(hmac_md5(response_key_nt.as_slice(), &nt_response[..16]));
     let (encrypted_random_session_key, session_key) = encrypt_random_session_key(
         negotiated_flags,
-        key_exchange_key,
+        *key_exchange_key,
         exported_session_key_override,
     );
     let lm_challenge_response = lmv2_response(
         &response_key_nt,
         challenge.server_challenge,
         client_challenge,
-    );
+    )?;
 
-    let authenticate = AuthenticateMessage {
+    let include_mic = target_info_requires_mic(&challenge.target_info)?;
+    let mut authenticate = AuthenticateMessage {
         lm_challenge_response,
         nt_challenge_response: nt_response,
         domain_name: utf16le(&credentials.domain),
@@ -585,8 +704,15 @@ fn build_authenticate_message(
         encrypted_random_session_key,
         flags: negotiated_flags,
         version: None,
-        mic: None,
+        mic: include_mic.then_some([0; 16]),
     };
+    if include_mic {
+        let zero_mic_type3 = authenticate.encode()?;
+        authenticate.mic = Some(hmac_md5_concat(
+            &session_key,
+            &[negotiate_message, challenge_message, &zero_mic_type3],
+        ));
+    }
 
     Ok((authenticate, session_key))
 }
@@ -688,14 +814,15 @@ fn seal_key(exported_session_key: [u8; 16], flags: NegotiateFlags) -> [u8; 16] {
 }
 
 fn ntowfv2(credentials: &NtlmCredentials) -> [u8; 16] {
-    let nt_hash = nt_hash(&credentials.password);
+    let nt_hash = Zeroizing::new(nt_hash(&credentials.password));
     let identity = utf16le(&(credentials.username.to_uppercase() + &credentials.domain));
-    hmac_md5(&nt_hash, &identity)
+    hmac_md5(nt_hash.as_slice(), &identity)
 }
 
 fn nt_hash(password: &str) -> [u8; 16] {
     let mut md4 = Md4::new();
-    md4.update(utf16le(password));
+    let encoded_password = Zeroizing::new(utf16le(password));
+    md4.update(encoded_password.as_slice());
     let digest = md4.finalize();
 
     let mut out = [0; 16];
@@ -709,43 +836,89 @@ fn ntlmv2_response(
     client_challenge: [u8; 8],
     timestamp: u64,
     target_info: &[AvPair],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, AuthError> {
+    let encoded_target_info = encode_target_info(target_info)?;
+    let blob_capacity = 28usize
+        .checked_add(encoded_target_info.len())
+        .ok_or(AuthError::InvalidToken("NTLMv2 response length overflowed"))?;
     let mut blob = Vec::new();
+    blob.try_reserve_exact(blob_capacity)
+        .map_err(|_| AuthError::InvalidToken("NTLMv2 response allocation failed"))?;
     blob.extend_from_slice(&0x0000_0101u32.to_le_bytes());
     blob.extend_from_slice(&0u32.to_le_bytes());
     blob.extend_from_slice(&timestamp.to_le_bytes());
     blob.extend_from_slice(&client_challenge);
     blob.extend_from_slice(&0u32.to_le_bytes());
-    blob.extend_from_slice(&encode_target_info(target_info));
+    blob.extend_from_slice(&encoded_target_info);
 
-    let mut proof_input = Vec::with_capacity(8 + blob.len());
+    let proof_capacity = 8usize
+        .checked_add(blob.len())
+        .ok_or(AuthError::InvalidToken("NTLMv2 proof length overflowed"))?;
+    let mut proof_input = Vec::new();
+    proof_input
+        .try_reserve_exact(proof_capacity)
+        .map_err(|_| AuthError::InvalidToken("NTLMv2 proof allocation failed"))?;
     proof_input.extend_from_slice(&server_challenge);
     proof_input.extend_from_slice(&blob);
     let nt_proof = hmac_md5(response_key_nt, &proof_input);
 
-    let mut response = Vec::with_capacity(16 + blob.len());
+    let response_capacity = 16usize
+        .checked_add(blob.len())
+        .ok_or(AuthError::InvalidToken("NTLMv2 response length overflowed"))?;
+    let mut response = Vec::new();
+    response
+        .try_reserve_exact(response_capacity)
+        .map_err(|_| AuthError::InvalidToken("NTLMv2 response allocation failed"))?;
     response.extend_from_slice(&nt_proof);
     response.extend_from_slice(&blob);
-    response
+    Ok(response)
 }
 
 fn lmv2_response(
     response_key_lm: &[u8; 16],
     server_challenge: [u8; 8],
     client_challenge: [u8; 8],
-) -> Vec<u8> {
-    let mut input = Vec::with_capacity(16);
+) -> Result<Vec<u8>, AuthError> {
+    let mut input = Vec::new();
+    input
+        .try_reserve_exact(16)
+        .map_err(|_| AuthError::InvalidToken("LMv2 proof allocation failed"))?;
     input.extend_from_slice(&server_challenge);
     input.extend_from_slice(&client_challenge);
 
-    let mut response = Vec::with_capacity(24);
+    let mut response = Vec::new();
+    response
+        .try_reserve_exact(24)
+        .map_err(|_| AuthError::InvalidToken("LMv2 response allocation failed"))?;
     response.extend_from_slice(&hmac_md5(response_key_lm, &input));
     response.extend_from_slice(&client_challenge);
-    response
+    Ok(response)
 }
 
-fn encode_target_info(target_info: &[AvPair]) -> Vec<u8> {
+fn encode_target_info(target_info: &[AvPair]) -> Result<Vec<u8>, AuthError> {
+    let mut encoded_len = 4usize;
+    for pair in target_info {
+        if pair.value.len() > usize::from(u16::MAX) {
+            return Err(AuthError::InvalidToken(
+                "NTLM target-info AV pair was too large",
+            ));
+        }
+        encoded_len = encoded_len
+            .checked_add(4)
+            .and_then(|length| length.checked_add(pair.value.len()))
+            .ok_or(AuthError::InvalidToken(
+                "NTLM target-info length overflowed",
+            ))?;
+    }
+    if encoded_len > MAX_NTLM_TARGET_INFO_SIZE {
+        return Err(AuthError::InvalidToken(
+            "NTLM target info exceeded the configured maximum",
+        ));
+    }
+
     let mut out = Vec::new();
+    out.try_reserve_exact(encoded_len)
+        .map_err(|_| AuthError::InvalidToken("NTLM target-info allocation failed"))?;
     for pair in target_info {
         out.extend_from_slice(&pair.av_id.0.to_le_bytes());
         out.extend_from_slice(&(pair.value.len() as u16).to_le_bytes());
@@ -753,47 +926,88 @@ fn encode_target_info(target_info: &[AvPair]) -> Vec<u8> {
     }
     out.extend_from_slice(&AvId::EOL.0.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
-    out
+    Ok(out)
 }
 
-fn ntlmv2_target_info(target_info: &[AvPair], fallback_timestamp: u64) -> Vec<AvPair> {
-    let mut output = target_info.to_vec();
+fn ntlmv2_target_info(
+    target_info: &[AvPair],
+    fallback_timestamp: u64,
+) -> Result<Vec<AvPair>, AuthError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(target_info.len().saturating_add(2))
+        .map_err(|_| AuthError::InvalidToken("NTLM target-info allocation failed"))?;
+    for pair in target_info {
+        output.push(AvPair {
+            av_id: pair.av_id,
+            value: copy_ntlm_bytes(&pair.value)?,
+        });
+    }
     if target_info_timestamp(&output).is_none() {
         upsert_av_pair(
             &mut output,
             AvId::TIMESTAMP,
             fallback_timestamp.to_le_bytes().to_vec(),
-        );
+        )?;
     }
     if let Some(dns_host) = output
         .iter()
         .find(|pair| pair.av_id == AvId::DNS_COMPUTER_NAME)
-        .map(|pair| pair.value.clone())
+        .map(|pair| copy_ntlm_bytes(&pair.value))
+        .transpose()?
     {
         let mut target_name = utf16le("cifs/");
+        target_name
+            .try_reserve(dns_host.len())
+            .map_err(|_| AuthError::InvalidToken("NTLM target-name allocation failed"))?;
         target_name.extend_from_slice(&dns_host);
-        upsert_av_pair(&mut output, AvId::TARGET_NAME, target_name);
+        upsert_av_pair(&mut output, AvId::TARGET_NAME, target_name)?;
     }
-    output
+    Ok(output)
 }
 
 fn parse_target_info(bytes: &[u8]) -> Result<Vec<AvPair>, AuthError> {
+    if bytes.len() > MAX_NTLM_TARGET_INFO_SIZE {
+        return Err(AuthError::InvalidToken(
+            "NTLM target info exceeded the configured maximum",
+        ));
+    }
     let mut offset = 0;
     let mut pairs = Vec::new();
 
-    while offset + 4 <= bytes.len() {
+    while bytes.len().saturating_sub(offset) >= 4 {
         let av_id = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
         let len = usize::from(u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]));
         offset += 4;
         if av_id == AvId::EOL.0 {
+            if len != 0 || offset != bytes.len() {
+                return Err(AuthError::InvalidToken(
+                    "target info terminator was malformed or not final",
+                ));
+            }
             return Ok(pairs);
         }
-        if offset + len > bytes.len() {
+        if pairs.iter().any(|pair: &AvPair| pair.av_id.0 == av_id) {
+            return Err(AuthError::InvalidToken(
+                "target info contained a duplicate AV identifier",
+            ));
+        }
+        let end = offset
+            .checked_add(len)
+            .ok_or(AuthError::InvalidToken("target info length overflowed"))?;
+        if end > bytes.len() {
             return Err(AuthError::InvalidToken("truncated target info"));
         }
-        let value = bytes[offset..offset + len].to_vec();
-        offset += len;
+        let mut value = Vec::new();
+        value
+            .try_reserve_exact(len)
+            .map_err(|_| AuthError::InvalidToken("target info allocation failed"))?;
+        value.extend_from_slice(&bytes[offset..end]);
+        offset = end;
 
+        pairs
+            .try_reserve(1)
+            .map_err(|_| AuthError::InvalidToken("target info allocation failed"))?;
         pairs.push(AvPair {
             av_id: AvId(av_id),
             value,
@@ -803,12 +1017,41 @@ fn parse_target_info(bytes: &[u8]) -> Result<Vec<AvPair>, AuthError> {
     Err(AuthError::InvalidToken("target info missing terminator"))
 }
 
-fn upsert_av_pair(target_info: &mut Vec<AvPair>, av_id: AvId, value: Vec<u8>) {
+fn upsert_av_pair(
+    target_info: &mut Vec<AvPair>,
+    av_id: AvId,
+    value: Vec<u8>,
+) -> Result<(), AuthError> {
     if let Some(pair) = target_info.iter_mut().find(|pair| pair.av_id == av_id) {
         pair.value = value;
-        return;
+        return Ok(());
     }
+    target_info
+        .try_reserve(1)
+        .map_err(|_| AuthError::InvalidToken("NTLM target-info allocation failed"))?;
     target_info.push(AvPair { av_id, value });
+    Ok(())
+}
+
+fn copy_ntlm_bytes(bytes: &[u8]) -> Result<Vec<u8>, AuthError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| AuthError::InvalidToken("NTLM token allocation failed"))?;
+    output.extend_from_slice(bytes);
+    Ok(output)
+}
+
+fn target_info_requires_mic(target_info: &[AvPair]) -> Result<bool, AuthError> {
+    let Some(flags) = target_info.iter().find(|pair| pair.av_id == AvId::FLAGS) else {
+        return Ok(false);
+    };
+    let bytes: [u8; 4] = flags
+        .value
+        .as_slice()
+        .try_into()
+        .map_err(|_| AuthError::InvalidToken("MsvAvFlags must contain one u32"))?;
+    Ok(u32::from_le_bytes(bytes) & MSV_AV_FLAGS_MIC_PRESENT != 0)
 }
 
 fn target_info_timestamp(target_info: &[AvPair]) -> Option<u64> {
@@ -829,13 +1072,19 @@ fn target_info_timestamp(target_info: &[AvPair]) -> Option<u64> {
         })
 }
 
-fn next_security_buffer(offset: &mut u32, buffer: &[u8]) -> SecurityBuffer {
+fn next_security_buffer(offset: &mut u32, buffer: &[u8]) -> Result<SecurityBuffer, AuthError> {
+    let len = u16::try_from(buffer.len())
+        .map_err(|_| AuthError::InvalidToken("NTLM security buffer exceeded u16"))?;
     let current = SecurityBuffer {
-        len: u16::try_from(buffer.len()).expect("buffer length overflow"),
+        len,
         offset: *offset,
     };
-    *offset += u32::try_from(buffer.len()).expect("buffer length overflow");
-    current
+    *offset = offset
+        .checked_add(u32::from(len))
+        .ok_or(AuthError::InvalidToken(
+            "NTLM security buffer offset overflowed",
+        ))?;
+    Ok(current)
 }
 
 fn read_security_buffer(message: &[u8], offset: usize) -> Result<Option<&[u8]>, AuthError> {
@@ -845,12 +1094,15 @@ fn read_security_buffer(message: &[u8], offset: usize) -> Result<Option<&[u8]>, 
     if len == 0 {
         return Ok(None);
     }
-    if data_offset + len > message.len() {
+    let end = data_offset
+        .checked_add(len)
+        .ok_or(AuthError::InvalidToken("security buffer offset overflowed"))?;
+    if end > message.len() {
         return Err(AuthError::InvalidToken(
             "security buffer points past message",
         ));
     }
-    Ok(Some(&message[data_offset..data_offset + len]))
+    Ok(Some(&message[data_offset..end]))
 }
 
 fn read_u16(message: &[u8], offset: usize) -> Result<u16, AuthError> {
@@ -943,10 +1195,12 @@ fn current_windows_timestamp() -> u64 {
         + u64::from(duration.subsec_nanos()) / 100
 }
 
+#[cfg(feature = "dangerous-ntlm-diagnostics")]
 fn ntlm_debug_enabled() -> bool {
-    std::env::var_os("SMOLDER_NTLM_DEBUG").is_some()
+    std::env::var("SMOLDER_NTLM_DEBUG").as_deref() == Ok("UNSAFE_RAW_TOKENS")
 }
 
+#[cfg(feature = "dangerous-ntlm-diagnostics")]
 fn av_pairs_debug(target_info: &[AvPair]) -> String {
     target_info
         .iter()
@@ -955,6 +1209,7 @@ fn av_pairs_debug(target_info: &[AvPair]) -> String {
         .join(",")
 }
 
+#[cfg(any(test, feature = "dangerous-ntlm-diagnostics"))]
 fn hex_bytes(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -964,6 +1219,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
+#[cfg(any(test, feature = "dangerous-ntlm-diagnostics"))]
 fn nibble_to_hex(value: u8) -> char {
     match value {
         0..=9 => char::from(b'0' + value),
@@ -977,15 +1233,31 @@ mod tests {
     use smolder_proto::smb::smb2::{Dialect, GlobalCapabilities, NegotiateResponse, SigningMode};
 
     use super::super::spnego::{
-        encode_neg_token_resp_ntlm, extract_mech_token, parse_neg_token_init, parse_neg_token_resp,
-        NEG_STATE_ACCEPT_COMPLETE,
+        encode_neg_token_resp, encode_neg_token_resp_ntlm, extract_mech_token,
+        parse_neg_token_init, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE, NEG_STATE_REJECT,
     };
     use super::{
-        current_windows_timestamp, hex_bytes, nt_hash, parse_target_info, target_info_timestamp,
-        AuthProvider, AuthenticateMessage, AvId, AvPair, ChallengeMessage, NegotiateFlags,
-        NegotiateMessage, NtlmAuthenticator, NtlmCredentials,
+        build_authenticate_message, current_windows_timestamp, hex_bytes, nt_hash,
+        parse_target_info, target_info_timestamp, AuthProvider, AuthenticateMessage,
+        AuthenticateMessageInput, AvId, AvPair, ChallengeMessage, NegotiateFlags, NegotiateMessage,
+        NtlmAuthenticator, NtlmCredentials, MSV_AV_FLAGS_MIC_PRESENT,
     };
-    use crate::auth::SpnegoMechanism;
+    use crate::auth::{AuthError, SpnegoMechanism};
+
+    #[test]
+    fn credential_and_authenticator_debug_redact_passwords_and_keys() {
+        const SECRET: &str = "AUDIT-SUPER-SECRET";
+        let credentials = NtlmCredentials::new("alice", SECRET)
+            .with_domain("EXAMPLE")
+            .with_workstation("CLIENT1");
+        let credential_debug = format!("{credentials:?}");
+        assert!(!credential_debug.contains(SECRET));
+        assert!(credential_debug.contains("<redacted>"));
+
+        let authenticator_debug = format!("{:?}", NtlmAuthenticator::new(credentials));
+        assert!(!authenticator_debug.contains(SECRET));
+        assert!(authenticator_debug.contains("<redacted>"));
+    }
 
     #[test]
     fn nt_hash_matches_known_password_vector() {
@@ -1192,6 +1464,86 @@ mod tests {
     }
 
     #[test]
+    fn target_info_rejects_duplicate_mic_flags_and_trailing_terminator_data() {
+        let duplicate_flags = [
+            AvId::FLAGS.0.to_le_bytes().as_slice(),
+            4_u16.to_le_bytes().as_slice(),
+            MSV_AV_FLAGS_MIC_PRESENT.to_le_bytes().as_slice(),
+            AvId::FLAGS.0.to_le_bytes().as_slice(),
+            4_u16.to_le_bytes().as_slice(),
+            0_u32.to_le_bytes().as_slice(),
+            AvId::EOL.0.to_le_bytes().as_slice(),
+            0_u16.to_le_bytes().as_slice(),
+        ]
+        .concat();
+        assert!(parse_target_info(&duplicate_flags).is_err());
+
+        let trailing = [
+            AvId::EOL.0.to_le_bytes().as_slice(),
+            0_u16.to_le_bytes().as_slice(),
+            &[0_u8; 4],
+        ]
+        .concat();
+        assert!(parse_target_info(&trailing).is_err());
+    }
+
+    #[test]
+    fn authenticate_mic_binds_exact_type1_type2_and_zero_mic_type3() {
+        let credentials = NtlmCredentials::new("alice", "password").with_domain("DOMAIN");
+        let negotiate = NegotiateMessage {
+            flags: NegotiateFlags::UNICODE
+                | NegotiateFlags::REQUEST_TARGET
+                | NegotiateFlags::SIGN
+                | NegotiateFlags::SEAL
+                | NegotiateFlags::NTLM
+                | NegotiateFlags::ALWAYS_SIGN
+                | NegotiateFlags::EXTENDED_SESSIONSECURITY
+                | NegotiateFlags::TARGET_INFO
+                | NegotiateFlags::_128
+                | NegotiateFlags::KEY_EXCH
+                | NegotiateFlags::_56,
+        };
+        let negotiate_bytes = negotiate.encode();
+        let challenge = ChallengeMessage {
+            flags: negotiate.flags,
+            server_challenge: *b"SRVCHALL",
+            target_info: vec![
+                AvPair {
+                    av_id: AvId::FLAGS,
+                    value: MSV_AV_FLAGS_MIC_PRESENT.to_le_bytes().to_vec(),
+                },
+                AvPair {
+                    av_id: AvId::TIMESTAMP,
+                    value: 123_456u64.to_le_bytes().to_vec(),
+                },
+            ],
+        };
+        let challenge_bytes = challenge.encode_for_test();
+        let (authenticate, session_key) = build_authenticate_message(
+            &credentials,
+            AuthenticateMessageInput {
+                challenge: &challenge,
+                negotiate_flags: negotiate.flags,
+                negotiate_message: &negotiate_bytes,
+                challenge_message: &challenge_bytes,
+                client_challenge: *b"CLICHALL",
+                fallback_timestamp: 123_456,
+                exported_session_key_override: Some([0x55; 16]),
+            },
+        )
+        .expect("MIC-bearing authenticate message should build");
+
+        assert_eq!(session_key, [0x55; 16]);
+        assert_eq!(
+            hex_bytes(&authenticate.mic.expect("MIC should be present")),
+            "cdf8689a90083d11b6225b003b8fa26f"
+        );
+        let encoded = authenticate.encode().expect("type3 message should encode");
+        let decoded = AuthenticateMessage::decode(&encoded).expect("type3 should decode");
+        assert_eq!(decoded.mic, authenticate.mic);
+    }
+
+    #[test]
     fn authenticator_matches_impacket_on_windows_key_exchange_challenge() {
         let negotiate = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
@@ -1297,6 +1649,7 @@ mod tests {
             .expect("challenge response should build");
 
         let final_spnego = vec![0xa1, 0x07, 0x30, 0x05, 0xa0, 0x03, 0x0a, 0x01, 0x00];
+        let mut rejecting_auth = auth.clone();
         let final_token = auth
             .next_token(&final_spnego)
             .expect("final leg should be acknowledged");
@@ -1305,6 +1658,17 @@ mod tests {
         assert_eq!(parsed.neg_state, Some(NEG_STATE_ACCEPT_COMPLETE));
         assert_eq!(parsed.response_token, None);
         assert_eq!(parsed.mech_list_mic.as_ref().map(Vec::len), Some(16));
+        auth.finish(&[])
+            .expect("empty final SMB success token should complete NTLM");
+
+        rejecting_auth
+            .next_token(&final_spnego)
+            .expect("comparison flow should reach final success state");
+        let rejection = encode_neg_token_resp(Some(NEG_STATE_REJECT), None, None);
+        let error = rejecting_auth
+            .finish(&rejection)
+            .expect_err("a final SPNEGO reject token must fail authentication");
+        assert!(matches!(error, AuthError::InvalidToken(_)));
     }
 
     #[test]

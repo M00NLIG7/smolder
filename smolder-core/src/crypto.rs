@@ -1,5 +1,7 @@
 //! SMB cryptographic key-derivation helpers.
 
+use std::fmt;
+
 use aes::{Aes128, Aes256};
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce as GcmNonce};
@@ -11,6 +13,7 @@ use rand::random;
 use sha2::Sha256;
 use smolder_proto::smb::smb2::{CipherId, Dialect};
 use smolder_proto::smb::transform::{TransformHeader, TransformValue};
+use zeroize::Zeroize;
 
 use crate::error::CoreError;
 
@@ -18,7 +21,7 @@ type Aes128Ccm = Ccm<Aes128, U16, U11>;
 type Aes256Ccm = Ccm<Aes256, U16, U11>;
 
 /// Session encryption keys derived from the authenticated SMB session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncryptionKeys {
     /// The negotiated SMB cipher.
     pub cipher: CipherId,
@@ -29,7 +32,7 @@ pub struct EncryptionKeys {
 }
 
 /// Runtime SMB 3.x sealing state for one authenticated session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncryptionState {
     /// The negotiated dialect.
     pub dialect: Dialect,
@@ -41,15 +44,52 @@ pub struct EncryptionState {
     pub decrypting_key: Vec<u8>,
 }
 
+impl fmt::Debug for EncryptionKeys {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncryptionKeys")
+            .field("cipher", &self.cipher)
+            .field("encrypting_key", &"<redacted>")
+            .field("decrypting_key", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for EncryptionKeys {
+    fn drop(&mut self) {
+        self.encrypting_key.zeroize();
+        self.decrypting_key.zeroize();
+    }
+}
+
+impl fmt::Debug for EncryptionState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncryptionState")
+            .field("dialect", &self.dialect)
+            .field("cipher", &self.cipher)
+            .field("encrypting_key", &"<redacted>")
+            .field("decrypting_key", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for EncryptionState {
+    fn drop(&mut self) {
+        self.encrypting_key.zeroize();
+        self.decrypting_key.zeroize();
+    }
+}
+
 impl EncryptionState {
     /// Creates a runtime encryption state from derived session keys.
     #[must_use]
-    pub fn new(dialect: Dialect, keys: EncryptionKeys) -> Self {
+    pub fn new(dialect: Dialect, mut keys: EncryptionKeys) -> Self {
         Self {
             dialect,
             cipher: keys.cipher,
-            encrypting_key: keys.encrypting_key,
-            decrypting_key: keys.decrypting_key,
+            encrypting_key: std::mem::take(&mut keys.encrypting_key),
+            decrypting_key: std::mem::take(&mut keys.decrypting_key),
         }
     }
 
@@ -73,8 +113,17 @@ impl EncryptionState {
                 "SMB transform header used an unexpected flags or cipher value",
             ));
         }
+        let original_size = usize::try_from(message.original_message_size).map_err(|_| {
+            CoreError::InvalidResponse("SMB transform original size exceeded usize")
+        })?;
+        if original_size != message.encrypted_message.len() {
+            return Err(CoreError::InvalidResponse(
+                "SMB transform header original size did not match the encrypted message",
+            ));
+        }
         let aad = transform_aad(message);
-        let mut plaintext = message.encrypted_message.clone();
+        let mut plaintext =
+            fallible_copy(&message.encrypted_message, "decrypted SMB message buffer")?;
         match self.cipher {
             CipherId::Aes128Ccm => decrypt_aes128_ccm(
                 &self.decrypting_key,
@@ -105,11 +154,6 @@ impl EncryptionState {
                 &message.signature,
             )?,
         }
-        if plaintext.len() != message.original_message_size as usize {
-            return Err(CoreError::InvalidResponse(
-                "SMB transform header original size did not match the decrypted message",
-            ));
-        }
         Ok(plaintext)
     }
 
@@ -126,7 +170,7 @@ impl EncryptionState {
                 .map_err(|_| CoreError::InvalidInput("SMB message too large to encrypt"))?,
             flags_or_algorithm: expected_transform_value(self.dialect, self.cipher),
             session_id,
-            encrypted_message: message.to_vec(),
+            encrypted_message: fallible_copy(message, "encrypted SMB message buffer")?,
         };
         let aad = transform_aad(&transform);
         let signature = match self.cipher {
@@ -219,6 +263,15 @@ pub fn derive_encryption_keys(
     })
 }
 
+fn fallible_copy(bytes: &[u8], resource: &'static str) -> Result<Vec<u8>, CoreError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| CoreError::AllocationFailed(resource))?;
+    output.extend_from_slice(bytes);
+    Ok(output)
+}
+
 fn cipher_key_len(cipher: CipherId) -> usize {
     match cipher {
         CipherId::Aes128Ccm | CipherId::Aes128Gcm => 16,
@@ -260,7 +313,7 @@ fn encrypt_aes128_ccm(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
 ) -> Result<[u8; 16], CoreError> {
     let cipher = Aes128Ccm::new_from_slice(key)
         .map_err(|_| CoreError::InvalidInput("invalid SMB CCM encryption key"))?;
@@ -276,7 +329,7 @@ fn encrypt_aes256_ccm(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
 ) -> Result<[u8; 16], CoreError> {
     let cipher = Aes256Ccm::new_from_slice(key)
         .map_err(|_| CoreError::InvalidInput("invalid SMB CCM encryption key"))?;
@@ -292,7 +345,7 @@ fn decrypt_aes128_ccm(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
     signature: &[u8; 16],
 ) -> Result<(), CoreError> {
     let cipher = Aes128Ccm::new_from_slice(key)
@@ -311,7 +364,7 @@ fn decrypt_aes256_ccm(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
     signature: &[u8; 16],
 ) -> Result<(), CoreError> {
     let cipher = Aes256Ccm::new_from_slice(key)
@@ -330,7 +383,7 @@ fn encrypt_aes128_gcm(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
 ) -> Result<[u8; 16], CoreError> {
     encrypt_gcm::<Aes128Gcm>(key, nonce, aad, payload)
 }
@@ -339,7 +392,7 @@ fn encrypt_aes256_gcm(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
 ) -> Result<[u8; 16], CoreError> {
     encrypt_gcm::<Aes256Gcm>(key, nonce, aad, payload)
 }
@@ -348,7 +401,7 @@ fn decrypt_aes128_gcm(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
     signature: &[u8; 16],
 ) -> Result<(), CoreError> {
     decrypt_gcm::<Aes128Gcm>(key, nonce, aad, payload, signature)
@@ -358,7 +411,7 @@ fn decrypt_aes256_gcm(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
     signature: &[u8; 16],
 ) -> Result<(), CoreError> {
     decrypt_gcm::<Aes256Gcm>(key, nonce, aad, payload, signature)
@@ -368,7 +421,7 @@ fn encrypt_gcm<Cipher>(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
 ) -> Result<[u8; 16], CoreError>
 where
     Cipher: AeadInPlace + KeyInit,
@@ -387,7 +440,7 @@ fn decrypt_gcm<Cipher>(
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
-    payload: &mut Vec<u8>,
+    payload: &mut [u8],
     signature: &[u8; 16],
 ) -> Result<(), CoreError>
 where
@@ -467,6 +520,10 @@ mod tests {
         assert_eq!(
             hex(&keys.decrypting_key),
             "95d8b55c852cd25349994b3842fa4105"
+        );
+        assert_eq!(
+            format!("{keys:?}"),
+            "EncryptionKeys { cipher: Aes128Ccm, encrypting_key: \"<redacted>\", decrypting_key: \"<redacted>\" }"
         );
     }
 
@@ -638,6 +695,12 @@ mod tests {
     }
 
     fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        use std::fmt::Write as _;
+
+        let mut encoded = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        encoded
     }
 }

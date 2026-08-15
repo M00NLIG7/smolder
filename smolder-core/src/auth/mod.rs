@@ -1,12 +1,16 @@
 //! Authentication providers and protocol helpers.
 
-#[cfg(feature = "kerberos-api")]
+#[cfg(all(unix, feature = "kerberos-gssapi"))]
+#[allow(unsafe_code)]
+mod kenobi_unix;
+#[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
 mod kerberos;
 #[cfg(all(unix, feature = "kerberos-gssapi"))]
 mod kerberos_gssapi;
-#[cfg(feature = "kerberos-api")]
+#[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
 mod kerberos_spn;
-#[cfg(feature = "kerberos-sspi")]
+#[cfg(all(windows, feature = "kerberos-sspi"))]
+#[allow(unsafe_code)]
 mod kerberos_sspi;
 mod ntlm;
 mod ntlm_rpc;
@@ -16,18 +20,26 @@ mod spnego;
 use smolder_proto::smb::smb2::NegotiateResponse;
 use thiserror::Error;
 
-#[cfg(feature = "kerberos-api")]
+#[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
 #[cfg_attr(
     docsrs,
-    doc(cfg(any(feature = "kerberos", feature = "kerberos-gssapi")))
+    doc(cfg(any(
+        feature = "kerberos",
+        feature = "kerberos-sspi",
+        feature = "kerberos-gssapi"
+    )))
 )]
 pub use kerberos::{
     KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind, KerberosCredentials,
 };
-#[cfg(feature = "kerberos-api")]
+#[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
 #[cfg_attr(
     docsrs,
-    doc(cfg(any(feature = "kerberos", feature = "kerberos-gssapi")))
+    doc(cfg(any(
+        feature = "kerberos",
+        feature = "kerberos-sspi",
+        feature = "kerberos-gssapi"
+    )))
 )]
 pub use kerberos_spn::KerberosTarget;
 pub use ntlm::{NtlmAuthenticator, NtlmCredentials};
@@ -35,11 +47,13 @@ pub use ntlm_rpc::{NtlmRpcPacketIntegrity, NtlmSessionSecurity};
 pub(crate) use ntlm_rpc_bind::NtlmRpcBindHandshake;
 
 #[cfg(all(
-    feature = "kerberos-api",
-    not(feature = "kerberos-sspi"),
-    not(all(unix, feature = "kerberos-gssapi"))
+    any(feature = "kerberos-sspi", feature = "kerberos-gssapi"),
+    not(any(
+        all(windows, feature = "kerberos-sspi"),
+        all(unix, feature = "kerberos-gssapi")
+    ))
 ))]
-compile_error!("kerberos-api requires either kerberos-sspi or kerberos-gssapi on Unix");
+compile_error!("Kerberos requires kerberos-sspi on Windows or kerberos-gssapi on Unix");
 
 /// SPNEGO mechanism identifiers supported by Smolder authentication helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,8 +87,17 @@ pub trait AuthProvider {
     fn next_token(&mut self, incoming: &[u8]) -> Result<Vec<u8>, AuthError>;
 
     /// Validates any final token returned by the server once authentication succeeds.
-    fn finish(&mut self, _incoming: &[u8]) -> Result<(), AuthError> {
-        Ok(())
+    ///
+    /// The conservative default accepts only an empty final token. Providers whose mechanism can
+    /// carry a final server token must override this method and validate that token explicitly.
+    fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
+        if incoming.is_empty() {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidToken(
+                "authentication provider did not validate the final server token",
+            ))
+        }
     }
 
     /// Returns the exported session key, if the mechanism established one.

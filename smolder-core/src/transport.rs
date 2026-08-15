@@ -10,10 +10,12 @@ use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(feature = "quic")]
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "quic")]
 use tokio::net::lookup_host;
 use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::time::{timeout, timeout_at, Instant};
 
 #[cfg(feature = "quic")]
 use quinn::{
@@ -27,6 +29,8 @@ use rustls::RootCertStore;
 
 const NETBIOS_WILDCARD_SERVER_NAME: &str = "*SMBSERVER";
 const NETBIOS_CALLING_NAME: &str = "SMOLDER";
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_TRANSPORT_MESSAGE: usize = 16 * 1024 * 1024;
 
 /// The network transport protocol used to carry SMB session traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +41,64 @@ pub enum TransportProtocol {
     Netbios,
     /// SMB over QUIC, typically on port `443`.
     Quic,
+}
+
+/// Trusted properties reported by the concrete physical transport.
+///
+/// Custom transports are unauthenticated by default. Only the built-in QUIC transport reports
+/// authenticated peer security after certificate and server-name validation succeeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportIdentity {
+    protocol: Option<TransportProtocol>,
+    authenticated_peer: bool,
+}
+
+impl TransportIdentity {
+    /// Returns an identity for a custom transport with no authenticated peer claim.
+    #[must_use]
+    pub const fn untrusted() -> Self {
+        Self {
+            protocol: None,
+            authenticated_peer: false,
+        }
+    }
+
+    /// Returns an unauthenticated identity for a known transport protocol.
+    #[must_use]
+    pub const fn unauthenticated(protocol: TransportProtocol) -> Self {
+        Self {
+            protocol: Some(protocol),
+            authenticated_peer: false,
+        }
+    }
+
+    /// Returns the authenticated identity reserved for the built-in QUIC transport.
+    #[cfg(any(test, feature = "quic"))]
+    #[must_use]
+    pub(crate) const fn authenticated_quic() -> Self {
+        Self {
+            protocol: Some(TransportProtocol::Quic),
+            authenticated_peer: true,
+        }
+    }
+
+    /// Returns the concrete protocol when the transport can attest it.
+    #[must_use]
+    pub const fn protocol(self) -> Option<TransportProtocol> {
+        self.protocol
+    }
+
+    /// Returns whether this is a certificate-authenticated SMB-over-QUIC transport.
+    #[must_use]
+    pub const fn is_authenticated_quic(self) -> bool {
+        matches!(self.protocol, Some(TransportProtocol::Quic)) && self.authenticated_peer
+    }
+}
+
+impl Default for TransportIdentity {
+    fn default() -> Self {
+        Self::untrusted()
+    }
 }
 
 /// An SMB transport target including the server identity, port, and protocol.
@@ -151,6 +213,11 @@ pub trait Transport {
 
     /// Reads a fully framed RFC1002 session message.
     async fn recv(&mut self) -> std::io::Result<Vec<u8>>;
+
+    /// Returns transport properties established by the concrete physical connection.
+    fn transport_identity(&self) -> TransportIdentity {
+        TransportIdentity::untrusted()
+    }
 }
 
 /// Abstracts raw SMB message transport independent of RFC1002 framing.
@@ -165,6 +232,11 @@ pub trait SmbTransport {
 
     /// Reads a raw SMB message or transform payload.
     async fn recv_message(&mut self) -> std::io::Result<Vec<u8>>;
+
+    /// Returns transport properties established by the concrete physical connection.
+    fn transport_identity(&self) -> TransportIdentity {
+        TransportIdentity::untrusted()
+    }
 }
 
 #[async_trait]
@@ -195,6 +267,10 @@ where
         }
         Ok(message.payload)
     }
+
+    fn transport_identity(&self) -> TransportIdentity {
+        Transport::transport_identity(self)
+    }
 }
 
 /// `tokio` TCP transport for SMB over port 445.
@@ -202,6 +278,7 @@ where
 pub struct TokioTcpTransport {
     stream: TcpStream,
     mode: TcpTransportMode,
+    max_message_size: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,20 +288,41 @@ enum TcpTransportMode {
 }
 
 impl TokioTcpTransport {
-    /// Connects to an SMB endpoint.
+    /// Connects to an SMB endpoint using the default bounded deadline.
     pub async fn connect<A>(addr: A) -> std::io::Result<Self>
     where
         A: ToSocketAddrs,
     {
-        let stream = TcpStream::connect(addr).await?;
+        Self::connect_with_timeout(addr, DEFAULT_CONNECT_TIMEOUT).await
+    }
+
+    /// Connects to an SMB endpoint with an explicit deadline.
+    pub async fn connect_with_timeout<A>(addr: A, deadline: Duration) -> std::io::Result<Self>
+    where
+        A: ToSocketAddrs,
+    {
+        let stream = timeout(deadline, TcpStream::connect(addr))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "SMB TCP connect timed out")
+            })??;
         Ok(Self {
             stream,
             mode: TcpTransportMode::DirectTcp,
+            max_message_size: DEFAULT_MAX_TRANSPORT_MESSAGE,
         })
     }
 
     /// Connects to an SMB endpoint over NetBIOS session service.
     pub async fn connect_netbios(target: &TransportTarget) -> std::io::Result<Self> {
+        Self::connect_netbios_with_timeout(target, DEFAULT_CONNECT_TIMEOUT).await
+    }
+
+    /// Connects over NetBIOS session service with an explicit deadline.
+    pub async fn connect_netbios_with_timeout(
+        target: &TransportTarget,
+        deadline: Duration,
+    ) -> std::io::Result<Self> {
         if target.protocol() != TransportProtocol::Netbios {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -232,7 +330,23 @@ impl TokioTcpTransport {
             ));
         }
 
-        let mut stream = TcpStream::connect((target.connect_host(), target.port())).await?;
+        let deadline = Instant::now().checked_add(deadline).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SMB NetBIOS connect deadline overflowed",
+            )
+        })?;
+        let mut stream = timeout_at(
+            deadline,
+            TcpStream::connect((target.connect_host(), target.port())),
+        )
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "SMB NetBIOS connect timed out",
+            )
+        })??;
         let request = SessionMessage::session_request(
             default_netbios_called_name(target.server()),
             NETBIOS_CALLING_NAME,
@@ -241,10 +355,27 @@ impl TokioTcpTransport {
         .map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
         })?;
-        stream.write_all(&request).await?;
+        timeout_at(deadline, stream.write_all(&request))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "SMB NetBIOS session request timed out",
+                )
+            })??;
 
         loop {
-            let (message_type, payload) = read_netbios_packet(&mut stream).await?;
+            let (message_type, payload) = timeout_at(
+                deadline,
+                read_netbios_packet(&mut stream, DEFAULT_MAX_TRANSPORT_MESSAGE),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "SMB NetBIOS session response timed out",
+                )
+            })??;
             match message_type {
                 POSITIVE_SESSION_RESPONSE => {
                     if !payload.is_empty() {
@@ -277,7 +408,15 @@ impl TokioTcpTransport {
         Ok(Self {
             stream,
             mode: TcpTransportMode::NetbiosSession,
+            max_message_size: DEFAULT_MAX_TRANSPORT_MESSAGE,
         })
+    }
+
+    /// Replaces the maximum accepted remote transport-message size.
+    #[must_use]
+    pub fn with_max_message_size(mut self, max_message_size: usize) -> Self {
+        self.max_message_size = max_message_size;
+        self
     }
 }
 
@@ -292,23 +431,36 @@ impl Transport for TokioTcpTransport {
             TcpTransportMode::DirectTcp => {
                 let mut header = [0_u8; 4];
                 self.stream.read_exact(&mut header).await?;
+                if header[0] != SESSION_MESSAGE {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "direct TCP transport received a non-session RFC1002 packet",
+                    ));
+                }
                 let payload_len = (usize::from(header[1]) << 16)
                     | (usize::from(header[2]) << 8)
                     | usize::from(header[3]);
-                let mut payload = vec![0; payload_len];
+                let mut payload = allocate_receive_buffer(payload_len, self.max_message_size)?;
                 self.stream.read_exact(&mut payload).await?;
 
-                let mut frame = Vec::with_capacity(header.len() + payload_len);
+                let mut frame = Vec::new();
+                frame
+                    .try_reserve_exact(header.len() + payload_len)
+                    .map_err(|_| std::io::Error::other("failed to allocate SMB transport frame"))?;
                 frame.extend_from_slice(&header);
                 frame.extend_from_slice(&payload);
                 Ok(frame)
             }
             TcpTransportMode::NetbiosSession => loop {
-                let (message_type, payload) = read_netbios_packet(&mut self.stream).await?;
+                let (message_type, payload) =
+                    read_netbios_packet(&mut self.stream, self.max_message_size).await?;
                 match message_type {
                     SESSION_KEEP_ALIVE => continue,
                     SESSION_MESSAGE => {
-                        let mut frame = Vec::with_capacity(4 + payload.len());
+                        let mut frame = Vec::new();
+                        frame.try_reserve_exact(4 + payload.len()).map_err(|_| {
+                            std::io::Error::other("failed to allocate SMB transport frame")
+                        })?;
                         frame.push(message_type);
                         frame.push(((payload.len() >> 16) & 0xff) as u8);
                         frame.push(((payload.len() >> 8) & 0xff) as u8);
@@ -328,16 +480,42 @@ impl Transport for TokioTcpTransport {
             },
         }
     }
+
+    fn transport_identity(&self) -> TransportIdentity {
+        let protocol = match self.mode {
+            TcpTransportMode::DirectTcp => TransportProtocol::Tcp,
+            TcpTransportMode::NetbiosSession => TransportProtocol::Netbios,
+        };
+        TransportIdentity::unauthenticated(protocol)
+    }
 }
 
-async fn read_netbios_packet(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
+async fn read_netbios_packet(
+    stream: &mut TcpStream,
+    max_message_size: usize,
+) -> std::io::Result<(u8, Vec<u8>)> {
     let mut header = [0_u8; 4];
     stream.read_exact(&mut header).await?;
     let payload_len =
         (usize::from(header[1]) << 16) | (usize::from(header[2]) << 8) | usize::from(header[3]);
-    let mut payload = vec![0; payload_len];
+    let mut payload = allocate_receive_buffer(payload_len, max_message_size)?;
     stream.read_exact(&mut payload).await?;
     Ok((header[0], payload))
+}
+
+fn allocate_receive_buffer(length: usize, maximum: usize) -> std::io::Result<Vec<u8>> {
+    if length > maximum {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "remote SMB transport message exceeded the configured size limit",
+        ));
+    }
+    let mut payload = Vec::new();
+    payload
+        .try_reserve_exact(length)
+        .map_err(|_| std::io::Error::other("failed to allocate SMB receive buffer"))?;
+    payload.resize(length, 0);
+    Ok(payload)
 }
 
 fn default_netbios_called_name(server: &str) -> &str {
@@ -363,6 +541,7 @@ pub struct QuicTransport {
     connection: QuicConnection,
     send: SendStream,
     recv: RecvStream,
+    max_message_size: usize,
 }
 
 #[cfg(feature = "quic")]
@@ -372,6 +551,7 @@ impl std::fmt::Debug for QuicTransport {
             .field("remote_address", &self.connection.remote_address())
             .field("local_ip", &self.connection.local_ip())
             .field("protocol", &TransportProtocol::Quic)
+            .field("max_message_size", &self.max_message_size)
             .finish()
     }
 }
@@ -381,6 +561,25 @@ impl QuicTransport {
     /// Connects to an SMB-over-QUIC endpoint and opens the default long-lived
     /// bidirectional application stream.
     pub async fn connect(target: &TransportTarget) -> std::io::Result<Self> {
+        Self::connect_with_timeout(target, DEFAULT_CONNECT_TIMEOUT).await
+    }
+
+    /// Connects with an explicit deadline covering DNS resolution, handshake, and stream open.
+    pub async fn connect_with_timeout(
+        target: &TransportTarget,
+        connect_timeout: Duration,
+    ) -> std::io::Result<Self> {
+        timeout(connect_timeout, Self::connect_inner(target))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "SMB over QUIC connect timed out",
+                )
+            })?
+    }
+
+    async fn connect_inner(target: &TransportTarget) -> std::io::Result<Self> {
         if target.protocol() != TransportProtocol::Quic {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -419,7 +618,15 @@ impl QuicTransport {
             connection,
             send,
             recv,
+            max_message_size: DEFAULT_MAX_TRANSPORT_MESSAGE,
         })
+    }
+
+    /// Replaces the maximum accepted RFC1002-framed SMB message size.
+    #[must_use]
+    pub fn with_max_message_size(mut self, max_message_size: usize) -> Self {
+        self.max_message_size = max_message_size;
+        self
     }
 
     fn rustls_client_config() -> std::io::Result<rustls::ClientConfig> {
@@ -489,18 +696,31 @@ impl Transport for QuicTransport {
             .read_exact(&mut header)
             .await
             .map_err(quic_read_exact_error_to_io)?;
+        if header[0] != SESSION_MESSAGE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "SMB over QUIC received a non-session RFC1002 packet",
+            ));
+        }
         let payload_len =
             (usize::from(header[1]) << 16) | (usize::from(header[2]) << 8) | usize::from(header[3]);
-        let mut payload = vec![0; payload_len];
+        let mut payload = allocate_receive_buffer(payload_len, self.max_message_size)?;
         self.recv
             .read_exact(&mut payload)
             .await
             .map_err(quic_read_exact_error_to_io)?;
 
-        let mut frame = Vec::with_capacity(header.len() + payload_len);
+        let mut frame = Vec::new();
+        frame
+            .try_reserve_exact(header.len() + payload_len)
+            .map_err(|_| std::io::Error::other("failed to allocate SMB over QUIC frame"))?;
         frame.extend_from_slice(&header);
         frame.extend_from_slice(&payload);
         Ok(frame)
+    }
+
+    fn transport_identity(&self) -> TransportIdentity {
+        TransportIdentity::authenticated_quic()
     }
 }
 
@@ -516,7 +736,7 @@ mod tests {
 
     use super::{
         default_netbios_called_name, read_netbios_packet, SmbTransport, TokioTcpTransport,
-        TransportProtocol, TransportTarget, NETBIOS_CALLING_NAME,
+        TransportProtocol, TransportTarget, DEFAULT_MAX_TRANSPORT_MESSAGE, NETBIOS_CALLING_NAME,
     };
 
     #[cfg(feature = "quic")]
@@ -556,9 +776,10 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("server should accept");
-            let (message_type, payload) = read_netbios_packet(&mut socket)
-                .await
-                .expect("session request should decode");
+            let (message_type, payload) =
+                read_netbios_packet(&mut socket, DEFAULT_MAX_TRANSPORT_MESSAGE)
+                    .await
+                    .expect("session request should decode");
             assert_eq!(message_type, SESSION_REQUEST);
             assert_eq!(payload.len(), 68);
             assert_eq!(
@@ -586,9 +807,10 @@ mod tests {
                 .await
                 .expect("session payload should write");
 
-            let (message_type, payload) = read_netbios_packet(&mut socket)
-                .await
-                .expect("client frame should decode");
+            let (message_type, payload) =
+                read_netbios_packet(&mut socket, DEFAULT_MAX_TRANSPORT_MESSAGE)
+                    .await
+                    .expect("client frame should decode");
             assert_eq!(message_type, SESSION_MESSAGE);
             assert_eq!(payload, b"PING");
         });

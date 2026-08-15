@@ -14,14 +14,12 @@ pub(super) struct CommandPaths {
     pub(super) stdout_relative: String,
     pub(super) stderr_relative: String,
     pub(super) exit_relative: String,
-    pub(super) debug_relative: String,
     pub(super) script_relative: String,
     pub(super) runner_relative: String,
     pub(super) service_binary_relative: String,
     pub(super) stdout_absolute: String,
     pub(super) stderr_absolute: String,
     pub(super) exit_absolute: String,
-    pub(super) debug_absolute: String,
     pub(super) script_absolute: String,
     pub(super) runner_absolute: String,
     pub(super) service_binary_absolute: String,
@@ -34,7 +32,6 @@ impl CommandPaths {
         let stdout_relative = join_share_path(staging_directory, &format!("{prefix}.out"));
         let stderr_relative = join_share_path(staging_directory, &format!("{prefix}.err"));
         let exit_relative = join_share_path(staging_directory, &format!("{prefix}.exit"));
-        let debug_relative = join_share_path(staging_directory, &format!("{prefix}.dbg"));
         let script_relative = join_share_path(staging_directory, &format!("{prefix}.cmd"));
         let runner_relative = join_share_path(staging_directory, &format!("{prefix}.bat"));
         let service_binary_relative =
@@ -46,14 +43,12 @@ impl CommandPaths {
             stdout_absolute: admin_absolute_path(&stdout_relative),
             stderr_absolute: admin_absolute_path(&stderr_relative),
             exit_absolute: admin_absolute_path(&exit_relative),
-            debug_absolute: admin_absolute_path(&debug_relative),
             script_absolute: admin_absolute_path(&script_relative),
             runner_absolute: admin_absolute_path(&runner_relative),
             service_binary_absolute: admin_absolute_path(&service_binary_relative),
             stdout_relative,
             stderr_relative,
             exit_relative,
-            debug_relative,
             script_relative,
             runner_relative,
             service_binary_relative,
@@ -87,10 +82,9 @@ pub(super) fn build_psexec_service_command(
 ) -> String {
     match psexec_service_binary {
         Some(_) => format!(
-            "{} --service-name {}{} --script {} --stdout {} --stderr {} --exit-code {}",
+            "{} --service-name {} --script {} --stdout {} --stderr {} --exit-code {}",
             quote_windows_arg(&command_paths.service_binary_absolute),
             quote_windows_arg(&command_paths.service_name),
-            psexec_debug_log_arg(command_paths),
             quote_windows_arg(&command_paths.script_absolute),
             quote_windows_arg(&command_paths.stdout_absolute),
             quote_windows_arg(&command_paths.stderr_absolute),
@@ -103,26 +97,14 @@ pub(super) fn build_psexec_service_command(
     }
 }
 
-fn psexec_debug_log_arg(command_paths: &CommandPaths) -> String {
-    if std::env::var_os("SMOLDER_NTLM_DEBUG").is_some() {
-        format!(
-            " --debug-log {}",
-            quote_windows_arg(&command_paths.debug_absolute)
-        )
-    } else {
-        String::new()
-    }
-}
-
 pub(super) fn build_psexec_interactive_service_command(
     request: &ExecRequest,
     command_paths: &CommandPaths,
 ) -> String {
     let mut command = format!(
-        "{} --service-name {}{} --pipe-prefix {}",
+        "{} --service-name {} --pipe-prefix {}",
         quote_windows_arg(&command_paths.service_binary_absolute),
         quote_windows_arg(&command_paths.service_name),
-        psexec_debug_log_arg(command_paths),
         quote_windows_arg(&command_paths.pipe_prefix),
     );
     if let Some(command_text) = request.command_text() {

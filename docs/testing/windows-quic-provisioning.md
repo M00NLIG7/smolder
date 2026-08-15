@@ -76,14 +76,16 @@ Install Windows Server 2025 with Desktop Experience.
 
 Once the OS is installed, copy
 [configure-windows-quic-server.ps1](https://github.com/M00NLIG7/smolder/blob/main/scripts/configure-windows-quic-server.ps1)
-into the guest and run it from an elevated PowerShell session:
+into the guest. Have your secret provider create an ACL-protected password file, then run the
+script from an elevated PowerShell session. Only the file path, never the password, appears in the
+process argument list:
 
 ```powershell
 PowerShell -ExecutionPolicy Bypass -File .\configure-windows-quic-server.ps1 `
   -ServerName files.lab.example `
   -ShareName smolder `
   -LocalUsername smolder `
-  -LocalPassword 'Passw0rd!'
+  -LocalPasswordFile C:\Secure\smolder-password.txt
 ```
 
 That script:
@@ -125,7 +127,7 @@ export SMOLDER_WINDOWS_QUIC_SERVER='files.lab.example'
 export SMOLDER_WINDOWS_QUIC_CONNECT_HOST='127.0.0.1'
 export SMOLDER_WINDOWS_QUIC_TLS_SERVER_NAME='files.lab.example'
 export SMOLDER_WINDOWS_QUIC_USERNAME='smolder'
-export SMOLDER_WINDOWS_QUIC_PASSWORD='Passw0rd!'
+export SMOLDER_WINDOWS_QUIC_PASSWORD_FILE='/private/path/smolder-password.txt'
 export SMOLDER_WINDOWS_QUIC_SHARE='smolder'
 ```
 

@@ -9,6 +9,7 @@ mod common;
 use common::WindowsNtlmConfig;
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn queries_account_domain_info_when_configured() {
     let Some(config) = WindowsNtlmConfig::from_env() else {
         eprintln!(

@@ -69,7 +69,7 @@ That wrapper preserves the existing AD realm state, checks that the Tiny11
 machine account is still present in the KDC, and then runs:
 
 ```bash
-cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --nocapture
+cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --ignored --nocapture
 ```
 
 followed by Kerberos-enabled CLI smoke commands:
@@ -94,7 +94,10 @@ with these defaults:
 - `SMOLDER_KERBEROS_PASSWORD=Passw0rd!`
 - `SMOLDER_KERBEROS_SHARE=IPC$`
 - `SMOLDER_KERBEROS_REALM=LAB.EXAMPLE`
-- `SMOLDER_KERBEROS_KDC_URL=tcp://dc1.lab.example:1088`
+- a private `KRB5_CONFIG` mapping `LAB.EXAMPLE` to `dc1.lab.example:1088`
+
+The wrapper creates the provider configuration before launching Smolder. The library does not
+change process-global Kerberos settings while an authentication operation is in flight.
 
 ## Expected Result
 

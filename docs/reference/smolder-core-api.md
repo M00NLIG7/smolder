@@ -82,12 +82,12 @@ The current direction for `0.3.x` is:
 
 For Kerberos specifically:
 
-- `kerberos` is the umbrella feature consumers should enable
-- `kerberos-sspi` remains the default password-backed backend
-- `kerberos-gssapi` adds Unix ticket-cache and keytab backends without
-  changing the top-level `KerberosCredentials` / `KerberosAuthenticator` API
-- `kerberos-gssapi` is independent of `kerberos-sspi`, so Unix GSS/Kerberos
-  libraries are only pulled in when that backend is requested explicitly
+- `kerberos` is the target-selecting umbrella feature consumers should enable
+- `kerberos-sspi` is Windows-only and calls the native SSPI Kerberos package
+- `kerberos-gssapi` is Unix-only and uses Smolder's bounded internal GSS wrapper;
+  non-macOS builds support ticket-cache and client-keytab credentials
+- the default feature set enables neither backend, so Unix native GSS linkage is
+  always explicit
 - backend-specific capability expansion should happen behind the stable
   `KerberosCredentials` / `KerberosAuthenticator` surface rather than by
   replacing those top-level types

@@ -7,18 +7,19 @@
 //!
 //! The supported cargo features are:
 //!
-//! - `kerberos`: stable public Kerberos API plus the current password-backed
-//!   backend
-//! - `kerberos-sspi`: backend-only flag for the current password-backed
-//!   Kerberos implementation
-//! - `kerberos-gssapi`: Unix ticket-cache and keytab backend using system
-//!   GSS/Kerberos libraries
+//! - `kerberos`: stable public Kerberos API plus the platform-native backend
+//!   (`kerberos-sspi` on Windows and `kerberos-gssapi` on Unix)
+//! - `kerberos-sspi`: Windows native SSPI Kerberos backend
+//! - `kerberos-gssapi`: Unix password/ticket-cache backend, plus non-macOS client
+//!   keytabs, using Smolder's bounded wrapper over system GSS/Kerberos libraries
 //! - `quic`: feature-gated SMB over QUIC transport primitives
+//! - `dangerous-ntlm-diagnostics`: build-time boundary for raw NTLM token output;
+//!   real credentials must never be used with it
 //!
 //! The default build enables none of these features and stays the most
-//! static-friendly profile. `kerberos-gssapi` is intentionally independent from
-//! `kerberos-sspi`, so enabling Unix GSS credential-store support does not also
-//! pull in the SSPI backend.
+//! static-friendly profile. The backend-specific flags remain independently
+//! selectable; the portable `kerberos` convenience feature enables both names and
+//! target `cfg` selects only the native implementation.
 //!
 //! It owns SMB auth/session state, request dispatch, and transport logic.
 //! High-level SMB file facades, execution flows, and other operator workflows
@@ -91,10 +92,11 @@
 //! Copyright (c) 2025 M00NLIG7
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod auth;
+mod bounded;
 pub mod client;
 pub mod compression;
 pub mod crypto;
@@ -103,9 +105,12 @@ pub mod error;
 pub mod facade;
 pub mod lsarpc;
 pub mod pipe;
+pub mod policy;
 pub mod rpc;
 pub mod samr;
 pub mod srvsvc;
+#[cfg(test)]
+mod test_support;
 pub mod prelude {
     //! Curated imports for the intended `smolder_core` entry points.
     //!
@@ -116,10 +121,14 @@ pub mod prelude {
         AuthProvider, NtlmAuthenticator, NtlmCredentials, NtlmRpcPacketIntegrity,
         NtlmSessionSecurity,
     };
-    #[cfg(feature = "kerberos-api")]
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(feature = "kerberos", feature = "kerberos-gssapi")))
+        doc(cfg(any(
+            feature = "kerberos",
+            feature = "kerberos-sspi",
+            feature = "kerberos-gssapi"
+        )))
     )]
     pub use crate::auth::{
         KerberosAuthenticator, KerberosBackendKind, KerberosCredentialSourceKind,
@@ -147,6 +156,10 @@ pub mod prelude {
     #[cfg(feature = "quic")]
     #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
     pub use crate::pipe::{connect_session_quic, connect_tree_quic};
+    pub use crate::policy::{
+        ConfidentialityPolicy, GuestFallbackPolicy, OperationTimeouts, ResourceLimits,
+        SecurityPolicy,
+    };
     pub use crate::rpc::PipeRpcClient;
     pub use crate::samr::{
         SamrAlias, SamrAliasClient, SamrAliasInfo, SamrClient, SamrDomain, SamrDomainClient,
@@ -161,7 +174,8 @@ pub mod prelude {
     #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
     pub use crate::transport::QuicTransport;
     pub use crate::transport::{
-        SmbTransport, TokioTcpTransport, Transport, TransportProtocol, TransportTarget,
+        SmbTransport, TokioTcpTransport, Transport, TransportIdentity, TransportProtocol,
+        TransportTarget,
     };
 }
 

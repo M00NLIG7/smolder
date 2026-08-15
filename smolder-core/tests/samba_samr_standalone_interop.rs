@@ -2,6 +2,7 @@ mod common;
 use common::{samba_lock, SambaNtlmConfig};
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn enumerates_standalone_samba_samr_users_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaNtlmConfig::from_env_with_defaults() else {

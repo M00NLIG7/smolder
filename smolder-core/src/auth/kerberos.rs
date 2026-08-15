@@ -11,14 +11,16 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use smolder_proto::smb::smb2::NegotiateResponse;
+use zeroize::Zeroize;
 
 #[cfg(all(unix, feature = "kerberos-gssapi"))]
 use super::kerberos_gssapi::GssapiKerberosBackend;
 use super::kerberos_spn::KerberosTarget;
-#[cfg(feature = "kerberos-sspi")]
+#[cfg(all(windows, feature = "kerberos-sspi"))]
 use super::kerberos_sspi::SspiNegotiateKerberosBackend;
 use super::spnego::{
-    encode_neg_token_init, encode_neg_token_resp, extract_mech_token, parse_neg_token_resp,
+    encode_neg_token_init, encode_neg_token_resp, parse_neg_token_resp, NEG_STATE_ACCEPT_COMPLETE,
+    NEG_STATE_REJECT,
 };
 use super::{AuthError, AuthProvider, SpnegoMechanism};
 
@@ -28,8 +30,8 @@ pub enum KerberosBackendKind {
     /// Unix GSSAPI-backed Kerberos backend using the local ticket cache.
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
     Gssapi,
-    /// `sspi`-based Kerberos backend.
-    #[cfg(feature = "kerberos-sspi")]
+    /// Native Windows SSPI Kerberos backend.
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
     Sspi,
 }
 
@@ -68,7 +70,7 @@ impl fmt::Debug for KerberosCredentials {
             .field("password", &"<redacted>")
             .field("domain", &self.domain)
             .field("workstation", &self.workstation)
-            .field("kdc_url", &self.kdc_url);
+            .field("kdc_url", &self.kdc_url.as_ref().map(|_| "<configured>"));
         #[cfg(all(unix, feature = "kerberos-gssapi"))]
         debug.field("keytab_name", &self.keytab_name);
         debug
@@ -78,15 +80,27 @@ impl fmt::Debug for KerberosCredentials {
     }
 }
 
+impl Drop for KerberosCredentials {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
+}
+
 impl KerberosCredentials {
     /// Creates password-backed Kerberos credentials for an SMB account.
-    #[cfg(feature = "kerberos-sspi")]
+    #[cfg(any(
+        all(windows, feature = "kerberos-sspi"),
+        all(unix, feature = "kerberos-gssapi")
+    ))]
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self::from_password(username, password)
     }
 
     /// Creates password-backed Kerberos credentials for an SMB account.
-    #[cfg(feature = "kerberos-sspi")]
+    #[cfg(any(
+        all(windows, feature = "kerberos-sspi"),
+        all(unix, feature = "kerberos-gssapi")
+    ))]
     pub fn from_password(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -164,10 +178,10 @@ impl KerberosCredentials {
         self
     }
 
-    /// Overrides the KDC URL used for the Kerberos exchange.
+    /// Records a requested KDC override for a backend that can isolate it safely.
     ///
-    /// The value may be a bare `host:port`, `tcp://host:port`, `udp://host:port`,
-    /// or an HTTP(S) KDC proxy URL understood by `sspi`.
+    /// The current native Windows SSPI and Unix GSSAPI backends reject this option rather than
+    /// mutating process-global Kerberos configuration or silently ignoring the request.
     #[must_use]
     pub fn with_kdc_url(mut self, kdc_url: impl Into<String>) -> Self {
         self.kdc_url = Some(kdc_url.into());
@@ -186,9 +200,14 @@ impl KerberosCredentials {
         self.source_kind
     }
 
-    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    #[cfg(all(unix, not(target_os = "macos"), feature = "kerberos-gssapi"))]
     pub(super) fn keytab_name(&self) -> Option<&str> {
         self.keytab_name.as_deref()
+    }
+
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    pub(super) fn password(&self) -> &[u8] {
+        self.password.as_bytes()
     }
 
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
@@ -212,34 +231,42 @@ impl KerberosCredentials {
         }
     }
 
-    #[cfg(feature = "kerberos-sspi")]
-    fn username(&self) -> Result<sspi::Username, AuthError> {
-        let domain = (!self.domain.is_empty()).then_some(self.domain.as_str());
-        sspi::Username::new(&self.username, domain).map_err(|_| {
-            AuthError::InvalidState(
-                "kerberos username/domain combination must be a bare account name, UPN, or down-level logon name",
-            )
-        })
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
+    pub(super) fn username(&self) -> &str {
+        &self.username
     }
 
-    #[cfg(feature = "kerberos-sspi")]
-    pub(super) fn auth_identity(&self) -> Result<sspi::AuthIdentity, AuthError> {
-        Ok(sspi::AuthIdentity {
-            username: self.username()?,
-            password: self.password.clone().into(),
-        })
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
+    pub(super) fn domain(&self) -> &str {
+        &self.domain
     }
 
-    #[cfg(any(feature = "kerberos-sspi", test))]
-    pub(super) fn client_computer_name(&self) -> &str {
-        if self.workstation.is_empty() {
-            "smolder"
-        } else {
-            self.workstation.as_str()
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
+    pub(super) fn password_text(&self) -> &str {
+        &self.password
+    }
+
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
+    pub(super) fn validate_username_domain(&self) -> Result<(), AuthError> {
+        if self.username.trim().is_empty() {
+            return Err(AuthError::InvalidState(
+                "kerberos username must not be empty",
+            ));
         }
+        if !self.domain.is_empty() && (self.username.contains('@') || self.username.contains('\\'))
+        {
+            return Err(AuthError::InvalidState(
+                "kerberos username/domain combination must be a bare account name, UPN, or down-level logon name",
+            ));
+        }
+        Ok(())
     }
 
-    #[cfg(any(feature = "kerberos-sspi", test))]
+    #[cfg(any(
+        all(windows, feature = "kerberos-sspi"),
+        all(unix, feature = "kerberos-gssapi"),
+        test
+    ))]
     pub(super) fn kdc_url(&self) -> Option<&str> {
         self.kdc_url.as_deref()
     }
@@ -262,15 +289,20 @@ fn normalize_keytab_name(keytab_name: String) -> String {
     }
 }
 
-#[cfg(feature = "kerberos-sspi")]
+#[cfg(all(windows, feature = "kerberos-sspi"))]
 fn default_backend_kind() -> KerberosBackendKind {
     KerberosBackendKind::Sspi
+}
+
+#[cfg(all(unix, feature = "kerberos-gssapi"))]
+fn default_backend_kind() -> KerberosBackendKind {
+    KerberosBackendKind::Gssapi
 }
 
 enum KerberosAuthenticatorInner {
     #[cfg(all(unix, feature = "kerberos-gssapi"))]
     Gssapi(KerberosAuthEngine<GssapiKerberosBackend>),
-    #[cfg(feature = "kerberos-sspi")]
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
     Sspi(KerberosAuthEngine<SspiNegotiateKerberosBackend>),
 }
 
@@ -287,7 +319,7 @@ impl KerberosAuthenticator {
             KerberosBackendKind::Gssapi => {
                 KerberosAuthenticatorInner::Gssapi(KerberosAuthEngine::new(credentials, target))
             }
-            #[cfg(feature = "kerberos-sspi")]
+            #[cfg(all(windows, feature = "kerberos-sspi"))]
             KerberosBackendKind::Sspi => {
                 KerberosAuthenticatorInner::Sspi(KerberosAuthEngine::new(credentials, target))
             }
@@ -300,7 +332,7 @@ impl KerberosAuthenticator {
         match &self.inner {
             #[cfg(all(unix, feature = "kerberos-gssapi"))]
             KerberosAuthenticatorInner::Gssapi(inner) => &inner.target,
-            #[cfg(feature = "kerberos-sspi")]
+            #[cfg(all(windows, feature = "kerberos-sspi"))]
             KerberosAuthenticatorInner::Sspi(inner) => &inner.target,
         }
     }
@@ -310,7 +342,7 @@ impl KerberosAuthenticator {
         match &self.inner {
             #[cfg(all(unix, feature = "kerberos-gssapi"))]
             KerberosAuthenticatorInner::Gssapi(inner) => &inner.credentials,
-            #[cfg(feature = "kerberos-sspi")]
+            #[cfg(all(windows, feature = "kerberos-sspi"))]
             KerberosAuthenticatorInner::Sspi(inner) => &inner.credentials,
         }
     }
@@ -327,7 +359,7 @@ impl AuthProvider for KerberosAuthenticator {
         match &mut self.inner {
             #[cfg(all(unix, feature = "kerberos-gssapi"))]
             KerberosAuthenticatorInner::Gssapi(inner) => inner.initial_token(negotiate),
-            #[cfg(feature = "kerberos-sspi")]
+            #[cfg(all(windows, feature = "kerberos-sspi"))]
             KerberosAuthenticatorInner::Sspi(inner) => inner.initial_token(negotiate),
         }
     }
@@ -336,7 +368,7 @@ impl AuthProvider for KerberosAuthenticator {
         match &mut self.inner {
             #[cfg(all(unix, feature = "kerberos-gssapi"))]
             KerberosAuthenticatorInner::Gssapi(inner) => inner.next_token(incoming),
-            #[cfg(feature = "kerberos-sspi")]
+            #[cfg(all(windows, feature = "kerberos-sspi"))]
             KerberosAuthenticatorInner::Sspi(inner) => inner.next_token(incoming),
         }
     }
@@ -345,7 +377,7 @@ impl AuthProvider for KerberosAuthenticator {
         match &mut self.inner {
             #[cfg(all(unix, feature = "kerberos-gssapi"))]
             KerberosAuthenticatorInner::Gssapi(inner) => inner.finish(incoming),
-            #[cfg(feature = "kerberos-sspi")]
+            #[cfg(all(windows, feature = "kerberos-sspi"))]
             KerberosAuthenticatorInner::Sspi(inner) => inner.finish(incoming),
         }
     }
@@ -354,7 +386,7 @@ impl AuthProvider for KerberosAuthenticator {
         match &self.inner {
             #[cfg(all(unix, feature = "kerberos-gssapi"))]
             KerberosAuthenticatorInner::Gssapi(inner) => inner.session_key(),
-            #[cfg(feature = "kerberos-sspi")]
+            #[cfg(all(windows, feature = "kerberos-sspi"))]
             KerberosAuthenticatorInner::Sspi(inner) => inner.session_key(),
         }
     }
@@ -404,6 +436,14 @@ struct KerberosAuthEngine<B: KerberosBackend> {
     _backend: PhantomData<B>,
 }
 
+impl<B: KerberosBackend> Drop for KerberosAuthEngine<B> {
+    fn drop(&mut self) {
+        if let Some(session_key) = self.session_key.as_mut() {
+            session_key.zeroize();
+        }
+    }
+}
+
 impl<B: KerberosBackend> KerberosAuthEngine<B> {
     fn new(credentials: KerberosCredentials, target: KerberosTarget) -> Self {
         Self {
@@ -413,6 +453,13 @@ impl<B: KerberosBackend> KerberosAuthEngine<B> {
             session_key: None,
             _backend: PhantomData,
         }
+    }
+
+    fn replace_session_key(&mut self, session_key: Option<Vec<u8>>) {
+        if let Some(current) = self.session_key.as_mut() {
+            current.zeroize();
+        }
+        self.session_key = session_key;
     }
 }
 
@@ -426,7 +473,7 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
 
         match B::initiate(&self.credentials, &self.target)? {
             KerberosStep::Continue { pending, token } => {
-                self.session_key = B::interim_session_key(&pending)?;
+                self.replace_session_key(B::interim_session_key(&pending)?);
                 self.state = KerberosState::Pending(pending);
                 if B::SPNEGO_WRAPPED {
                     Ok(token)
@@ -441,7 +488,7 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                 let token = token.ok_or(AuthError::InvalidState(
                     "kerberos backend finished without an initial token",
                 ))?;
-                self.session_key = Some(B::session_key(&context)?);
+                self.replace_session_key(Some(B::session_key(&context)?));
                 self.state = KerberosState::Established(context);
                 if B::SPNEGO_WRAPPED {
                     Ok(token)
@@ -478,18 +525,13 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
         };
 
         let server_token = if B::SPNEGO_WRAPPED {
-            incoming.to_vec()
+            copy_auth_bytes(incoming, "kerberos backend token allocation failed")?
         } else {
-            match extract_mech_token(incoming) {
-                Ok(token) => token,
-                Err(AuthError::InvalidToken("SPNEGO response token missing"))
-                | Err(AuthError::InvalidToken("SPNEGO mech token missing")) => Vec::new(),
-                Err(error) => return Err(error),
-            }
+            kerberos_response_token(incoming)?.unwrap_or_default()
         };
         match B::step(pending, &server_token, &self.target)? {
             KerberosStep::Continue { pending, token } => {
-                self.session_key = B::interim_session_key(&pending)?;
+                self.replace_session_key(B::interim_session_key(&pending)?);
                 self.state = KerberosState::Pending(pending);
                 if B::SPNEGO_WRAPPED {
                     Ok(token)
@@ -498,7 +540,7 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                 }
             }
             KerberosStep::Finished { context, token } => {
-                self.session_key = Some(B::session_key(&context)?);
+                self.replace_session_key(Some(B::session_key(&context)?));
                 self.state = KerberosState::Established(context);
                 if B::SPNEGO_WRAPPED {
                     Ok(token.unwrap_or_default())
@@ -528,16 +570,18 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                 }
 
                 let server_token = if B::SPNEGO_WRAPPED {
-                    incoming.to_vec()
+                    copy_auth_bytes(incoming, "kerberos backend token allocation failed")?
                 } else {
-                    extract_mech_token(incoming)?
+                    kerberos_response_token(incoming)?.ok_or(AuthError::InvalidToken(
+                        "final Kerberos SPNEGO token omitted the mechanism token",
+                    ))?
                 };
                 match B::step(pending, &server_token, &self.target)? {
                     KerberosStep::Finished {
                         context,
                         token: None,
                     } => {
-                        self.session_key = Some(B::session_key(&context)?);
+                        self.replace_session_key(Some(B::session_key(&context)?));
                         Ok(())
                     }
                     KerberosStep::Finished { token: Some(_), .. } => Err(AuthError::InvalidState(
@@ -554,14 +598,41 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
                     return Ok(());
                 }
 
-                if !B::SPNEGO_WRAPPED {
-                    let parsed = parse_neg_token_resp(incoming)?;
-                    if parsed.response_token.is_some() {
-                        self.state = KerberosState::Established(context);
-                        return Err(AuthError::InvalidToken(
-                            "unexpected kerberos response token after context establishment",
-                        ));
-                    }
+                if B::SPNEGO_WRAPPED {
+                    self.state = KerberosState::Established(context);
+                    return Err(AuthError::InvalidToken(
+                        "established kerberos backend returned an unvalidated final token",
+                    ));
+                }
+
+                let parsed = parse_neg_token_resp(incoming)?;
+                if parsed
+                    .supported_mech
+                    .is_some_and(|mechanism| mechanism != SpnegoMechanism::KerberosV5)
+                {
+                    self.state = KerberosState::Established(context);
+                    return Err(AuthError::InvalidToken(
+                        "SPNEGO selected a mechanism other than Kerberos",
+                    ));
+                }
+                if parsed.neg_state == Some(NEG_STATE_REJECT) {
+                    self.state = KerberosState::Established(context);
+                    return Err(AuthError::InvalidToken(
+                        "final Kerberos SPNEGO token rejected authentication",
+                    ));
+                }
+                if parsed.neg_state.is_some() && parsed.neg_state != Some(NEG_STATE_ACCEPT_COMPLETE)
+                {
+                    self.state = KerberosState::Established(context);
+                    return Err(AuthError::InvalidToken(
+                        "final Kerberos SPNEGO token did not complete authentication",
+                    ));
+                }
+                if parsed.response_token.is_some() {
+                    self.state = KerberosState::Established(context);
+                    return Err(AuthError::InvalidToken(
+                        "unexpected kerberos response token after context establishment",
+                    ));
                 }
 
                 self.state = KerberosState::Established(context);
@@ -574,6 +645,33 @@ impl<B: KerberosBackend> AuthProvider for KerberosAuthEngine<B> {
     fn session_key(&self) -> Option<&[u8]> {
         self.session_key.as_deref()
     }
+}
+
+fn kerberos_response_token(incoming: &[u8]) -> Result<Option<Vec<u8>>, AuthError> {
+    let parsed = parse_neg_token_resp(incoming)?;
+    if parsed
+        .supported_mech
+        .is_some_and(|mechanism| mechanism != SpnegoMechanism::KerberosV5)
+    {
+        return Err(AuthError::InvalidToken(
+            "SPNEGO selected a mechanism other than Kerberos",
+        ));
+    }
+    if parsed.neg_state == Some(NEG_STATE_REJECT) {
+        return Err(AuthError::InvalidToken(
+            "Kerberos SPNEGO token rejected authentication",
+        ));
+    }
+    Ok(parsed.response_token)
+}
+
+fn copy_auth_bytes(bytes: &[u8], error: &'static str) -> Result<Vec<u8>, AuthError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| AuthError::InvalidToken(error))?;
+    output.extend_from_slice(bytes);
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -606,16 +704,10 @@ mod tests {
         ) -> Result<KerberosStep<Self::Pending, Self::Context>, AuthError> {
             assert_eq!(credentials.username, "alice");
             assert_eq!(credentials.domain, "EXAMPLE.COM");
-            assert_eq!(credentials.client_computer_name(), "WORKSTATION1");
+            assert_eq!(credentials.workstation, "WORKSTATION1");
             assert_eq!(credentials.kdc_url(), Some("tcp://dc01.example.com:88"));
-            #[cfg(feature = "kerberos-sspi")]
-            assert_eq!(
-                credentials
-                    .username()
-                    .expect("username should parse")
-                    .inner(),
-                "EXAMPLE.COM\\alice"
-            );
+            #[cfg(all(windows, feature = "kerberos-sspi"))]
+            assert_eq!(credentials.username(), "alice");
             assert_eq!(
                 target.service_principal_name().expect("SPN should derive"),
                 "cifs/fileserver.example.com@EXAMPLE.COM"
@@ -670,7 +762,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "kerberos-sspi")]
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
     fn test_credentials() -> KerberosCredentials {
         KerberosCredentials::new("alice", "password")
             .with_domain("EXAMPLE.COM")
@@ -678,15 +770,15 @@ mod tests {
             .with_kdc_url("tcp://dc01.example.com:88")
     }
 
-    #[cfg(all(not(feature = "kerberos-sspi"), unix, feature = "kerberos-gssapi"))]
+    #[cfg(all(unix, feature = "kerberos-gssapi"))]
     fn test_credentials() -> KerberosCredentials {
-        KerberosCredentials::from_ticket_cache("alice")
+        KerberosCredentials::new("alice", "password")
             .with_domain("EXAMPLE.COM")
             .with_workstation("WORKSTATION1")
             .with_kdc_url("tcp://dc01.example.com:88")
     }
 
-    #[cfg(feature = "kerberos-sspi")]
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
     #[test]
     fn password_credentials_default_to_sspi_backend() {
         let credentials = test_credentials();
@@ -717,7 +809,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    #[cfg(all(unix, not(target_os = "macos"), feature = "kerberos-gssapi"))]
     #[test]
     fn keytab_credentials_select_gssapi_backend() {
         let credentials = KerberosCredentials::from_keytab("alice", "/tmp/alice.keytab")
@@ -744,7 +836,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(unix, feature = "kerberos-gssapi"))]
+    #[cfg(all(unix, not(target_os = "macos"), feature = "kerberos-gssapi"))]
     #[test]
     fn default_keytab_credentials_use_default_principal() {
         let credentials = KerberosCredentials::from_default_keytab("./alice.keytab");
@@ -814,12 +906,34 @@ mod tests {
         assert_eq!(auth.session_key(), Some(&b"0123456789abcdef"[..]));
     }
 
-    #[cfg(feature = "kerberos-sspi")]
+    #[test]
+    fn finish_rejects_terminal_spnego_rejection_before_key_derivation() {
+        let target =
+            KerberosTarget::for_smb_host("fileserver.example.com").with_realm("EXAMPLE.COM");
+        let mut auth = KerberosAuthEngine::<MockBackend>::new(test_credentials(), target);
+
+        auth.initial_token(&negotiate_response())
+            .expect("initial token should build");
+        auth.next_token(&encode_neg_token_resp(None, Some(b"krb-error"), None))
+            .expect("continuation token should build");
+
+        let error = auth
+            .finish(&encode_neg_token_resp(
+                Some(NEG_STATE_REJECT),
+                Some(b"ap-rep"),
+                None,
+            ))
+            .expect_err("a terminal SPNEGO rejection must not authenticate");
+        assert!(matches!(error, AuthError::InvalidToken(_)));
+        assert_eq!(auth.session_key(), None);
+    }
+
+    #[cfg(all(windows, feature = "kerberos-sspi"))]
     #[test]
     fn rejects_mixed_username_formats() {
         let error = KerberosCredentials::new("alice@example.com", "password")
             .with_domain("EXAMPLE")
-            .username()
+            .validate_username_domain()
             .expect_err("UPN plus domain should fail");
 
         assert!(matches!(error, AuthError::InvalidState(_)));

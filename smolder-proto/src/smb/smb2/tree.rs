@@ -3,7 +3,10 @@
 use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
 
-use super::{check_fixed_structure_size, get_u16, get_u32, slice_from_offset, utf16le, HEADER_LEN};
+use super::{
+    check_fixed_structure_size, copy_bytes, get_u16, get_u32, slice_from_offset, utf16le,
+    HEADER_LEN,
+};
 use crate::smb::ProtocolError;
 
 bitflags! {
@@ -112,7 +115,10 @@ impl TreeConnectRequest {
         let flags = get_u16(&mut input, "flags")?;
         let path_offset = get_u16(&mut input, "path_offset")?;
         let path_length = usize::from(get_u16(&mut input, "path_length")?);
-        let path = slice_from_offset(body, path_offset, path_length, "path")?.to_vec();
+        let path = copy_bytes(
+            slice_from_offset(body, path_offset, path_length, "path")?,
+            "path",
+        )?;
 
         Ok(Self { flags, path })
     }
@@ -136,7 +142,12 @@ impl TreeDisconnectRequest {
     pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
         let mut input = body;
         check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 4, "structure_size")?;
-        let _reserved = get_u16(&mut input, "reserved")?;
+        if get_u16(&mut input, "reserved")? != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "must be zero",
+            });
+        }
         Ok(Self)
     }
 }
@@ -159,7 +170,12 @@ impl TreeDisconnectResponse {
     pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
         let mut input = body;
         check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 4, "structure_size")?;
-        let _reserved = get_u16(&mut input, "reserved")?;
+        if get_u16(&mut input, "reserved")? != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "must be zero",
+            });
+        }
         Ok(Self)
     }
 }
@@ -206,7 +222,12 @@ impl TreeConnectResponse {
                 })
             }
         };
-        let _reserved = super::get_u8(&mut input, "reserved")?;
+        if super::get_u8(&mut input, "reserved")? != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "must be zero",
+            });
+        }
         let share_flags = ShareFlags::from_bits(get_u32(&mut input, "share_flags")?).ok_or(
             ProtocolError::InvalidField {
                 field: "share_flags",

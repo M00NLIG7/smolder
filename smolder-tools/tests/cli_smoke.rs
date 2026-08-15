@@ -37,6 +37,7 @@ fn configure_auth(command: &mut Command, config: &SambaConfig) {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn cat_command_streams_file_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((config, mut share)) = connected_share().await else {
@@ -64,6 +65,7 @@ async fn cat_command_streams_file_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn put_command_uploads_file_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((config, mut share)) = connected_share().await else {
@@ -96,6 +98,7 @@ async fn put_command_uploads_file_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn get_command_downloads_file_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((config, mut share)) = connected_share().await else {
@@ -128,6 +131,7 @@ async fn get_command_downloads_file_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn ls_command_lists_entries_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((config, mut share)) = connected_share().await else {
@@ -155,6 +159,7 @@ async fn ls_command_lists_entries_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn stat_command_prints_metadata_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((config, mut share)) = connected_share().await else {
@@ -184,6 +189,7 @@ async fn stat_command_prints_metadata_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn mv_command_renames_files_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((config, mut share)) = connected_share().await else {
@@ -225,6 +231,7 @@ async fn mv_command_renames_files_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn rm_command_deletes_files_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((config, mut share)) = connected_share().await else {

@@ -133,6 +133,7 @@ fn decode_recorded_payload(frame: &[u8], compression: &CompressionState) -> (Vec
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn writes_compressed_payloads_to_samba_when_negotiated() {
     let _guard = samba_lock().lock().await;
     let Some((writes, mut connection)) = authenticated_tree_connection().await else {

@@ -6,6 +6,7 @@ use common::{
 };
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn opens_sc_manager_over_windows_rpc_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some(config) = WindowsNtlmConfig::from_env() else {

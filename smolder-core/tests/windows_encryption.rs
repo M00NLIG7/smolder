@@ -65,6 +65,7 @@ async fn authenticated_tree_connection() -> Option<(
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn creates_writes_reads_and_closes_file_over_encrypted_tree_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((config, mut connection)) = authenticated_tree_connection().await else {

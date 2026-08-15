@@ -50,6 +50,22 @@ If a change touches any of these areas, run the appropriate gates before merge:
 
 ## Required Gates
 
+### Deterministic gate for every release
+
+Required:
+
+- [verify.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/verify.yml)
+  passes its pinned-MSRV format, all-target/all-feature check, warning-denied Clippy,
+  unit/release/property/doc, extracted-package, and cross-target jobs
+- `Cargo.lock` is committed and every release command uses `--locked`
+- `cargo audit --no-fetch --stale` and `cargo deny --offline check advisories sources licenses`
+  pass against the locally available advisory/index data; record advisory database staleness
+  rather than silently treating an unavailable refresh as current
+
+Live integration tests carry `#[ignore = "requires an explicitly configured live SMB fixture"]`.
+A normal `cargo test` run reporting them as ignored is not live coverage; only the corresponding
+explicit fixture workflow may be reported as a live pass.
+
 ### For normal PRs touching core or tools behavior
 
 Required:

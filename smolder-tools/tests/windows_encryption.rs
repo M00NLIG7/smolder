@@ -20,6 +20,7 @@ async fn connected_share() -> Option<(WindowsConfig, Share)> {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn writes_and_reads_with_required_encryption_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((config, mut share)) = connected_share().await else {
@@ -46,6 +47,7 @@ async fn writes_and_reads_with_required_encryption_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn require_encryption_rejects_admin_share_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some(config) = WindowsConfig::admin_share_probe_from_env() else {

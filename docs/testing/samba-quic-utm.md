@@ -160,7 +160,7 @@ SMOLDER_SAMBA_QUIC_PORT=443 \
 SMOLDER_SAMBA_QUIC_USERNAME=smolder \
 SMOLDER_SAMBA_QUIC_PASSWORD=smolderpass \
 SMOLDER_SAMBA_QUIC_SHARE=share \
-cargo test -p smolder-smb-core --features quic --test samba_quic -- --nocapture
+cargo test -p smolder-smb-core --features quic --test samba_quic -- --ignored --nocapture
 ```
 
 ## Current Scope

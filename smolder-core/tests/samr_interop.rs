@@ -10,6 +10,7 @@ mod common;
 use common::{windows_lock, WindowsNtlmConfig};
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn enumerates_windows_samr_domains_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some(config) = WindowsNtlmConfig::from_env() else {

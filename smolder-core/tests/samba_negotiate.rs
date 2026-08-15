@@ -83,6 +83,7 @@ async fn cleanup_test_file(
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn negotiates_with_samba_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(host) = required_env("SMOLDER_SAMBA_HOST") else {
@@ -109,6 +110,7 @@ async fn negotiates_with_samba_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn authenticates_and_connects_tree_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, connection)) = authenticated_tree_connection().await else {
@@ -122,6 +124,7 @@ async fn authenticates_and_connects_tree_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn creates_writes_reads_and_closes_file_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
@@ -167,6 +170,7 @@ async fn creates_writes_reads_and_closes_file_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn flushes_disconnects_and_logs_off_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
@@ -214,6 +218,7 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn queries_network_interfaces_with_ioctl_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
@@ -247,6 +252,7 @@ async fn queries_network_interfaces_with_ioctl_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn requests_resume_key_with_ioctl_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
@@ -284,6 +290,7 @@ async fn requests_resume_key_with_ioctl_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn grants_lease_on_create_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
@@ -350,6 +357,7 @@ async fn grants_lease_on_create_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn reopens_durable_handle_after_transport_reconnect_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut connection_one)) = authenticated_tree_connection().await else {

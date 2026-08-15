@@ -4,7 +4,8 @@ param(
     [string]$ShareName = "smolder",
     [string]$SharePath = "C:\Shares\smolder",
     [string]$LocalUsername = "smolder",
-    [string]$LocalPassword = "Passw0rd!",
+    [Parameter(Mandatory = $true)]
+    [string]$LocalPasswordFile,
     [string]$CertificateFriendlyName = "Smolder SMB over QUIC",
     [string]$CertificateExportPath = "C:\Users\Public\smolder-smb-quic.cer",
     [int]$QuicPort = 443
@@ -144,7 +145,19 @@ function Ensure-QuicFirewall {
 }
 
 Ensure-Administrator
-Ensure-LocalUser -Username $LocalUsername -Password $LocalPassword
+if (-not (Test-Path -LiteralPath $LocalPasswordFile -PathType Leaf)) {
+    throw "LocalPasswordFile must identify a protected regular file."
+}
+$LocalPassword = [IO.File]::ReadAllText($LocalPasswordFile).TrimEnd("`r", "`n")
+if ([string]::IsNullOrEmpty($LocalPassword)) {
+    throw "LocalPasswordFile did not contain a password."
+}
+try {
+    Ensure-LocalUser -Username $LocalUsername -Password $LocalPassword
+}
+finally {
+    $LocalPassword = $null
+}
 Ensure-SharePath -Path $SharePath -Username $LocalUsername
 Ensure-SmbShare -Name $ShareName -Path $SharePath -Username $LocalUsername
 
@@ -181,6 +194,6 @@ Write-Host "2. Add a hosts entry for $ServerName pointing at the VM's QUIC-forwa
 Write-Host "3. Export:"
 Write-Host "   SMOLDER_WINDOWS_QUIC_SERVER=$ServerName"
 Write-Host "   SMOLDER_WINDOWS_QUIC_USERNAME=$LocalUsername"
-Write-Host "   SMOLDER_WINDOWS_QUIC_PASSWORD=$LocalPassword"
+Write-Host "   Provide SMOLDER_WINDOWS_QUIC_PASSWORD through your protected secret provider (value not printed)."
 Write-Host "   SMOLDER_WINDOWS_QUIC_SHARE=$ShareName"
 Write-Host "4. Run scripts/run-windows-quic-interop.sh from the repo."

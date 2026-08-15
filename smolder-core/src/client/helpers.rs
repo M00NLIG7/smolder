@@ -9,23 +9,27 @@ use smolder_proto::smb::smb2::{
     AsyncId, CipherId, CompressionCapabilities, CreateContext, CreateRequest, CreateResponse,
     Dialect, DurableHandleFlags, DurableHandleReconnect, DurableHandleReconnectV2,
     DurableHandleRequest, DurableHandleRequestV2, GlobalCapabilities, Header, HeaderFlags,
-    NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities, SessionFlags,
-    SessionSetupSecurityMode, ShareFlags, SigningMode, TransportCapabilityFlags,
+    NegotiateContextType, NegotiateRequest, NegotiateResponse, PreauthIntegrityCapabilities,
+    SessionFlags, SessionSetupSecurityMode, ShareFlags, SigningMode, TransportCapabilities,
+    TransportCapabilityFlags,
 };
 use smolder_proto::smb::status::NtStatus;
 use smolder_proto::smb::transform::{TransformHeader, TRANSFORM_PROTOCOL_ID};
+use zeroize::Zeroizing;
 
 use crate::compression::CompressionState;
 use crate::crypto::{derive_encryption_keys, EncryptionState};
 use crate::error::CoreError;
+use crate::policy::{dialect_rank, ConfidentialityPolicy, GuestFallbackPolicy, SecurityPolicy};
+use crate::transport::TransportIdentity;
 
 use super::state::{
     DurableHandle, DurableOpenOptions, PreauthIntegrityState, RequestContext, SigningAlgorithm,
     SigningState,
 };
 
-pub(super) fn align_to_8(len: usize) -> usize {
-    (len + 7) & !7
+pub(super) fn align_to_8(len: usize) -> Option<usize> {
+    len.checked_add(7).map(|aligned| aligned & !7)
 }
 
 pub(super) fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreError> {
@@ -67,6 +71,9 @@ pub(super) fn split_compound_packets(payload: &[u8]) -> Result<Vec<&[u8]>, CoreE
                 "compound response next-command offset was invalid",
             ));
         }
+        packets
+            .try_reserve(1)
+            .map_err(|_| CoreError::AllocationFailed("compound SMB response packet index"))?;
         packets.push(&payload[offset..end]);
         if next == 0 {
             break;
@@ -82,15 +89,18 @@ pub(super) fn encode_transport_payload(
     context: &RequestContext,
 ) -> Result<Vec<u8>, CoreError> {
     let session_payload = if context.compress_outbound {
-        context
+        match context
             .compression
             .as_deref()
             .map(|compression| compression.compress_message(payload))
             .transpose()?
             .flatten()
-            .unwrap_or_else(|| payload.to_vec())
+        {
+            Some(compressed) => compressed,
+            None => crate::bounded::copy_bytes(payload, "SMB request payload")?,
+        }
     } else {
-        payload.to_vec()
+        crate::bounded::copy_bytes(payload, "SMB request payload")?
     };
     let session_payload = if context.should_encrypt() {
         let encryption = context
@@ -111,6 +121,7 @@ pub(super) fn encode_transport_payload(
 pub(super) fn decode_transport_payload(
     payload: &[u8],
     context: &RequestContext,
+    maximum: usize,
 ) -> Result<(Vec<u8>, bool), CoreError> {
     if payload.starts_with(&TRANSFORM_PROTOCOL_ID) {
         let encryption = context
@@ -134,7 +145,10 @@ pub(super) fn decode_transport_payload(
                     "received compressed SMB response but no compression state is available",
                 ))?;
             let transform = CompressionTransformHeader::decode(&decrypted)?;
-            return Ok((compression.decompress_message(&transform)?, true));
+            return Ok((
+                compression.decompress_message_with_limit(&transform, maximum)?,
+                true,
+            ));
         }
         return Ok((decrypted, true));
     }
@@ -151,14 +165,20 @@ pub(super) fn decode_transport_payload(
                 "received compressed SMB response but no compression state is available",
             ))?;
         let transform = CompressionTransformHeader::decode(payload)?;
-        return Ok((compression.decompress_message(&transform)?, false));
+        return Ok((
+            compression.decompress_message_with_limit(&transform, maximum)?,
+            false,
+        ));
     }
     if context.should_encrypt() {
         return Err(CoreError::InvalidResponse(
             "session required encryption but the SMB response was not encrypted",
         ));
     }
-    Ok((payload.to_vec(), false))
+    Ok((
+        crate::bounded::copy_bytes(payload, "SMB response payload")?,
+        false,
+    ))
 }
 
 pub(super) fn durable_create_request(
@@ -332,6 +352,261 @@ pub(super) fn verify_response_signature(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NegotiatedSelections {
+    pub(super) cipher: Option<CipherId>,
+    pub(super) transport_security_accepted: bool,
+}
+
+pub(super) fn validate_negotiate_offer(
+    request: &NegotiateRequest,
+    transport_identity: TransportIdentity,
+    policy: SecurityPolicy,
+) -> Result<(), CoreError> {
+    if request.dialects.is_empty() {
+        return Err(CoreError::InvalidInput(
+            "negotiate offer must contain at least one dialect",
+        ));
+    }
+    if request
+        .dialects
+        .iter()
+        .any(|dialect| dialect_rank(*dialect) < dialect_rank(policy.minimum_dialect()))
+    {
+        return Err(CoreError::InvalidInput(
+            "negotiate offer contains a dialect below the local security-policy minimum",
+        ));
+    }
+    if policy.signing_required() && !request.security_mode.contains(SigningMode::REQUIRED) {
+        return Err(CoreError::InvalidInput(
+            "local security policy requires the negotiate offer to require signing",
+        ));
+    }
+    for (index, context) in request.negotiate_contexts.iter().enumerate() {
+        if request.negotiate_contexts[..index]
+            .iter()
+            .any(|prior| prior.context_type == context.context_type)
+        {
+            return Err(CoreError::InvalidInput(
+                "negotiate offer contained a duplicate context type",
+            ));
+        }
+    }
+    let offers_smb311 = request.dialects.contains(&Dialect::Smb311);
+    if !offers_smb311 && !request.negotiate_contexts.is_empty() {
+        return Err(CoreError::InvalidInput(
+            "negotiate contexts require an SMB 3.1.1 offer",
+        ));
+    }
+    if offers_smb311 && single_preauth_context(&request.negotiate_contexts, true)?.is_none() {
+        return Err(CoreError::InvalidInput(
+            "SMB 3.1.1 negotiate requests must include a preauth integrity context",
+        ));
+    }
+    if let Some(encryption) = single_encryption_context(&request.negotiate_contexts, true)? {
+        if !request
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION)
+        {
+            return Err(CoreError::InvalidInput(
+                "negotiate cipher offer requires the SMB encryption capability",
+            ));
+        }
+        if encryption.ciphers.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "negotiate encryption offer must contain at least one cipher",
+            ));
+        }
+    }
+    if let Some(compression) = single_compression_context(&request.negotiate_contexts, true)? {
+        if compression.compression_algorithms.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "negotiate compression offer must contain at least one algorithm",
+            ));
+        }
+    }
+    let transport_offer = single_transport_context(&request.negotiate_contexts, true)?;
+    if transport_offer.is_some() && !transport_identity.is_authenticated_quic() {
+        return Err(CoreError::InvalidInput(
+            "transport-security negotiation requires authenticated QUIC transport identity",
+        ));
+    }
+    if matches!(
+        policy.confidentiality(),
+        ConfidentialityPolicy::RequireSmbEncryption
+            | ConfidentialityPolicy::RequireEncryptionOrAuthenticatedQuic
+    ) {
+        if request
+            .dialects
+            .iter()
+            .any(|dialect| dialect_rank(*dialect) < dialect_rank(Dialect::Smb300))
+        {
+            return Err(CoreError::InvalidInput(
+                "confidentiality policy cannot offer a dialect without SMB encryption",
+            ));
+        }
+        let authenticated_quic_offer = transport_identity.is_authenticated_quic()
+            && transport_offer.is_some()
+            && matches!(
+                policy.confidentiality(),
+                ConfidentialityPolicy::RequireEncryptionOrAuthenticatedQuic
+            );
+        let smb_encryption_offer = request
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION)
+            && (!offers_smb311
+                || single_encryption_context(&request.negotiate_contexts, true)?.is_some());
+        if !authenticated_quic_offer && !smb_encryption_offer {
+            return Err(CoreError::InvalidInput(
+                "negotiate offer cannot satisfy the local confidentiality policy",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_negotiate_selection(
+    request: &NegotiateRequest,
+    response: &NegotiateResponse,
+    transport_identity: TransportIdentity,
+    policy: SecurityPolicy,
+) -> Result<NegotiatedSelections, CoreError> {
+    validate_negotiate_offer(request, transport_identity, policy)?;
+    if !request.dialects.contains(&response.dialect_revision) {
+        return Err(CoreError::InvalidResponse(
+            "server selected an SMB dialect that the client did not offer",
+        ));
+    }
+    if dialect_rank(response.dialect_revision) < dialect_rank(policy.minimum_dialect()) {
+        return Err(CoreError::InvalidResponse(
+            "server selected an SMB dialect below the local security-policy minimum",
+        ));
+    }
+    if policy.signing_required()
+        && !response
+            .security_mode
+            .intersects(SigningMode::ENABLED | SigningMode::REQUIRED)
+    {
+        return Err(CoreError::InvalidResponse(
+            "server did not advertise signing support required by local policy",
+        ));
+    }
+
+    for context in &response.negotiate_contexts {
+        if !request
+            .negotiate_contexts
+            .iter()
+            .any(|offered| offered.context_type == context.context_type)
+        {
+            return Err(CoreError::InvalidResponse(
+                "server returned a negotiate context that the client did not offer",
+            ));
+        }
+        match context.context_type() {
+            Some(
+                NegotiateContextType::PreauthIntegrityCapabilities
+                | NegotiateContextType::EncryptionCapabilities
+                | NegotiateContextType::CompressionCapabilities
+                | NegotiateContextType::TransportCapabilities,
+            ) => {}
+            _ => {
+                return Err(CoreError::Unsupported(
+                    "server selected an unsupported SMB negotiate context",
+                ));
+            }
+        }
+    }
+
+    if response
+        .capabilities
+        .contains(GlobalCapabilities::ENCRYPTION)
+        && !request
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION)
+    {
+        return Err(CoreError::InvalidResponse(
+            "server selected SMB encryption that the client did not offer",
+        ));
+    }
+
+    let cipher = negotiated_cipher(response)?;
+    if cipher.is_some()
+        && !response
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION)
+    {
+        return Err(CoreError::InvalidResponse(
+            "server selected an encryption cipher without advertising SMB encryption",
+        ));
+    }
+    if let Some(cipher) = cipher {
+        if response.dialect_revision == Dialect::Smb311 {
+            let offered = single_encryption_context(&request.negotiate_contexts, true)?.ok_or(
+                CoreError::InvalidResponse(
+                    "server selected an encryption cipher without a client encryption offer",
+                ),
+            )?;
+            if !offered.ciphers.contains(&cipher) {
+                return Err(CoreError::InvalidResponse(
+                    "server selected an encryption cipher that the client did not offer",
+                ));
+            }
+        } else if !request
+            .capabilities
+            .contains(GlobalCapabilities::ENCRYPTION)
+        {
+            return Err(CoreError::InvalidResponse(
+                "server selected SMB encryption that the client did not offer",
+            ));
+        }
+    }
+
+    let requested_transport = single_transport_context(&request.negotiate_contexts, true)?;
+    let received_transport = single_transport_context(&response.negotiate_contexts, false)?;
+    let transport_security_accepted = match received_transport {
+        None => false,
+        Some(received) => {
+            let requested = requested_transport.ok_or(CoreError::InvalidResponse(
+                "server returned transport security without a client transport offer",
+            ))?;
+            if !requested.flags.contains(received.flags) {
+                return Err(CoreError::InvalidResponse(
+                    "server selected transport capabilities that the client did not offer",
+                ));
+            }
+            let accepted = received
+                .flags
+                .contains(TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY);
+            if accepted && !transport_identity.is_authenticated_quic() {
+                return Err(CoreError::InvalidResponse(
+                    "server claimed transport security on a transport without authenticated QUIC identity",
+                ));
+            }
+            accepted
+        }
+    };
+
+    if matches!(
+        policy.confidentiality(),
+        ConfidentialityPolicy::RequireSmbEncryption
+            | ConfidentialityPolicy::RequireEncryptionOrAuthenticatedQuic
+    ) && cipher.is_none()
+        && !(matches!(
+            policy.confidentiality(),
+            ConfidentialityPolicy::RequireEncryptionOrAuthenticatedQuic
+        ) && transport_security_accepted)
+    {
+        return Err(CoreError::InvalidResponse(
+            "negotiation did not establish confidentiality required by local policy",
+        ));
+    }
+
+    Ok(NegotiatedSelections {
+        cipher,
+        transport_security_accepted,
+    })
+}
+
 pub(super) fn negotiate_preauth_integrity_state(
     request: &NegotiateRequest,
     response: &NegotiateResponse,
@@ -437,6 +712,56 @@ fn single_preauth_context(
     Ok(found)
 }
 
+fn single_encryption_context(
+    contexts: &[smolder_proto::smb::smb2::NegotiateContext],
+    request: bool,
+) -> Result<Option<smolder_proto::smb::smb2::EncryptionCapabilities>, CoreError> {
+    let mut found = None;
+    for context in contexts {
+        let Some(encryption) = context.as_encryption_capabilities()? else {
+            continue;
+        };
+        if found.is_some() {
+            return Err(if request {
+                CoreError::InvalidInput(
+                    "SMB 3.1.1 negotiate request contained multiple encryption contexts",
+                )
+            } else {
+                CoreError::InvalidResponse(
+                    "SMB 3.1.1 negotiate response contained multiple encryption contexts",
+                )
+            });
+        }
+        found = Some(encryption);
+    }
+    Ok(found)
+}
+
+fn single_transport_context(
+    contexts: &[smolder_proto::smb::smb2::NegotiateContext],
+    request: bool,
+) -> Result<Option<TransportCapabilities>, CoreError> {
+    let mut found = None;
+    for context in contexts {
+        let Some(transport) = context.as_transport_capabilities()? else {
+            continue;
+        };
+        if found.is_some() {
+            return Err(if request {
+                CoreError::InvalidInput(
+                    "SMB 3.1.1 negotiate request contained multiple transport contexts",
+                )
+            } else {
+                CoreError::InvalidResponse(
+                    "SMB 3.1.1 negotiate response contained multiple transport contexts",
+                )
+            });
+        }
+        found = Some(transport);
+    }
+    Ok(found)
+}
+
 fn single_compression_context(
     contexts: &[smolder_proto::smb::smb2::NegotiateContext],
     request: bool,
@@ -484,27 +809,27 @@ pub(super) fn verify_final_session_setup_response(
     dialect: Dialect,
     header: &Header,
     response_packet: &[u8],
-    signing_required: bool,
+    _signing_required: bool,
     signing: Option<&SigningState>,
 ) -> Result<(), CoreError> {
-    if header.status != NtStatus::SUCCESS.to_u32() || dialect != Dialect::Smb311 {
+    if header.status != NtStatus::SUCCESS.to_u32() {
         return Ok(());
     }
 
-    if !header.flags.contains(HeaderFlags::SIGNED) {
-        if signing_required {
-            return Err(CoreError::InvalidResponse(
-                "SMB 3.1.1 final session setup response must be signed",
-            ));
-        }
-        return Ok(());
+    if header.flags.contains(HeaderFlags::SIGNED) {
+        let signing = signing.ok_or(CoreError::InvalidResponse(
+            "signed final session setup response had no derived signing key",
+        ))?;
+        return signing.verify_packet(response_packet);
     }
 
-    let Some(signing) = signing else {
-        return Ok(());
-    };
+    if dialect == Dialect::Smb311 {
+        return Err(CoreError::InvalidResponse(
+            "SMB 3.1.1 final session setup response must be signed",
+        ));
+    }
 
-    signing.verify_packet(response_packet)
+    Ok(())
 }
 
 pub(super) fn derive_signing_state(
@@ -519,7 +844,7 @@ pub(super) fn derive_signing_state(
     let signing = match dialect {
         Dialect::Smb202 | Dialect::Smb210 => SigningState {
             algorithm: SigningAlgorithm::HmacSha256,
-            key: session_key.to_vec(),
+            key: crate::bounded::copy_bytes(session_key, "SMB signing key")?,
         },
         Dialect::Smb300 | Dialect::Smb302 => SigningState {
             algorithm: SigningAlgorithm::Aes128Cmac,
@@ -549,70 +874,55 @@ pub(super) fn derive_signing_state(
     Ok(Some(Arc::new(signing)))
 }
 
-pub(super) fn derive_smb_session_key(session_key: Option<&[u8]>) -> Option<Vec<u8>> {
-    let session_key = session_key?;
-    let mut smb_session_key = session_key[..session_key.len().min(16)].to_vec();
+pub(super) fn derive_smb_session_key(
+    session_key: Option<&[u8]>,
+) -> Result<Option<Vec<u8>>, CoreError> {
+    let Some(session_key) = session_key else {
+        return Ok(None);
+    };
+    let mut smb_session_key =
+        crate::bounded::copy_bytes(&session_key[..session_key.len().min(16)], "SMB session key")?;
     if smb_session_key.len() < 16 {
+        smb_session_key
+            .try_reserve_exact(16 - smb_session_key.len())
+            .map_err(|_| CoreError::AllocationFailed("SMB session key"))?;
         smb_session_key.resize(16, 0);
     }
-    Some(smb_session_key)
+    Ok(Some(smb_session_key))
 }
 
 pub(super) fn derive_encryption_state(
-    negotiated: &NegotiateResponse,
+    dialect: Dialect,
+    cipher: Option<CipherId>,
+    transport_security_accepted: bool,
     session_key: Option<&[u8]>,
     preauth_integrity: Option<&PreauthIntegrityState>,
 ) -> Result<Option<Arc<EncryptionState>>, CoreError> {
-    if transport_level_security_accepted(negotiated)? {
+    if transport_security_accepted {
         return Ok(None);
     }
     let Some(session_key) = session_key else {
         return Ok(None);
     };
-    let Some(cipher) = negotiated_cipher(negotiated)? else {
+    let Some(cipher) = cipher else {
         return Ok(None);
     };
-    let key_material = match cipher {
-        CipherId::Aes256Ccm | CipherId::Aes256Gcm => session_key.to_vec(),
-        _ => derive_smb_session_key(Some(session_key))
+    let key_material = Zeroizing::new(match cipher {
+        CipherId::Aes256Ccm | CipherId::Aes256Gcm => {
+            crate::bounded::copy_bytes(session_key, "SMB encryption key material")?
+        }
+        _ => derive_smb_session_key(Some(session_key))?
             .ok_or(CoreError::InvalidInput("missing SMB session key"))?,
-    };
+    });
 
     let keys = derive_encryption_keys(
-        negotiated.dialect_revision,
+        dialect,
         cipher,
         &key_material,
         None,
         preauth_integrity.map(|state| state.hash_value.as_slice()),
     )?;
-    Ok(Some(Arc::new(EncryptionState::new(
-        negotiated.dialect_revision,
-        keys,
-    ))))
-}
-
-pub(super) fn transport_level_security_accepted(
-    negotiated: &NegotiateResponse,
-) -> Result<bool, CoreError> {
-    if negotiated.dialect_revision != Dialect::Smb311 {
-        return Ok(false);
-    }
-
-    let mut accepted = false;
-    for context in &negotiated.negotiate_contexts {
-        let Some(capabilities) = context.as_transport_capabilities()? else {
-            continue;
-        };
-        if accepted {
-            return Err(CoreError::InvalidResponse(
-                "SMB 3.1.1 negotiate response contained multiple transport-capabilities contexts",
-            ));
-        }
-        accepted = capabilities
-            .flags
-            .contains(TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY);
-    }
-    Ok(accepted)
+    Ok(Some(Arc::new(EncryptionState::new(dialect, keys))))
 }
 
 pub(super) fn negotiated_cipher(
@@ -667,34 +977,54 @@ pub(super) fn session_signing_required(
     client_signing_mode: SigningMode,
     server_signing_mode: SigningMode,
     session_flags: SessionFlags,
-) -> bool {
-    if session_flags
-        .intersects(SessionFlags::IS_GUEST | SessionFlags::IS_NULL | SessionFlags::ENCRYPT_DATA)
-    {
-        return false;
+    policy: SecurityPolicy,
+) -> Result<bool, CoreError> {
+    if session_flags.intersects(SessionFlags::IS_GUEST | SessionFlags::IS_NULL) {
+        if policy.guest_fallback() == GuestFallbackPolicy::Deny {
+            return Err(CoreError::InvalidResponse(
+                "credentialed authentication fell back to a guest or null SMB session",
+            ));
+        }
+        if policy.signing_required()
+            || client_signing_mode.contains(SigningMode::REQUIRED)
+            || server_signing_mode.contains(SigningMode::REQUIRED)
+        {
+            return Err(CoreError::InvalidResponse(
+                "guest or null SMB session cannot weaken required signing",
+            ));
+        }
+        return Ok(false);
     }
 
-    client_signing_mode.contains(SigningMode::REQUIRED)
-        || server_signing_mode.contains(SigningMode::REQUIRED)
+    Ok(policy.signing_required()
+        || client_signing_mode.contains(SigningMode::REQUIRED)
+        || server_signing_mode.contains(SigningMode::REQUIRED))
 }
 
 pub(super) fn session_encryption_required(
-    negotiated: &NegotiateResponse,
+    transport_security_accepted: bool,
     session_flags: SessionFlags,
-) -> Result<bool, CoreError> {
-    if transport_level_security_accepted(negotiated)? {
-        return Ok(false);
+    policy: SecurityPolicy,
+) -> bool {
+    if transport_security_accepted {
+        return false;
     }
-    Ok(session_flags.contains(SessionFlags::ENCRYPT_DATA))
+    session_flags.contains(SessionFlags::ENCRYPT_DATA)
+        || matches!(
+            policy.confidentiality(),
+            ConfidentialityPolicy::RequireSmbEncryption
+                | ConfidentialityPolicy::RequireEncryptionOrAuthenticatedQuic
+        )
 }
 
 pub(super) fn tree_encryption_required(
-    negotiated: &NegotiateResponse,
+    transport_security_accepted: bool,
     session_flags: SessionFlags,
     share_flags: ShareFlags,
-) -> Result<bool, CoreError> {
-    Ok(session_encryption_required(negotiated, session_flags)?
-        || share_flags.contains(ShareFlags::ENCRYPT_DATA))
+    policy: SecurityPolicy,
+) -> bool {
+    session_encryption_required(transport_security_accepted, session_flags, policy)
+        || share_flags.contains(ShareFlags::ENCRYPT_DATA)
 }
 
 fn derive_key(

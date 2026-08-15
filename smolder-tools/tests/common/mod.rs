@@ -16,6 +16,35 @@ pub fn optional_env(name: &str) -> Option<String> {
     required_env(name)
 }
 
+pub fn required_secret(name: &str) -> Option<String> {
+    let file_name = format!("{name}_FILE");
+    let Some(path) = required_env(&file_name) else {
+        return required_env(name);
+    };
+    let path = std::path::Path::new(&path);
+    let metadata = std::fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("failed to inspect {file_name}: {error}"));
+    assert!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "{file_name} must identify a regular, non-symlink file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            metadata.permissions().mode() & 0o077,
+            0,
+            "{file_name} must not grant group or other permissions"
+        );
+    }
+    let secret = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {file_name}: {error}"));
+    let secret = secret.trim_end_matches(['\r', '\n']).to_owned();
+    assert!(!secret.is_empty(), "{file_name} was empty");
+    assert!(!secret.contains('\0'), "{file_name} contained a NUL byte");
+    Some(secret)
+}
+
 pub fn optional_u16_env(name: &str, default: u16) -> u16 {
     optional_env(name)
         .and_then(|value| value.parse::<u16>().ok())
@@ -38,7 +67,7 @@ pub fn ntlm_credentials(
     credentials
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SambaConfig {
     pub host: String,
     pub port: u16,
@@ -55,7 +84,7 @@ impl SambaConfig {
             host: required_env("SMOLDER_SAMBA_HOST")?,
             port: optional_u16_env("SMOLDER_SAMBA_PORT", 445),
             username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
+            password: required_secret("SMOLDER_SAMBA_PASSWORD")?,
             share: required_env("SMOLDER_SAMBA_SHARE")?,
             domain: optional_env("SMOLDER_SAMBA_DOMAIN"),
             workstation: optional_env("SMOLDER_SAMBA_WORKSTATION"),
@@ -102,7 +131,7 @@ impl SambaConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WindowsConfig {
     pub host: String,
     pub port: u16,
@@ -120,7 +149,7 @@ impl WindowsConfig {
             host: required_env("SMOLDER_WINDOWS_HOST")?,
             port: optional_u16_env("SMOLDER_WINDOWS_PORT", 445),
             username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
+            password: required_secret("SMOLDER_WINDOWS_PASSWORD")?,
             share: optional_env("SMOLDER_WINDOWS_SHARE").unwrap_or_else(|| "ADMIN$".to_string()),
             test_dir: optional_env("SMOLDER_WINDOWS_TEST_DIR")
                 .unwrap_or_else(|| "Temp".to_string()),

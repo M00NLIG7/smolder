@@ -92,6 +92,7 @@ fn assert_successful_bind_ack(bind_ack: BindAckPdu) {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn exchanges_srvsvc_bind_over_windows_named_pipe_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some(config) = WindowsNtlmConfig::from_env() else {
@@ -105,6 +106,7 @@ async fn exchanges_srvsvc_bind_over_windows_named_pipe_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn exchanges_srvsvc_bind_over_samba_named_pipe_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaNtlmConfig::from_env_with_defaults() else {

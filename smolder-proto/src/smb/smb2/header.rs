@@ -214,7 +214,12 @@ impl Header {
         let (async_id, tree_id) = if flags.contains(HeaderFlags::ASYNC_COMMAND) {
             (Some(AsyncId(get_u64(&mut input, "async_id")?)), TreeId(0))
         } else {
-            let _reserved = get_u32(&mut input, "reserved")?;
+            if get_u32(&mut input, "reserved")? != 0 {
+                return Err(ProtocolError::InvalidField {
+                    field: "reserved",
+                    reason: "must be zero",
+                });
+            }
             (None, TreeId(get_u32(&mut input, "tree_id")?))
         };
         let session_id = SessionId(get_u64(&mut input, "session_id")?);

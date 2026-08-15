@@ -7,7 +7,7 @@ use bytes::BufMut;
 
 use super::create::FileId;
 use super::{
-    check_fixed_structure_size, get_array, get_u16, get_u32, get_u64, put_padding,
+    check_fixed_structure_size, copy_bytes, get_array, get_u16, get_u32, get_u64, put_padding,
     slice_from_offset32, utf16le, utf16le_string,
 };
 use crate::smb::ProtocolError;
@@ -149,7 +149,17 @@ impl DfsReferralResponse {
         let header_flags =
             DfsReferralHeaderFlags::from_bits_truncate(get_u32(&mut input, "header_flags")?);
         let mut cursor = 8usize;
-        let mut referrals = Vec::with_capacity(referral_count);
+        if referral_count > bytes.len().saturating_sub(cursor) / 12 {
+            return Err(ProtocolError::UnexpectedEof {
+                field: "dfs_referral_entry",
+            });
+        }
+        let mut referrals = Vec::new();
+        referrals.try_reserve_exact(referral_count).map_err(|_| {
+            ProtocolError::SizeLimitExceeded {
+                field: "dfs_referrals",
+            }
+        })?;
 
         for _ in 0..referral_count {
             if bytes.len().saturating_sub(cursor) < 12 {
@@ -367,7 +377,13 @@ impl IoctlRequest {
     pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
         let mut input = body;
         check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 57, "structure_size")?;
-        let _reserved = get_u16(&mut input, "reserved")?;
+        let reserved = get_u16(&mut input, "reserved")?;
+        if reserved != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "IOCTL request reserved field must be zero",
+            });
+        }
         let ctl_code = CtlCode(get_u32(&mut input, "ctl_code")?);
         let file_id = FileId {
             persistent: get_u64(&mut input, "file_id_persistent")?,
@@ -385,7 +401,13 @@ impl IoctlRequest {
                 reason: "unknown ioctl flags set",
             },
         )?;
-        let _reserved2 = get_u32(&mut input, "reserved2")?;
+        let reserved2 = get_u32(&mut input, "reserved2")?;
+        if reserved2 != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved2",
+                reason: "IOCTL request reserved field must be zero",
+            });
+        }
         if output_offset != 0 || output_count != 0 {
             return Err(ProtocolError::InvalidField {
                 field: "output_offset",
@@ -395,7 +417,10 @@ impl IoctlRequest {
         let input_buffer = if input_offset == 0 || input_count == 0 {
             Vec::new()
         } else {
-            slice_from_offset32(body, input_offset, input_count, "input")?.to_vec()
+            copy_bytes(
+                slice_from_offset32(body, input_offset, input_count, "input")?,
+                "input",
+            )?
         };
 
         Ok(Self {
@@ -463,7 +488,13 @@ impl IoctlResponse {
     pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
         let mut input = body;
         check_fixed_structure_size(get_u16(&mut input, "structure_size")?, 49, "structure_size")?;
-        let _reserved = get_u16(&mut input, "reserved")?;
+        let reserved = get_u16(&mut input, "reserved")?;
+        if reserved != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "IOCTL response reserved field must be zero",
+            });
+        }
         let ctl_code = CtlCode(get_u32(&mut input, "ctl_code")?);
         let file_id = FileId {
             persistent: get_u64(&mut input, "file_id_persistent")?,
@@ -474,16 +505,28 @@ impl IoctlResponse {
         let output_offset = get_u32(&mut input, "output_offset")?;
         let output_count = get_u32(&mut input, "output_count")? as usize;
         let flags = get_u32(&mut input, "flags")?;
-        let _reserved2 = get_u32(&mut input, "reserved2")?;
+        let reserved2 = get_u32(&mut input, "reserved2")?;
+        if reserved2 != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved2",
+                reason: "IOCTL response reserved field must be zero",
+            });
+        }
         let input_buffer = if input_offset == 0 || input_count == 0 {
             Vec::new()
         } else {
-            slice_from_offset32(body, input_offset, input_count, "input")?.to_vec()
+            copy_bytes(
+                slice_from_offset32(body, input_offset, input_count, "input")?,
+                "input",
+            )?
         };
         let output_buffer = if output_offset == 0 || output_count == 0 {
             Vec::new()
         } else {
-            slice_from_offset32(body, output_offset, output_count, "output")?.to_vec()
+            copy_bytes(
+                slice_from_offset32(body, output_offset, output_count, "output")?,
+                "output",
+            )?
         };
 
         Ok(Self {
@@ -551,12 +594,15 @@ fn utf16le_c_string_vec_from_offset(
                 field,
                 reason: "string offset overflow",
             })?;
-    let mut values = Vec::with_capacity(count);
+    if cursor > bytes.len() || count > bytes.len().saturating_sub(cursor) / 2 {
+        return Err(ProtocolError::UnexpectedEof { field });
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| ProtocolError::SizeLimitExceeded { field })?;
 
     for _ in 0..count {
-        if cursor > bytes.len() {
-            return Err(ProtocolError::UnexpectedEof { field });
-        }
         let remaining = &bytes[cursor..];
         let nul = remaining
             .chunks_exact(2)
@@ -796,7 +842,7 @@ impl ResumeKeyResponse {
 
         Ok(Self {
             resume_key,
-            context: input[..context_length].to_vec(),
+            context: copy_bytes(&input[..context_length], "resume_key_context")?,
         })
     }
 }

@@ -22,13 +22,13 @@ This is now pinned in each published crate manifest through `rust-version =
 
 Why `1.85`:
 
-- the workspace currently vendors `kenobi-unix`, which uses Rust 2024 edition
-  support
-- the workspace has been verified with:
-  - `cargo +1.85.0 check -p smolder-proto`
-  - `cargo +1.85.0 check -p smolder-smb-core`
-  - `cargo +1.85.0 check -p smolder`
-  - `cargo +1.85.0 check -p smolder-psexecsvc`
+- it is the reviewed floor for the workspace's crate-local protocol, Kerberos,
+  and transport implementations and their locked dependency graph
+- the workspace is continuously verified with:
+  - `cargo +1.85.0 check --workspace --all-targets --all-features --locked`
+  - `cargo +1.85.0 clippy --workspace --all-targets --all-features --locked -- -D warnings`
+  - deterministic debug, release, property, documentation, extracted-package,
+    and cross-target gates in `.github/workflows/verify.yml`
 
 The MSRV is a release promise for the published crates, not a best-effort guess.
 
@@ -92,9 +92,9 @@ For the published `0.3.x` line, treat these as breaking even before `1.0`:
 
 ## Feature-Flag Policy
 
-- `kerberos` is the stable documented feature surface.
-- `kerberos-gssapi` is an additive backend path and explicit native-linking
-  exception.
+- `kerberos` is the stable target-selecting feature surface.
+- `kerberos-sspi` is Windows-only; `kerberos-gssapi` is the explicit Unix
+  native-linking exception.
 - backend expansion should preserve the top-level auth API unless there is a
   strong reason to do otherwise.
 

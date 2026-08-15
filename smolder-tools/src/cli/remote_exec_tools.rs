@@ -31,10 +31,10 @@ impl RemoteExecTool {
     fn usage(self, program: &str) -> String {
         match self {
             Self::SmbExec => format!(
-                "Usage:\n  {program} smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
+                "Usage:\n  {program} smb://host[:port] --command COMMAND [--workdir PATH] [--timeout 30s] [--username USER] [--password-stdin | --password-file PATH] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM]"
             ),
             Self::PsExec => format!(
-                "Usage:\n  {program} smb://host[:port] --command COMMAND [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]\n  {program} smb://host[:port] --interactive [--command COMMAND] [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password PASS] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM] [--kdc-url URL]"
+                "Usage:\n  {program} smb://host[:port] --command COMMAND [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password-stdin | --password-file PATH] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM]\n  {program} smb://host[:port] --interactive [--command COMMAND] [--service-binary PATH] [--workdir PATH] [--timeout 30s] [--username USER] [--password-stdin | --password-file PATH] [--domain DOMAIN] [--workstation NAME] [--kerberos] [--target-host HOST] [--principal SPN] [--realm REALM]"
             ),
         }
     }
@@ -232,11 +232,12 @@ mod tests {
     use std::time::Duration;
 
     use super::{parse_args, RemoteExecTool};
-    use crate::cli::common::ExecTarget;
+    use crate::cli::common::{ExecTarget, TestPasswordFile};
     use crate::prelude::ExecRequest;
 
     #[test]
     fn parse_smbexec_command_with_target_only_url() {
+        let password = TestPasswordFile::new("pass");
         let options = parse_args(
             RemoteExecTool::SmbExec,
             vec![
@@ -245,7 +246,7 @@ mod tests {
                 "--command=whoami".to_string(),
                 "--timeout=30s".to_string(),
                 "--username=user".to_string(),
-                "--password=pass".to_string(),
+                password.argument(),
             ],
         )
         .expect("parser should accept smbexec arguments");
@@ -269,6 +270,7 @@ mod tests {
 
     #[test]
     fn parse_psexec_command_accepts_workdir() {
+        let password = TestPasswordFile::new("pass");
         let options = parse_args(
             RemoteExecTool::PsExec,
             vec![
@@ -279,7 +281,7 @@ mod tests {
                 "--workdir".to_string(),
                 "C:\\Temp".to_string(),
                 "--username=user".to_string(),
-                "--password=pass".to_string(),
+                password.argument(),
             ],
         )
         .expect("parser should accept psexec arguments");
@@ -303,6 +305,7 @@ mod tests {
 
     #[test]
     fn parse_psexec_command_accepts_service_binary() {
+        let password = TestPasswordFile::new("pass");
         let options = parse_args(
             RemoteExecTool::PsExec,
             vec![
@@ -312,7 +315,7 @@ mod tests {
                 "--service-binary".to_string(),
                 "target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe".to_string(),
                 "--username=user".to_string(),
-                "--password=pass".to_string(),
+                password.argument(),
             ],
         )
         .expect("parser should accept psexec service-binary arguments");
@@ -328,6 +331,7 @@ mod tests {
 
     #[test]
     fn parse_interactive_psexec_allows_missing_command() {
+        let password = TestPasswordFile::new("pass");
         let options = parse_args(
             RemoteExecTool::PsExec,
             vec![
@@ -335,7 +339,7 @@ mod tests {
                 "smb://server".to_string(),
                 "--interactive".to_string(),
                 "--username=user".to_string(),
-                "--password=pass".to_string(),
+                password.argument(),
             ],
         )
         .expect("parser should accept interactive psexec arguments");
@@ -347,6 +351,7 @@ mod tests {
     #[cfg(feature = "kerberos")]
     #[test]
     fn parse_smbexec_command_accepts_kerberos_flags() {
+        let password = TestPasswordFile::new("Passw0rd!");
         let options = parse_args(
             RemoteExecTool::SmbExec,
             vec![
@@ -357,14 +362,11 @@ mod tests {
                 "--kerberos".to_string(),
                 "--username".to_string(),
                 "smolder@LAB.EXAMPLE".to_string(),
-                "--password".to_string(),
-                "Passw0rd!".to_string(),
+                password.argument(),
                 "--target-host".to_string(),
                 "DESKTOP-PTNJUS5.lab.example".to_string(),
                 "--realm".to_string(),
                 "LAB.EXAMPLE".to_string(),
-                "--kdc-url".to_string(),
-                "tcp://dc1.lab.example:1088".to_string(),
             ],
         )
         .expect("parser should accept kerberos smbexec arguments");
@@ -378,9 +380,6 @@ mod tests {
             Some("DESKTOP-PTNJUS5.lab.example")
         );
         assert_eq!(options.auth.kerberos.realm.as_deref(), Some("LAB.EXAMPLE"));
-        assert_eq!(
-            options.auth.kerberos.kdc_url.as_deref(),
-            Some("tcp://dc1.lab.example:1088")
-        );
+        assert_eq!(options.auth.kerberos.kdc_url, None);
     }
 }

@@ -11,9 +11,10 @@ The stable public surface is:
 
 Feature flags:
 
-- `kerberos`: stable public Kerberos API
-- `kerberos-sspi`: current password-backed backend
-- `kerberos-gssapi`: Unix ticket-cache and keytab backend
+- `kerberos`: stable, target-selecting umbrella (SSPI on Windows, GSSAPI on Unix)
+- `kerberos-sspi`: Windows-only native SSPI password backend
+- `kerberos-gssapi`: Unix-only internal GSSAPI wrapper for password, ticket-cache,
+  and non-macOS client-keytab credentials
 
 ## Minimal Kerberos Tree Connect
 
@@ -42,8 +43,8 @@ For the compile-checked examples, see:
 
 - Use real hostnames, not raw IPs, when building SMB Kerberos targets.
 - Prefer direct `cifs/<host>` SPN derivation unless you know you need an override.
-- Keep `kerberos-gssapi` opt-in; it is the Unix/native-linking exception, not
-  the default documented build.
+- Keep Kerberos disabled for a native-link-free Unix build. Both `kerberos`
+  and `kerberos-gssapi` select the explicit Unix GSS/native-linking exception.
 
 ## Fixture And Validation Docs
 

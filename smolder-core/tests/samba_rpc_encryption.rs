@@ -9,6 +9,7 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_LEVEL: u32 = 124;
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaNtlmConfig::from_env_with_defaults() else {

@@ -19,7 +19,7 @@ use smolder_proto::smb::smb2::{
 };
 
 use crate::auth::NtlmCredentials;
-#[cfg(feature = "kerberos-api")]
+#[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
 use crate::auth::{KerberosCredentials, KerberosTarget};
 use crate::client::{
     Authenticated, Connection, DurableHandle, DurableOpenOptions, ResilientHandle, TreeConnected,
@@ -29,6 +29,7 @@ use crate::lsarpc::{LsarpcClient, DEFAULT_POLICY_ACCESS};
 use crate::pipe::{connect_session, NamedPipe, PipeAccess, SmbSessionConfig};
 #[cfg(feature = "quic")]
 use crate::pipe::{connect_session_quic, connect_tree_quic};
+use crate::policy::{OperationTimeouts, ResourceLimits, SecurityPolicy};
 use crate::rpc::PipeRpcClient;
 use crate::samr::SamrClient;
 use crate::srvsvc::SrvsvcClient;
@@ -54,7 +55,7 @@ const DIRECTORY_QUERY_BUFFER_SIZE: u32 = 64 * 1024;
 #[derive(Debug, Clone)]
 enum BuilderAuth {
     Ntlm(NtlmCredentials),
-    #[cfg(feature = "kerberos-api")]
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     Kerberos {
         credentials: KerberosCredentials,
         target: KerberosTarget,
@@ -71,6 +72,9 @@ pub struct ClientBuilder {
     dialects: Vec<Dialect>,
     client_guid: [u8; 16],
     compression: Option<CompressionCapabilities>,
+    security_policy: SecurityPolicy,
+    resource_limits: ResourceLimits,
+    operation_timeouts: OperationTimeouts,
 }
 
 impl ClientBuilder {
@@ -80,14 +84,26 @@ impl ClientBuilder {
         Self {
             target: TransportTarget::tcp(server),
             auth: None,
-            signing_mode: SigningMode::ENABLED,
+            signing_mode: SigningMode::ENABLED | SigningMode::REQUIRED,
             capabilities: GlobalCapabilities::LARGE_MTU
                 | GlobalCapabilities::LEASING
                 | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
             compression: None,
+            security_policy: SecurityPolicy::credentialed(),
+            resource_limits: ResourceLimits::default(),
+            operation_timeouts: OperationTimeouts::default(),
         }
+    }
+
+    /// Creates a strict Pandora-compatible SMB 3.1.1 builder.
+    #[must_use]
+    pub fn pandora(server: impl Into<String>) -> Self {
+        Self::new(server)
+            .with_security_policy(SecurityPolicy::pandora())
+            .with_dialects(vec![Dialect::Smb311])
+            .with_signing_mode(SigningMode::ENABLED | SigningMode::REQUIRED)
     }
 
     /// Overrides the target SMB TCP port.
@@ -166,6 +182,27 @@ impl ClientBuilder {
         self
     }
 
+    /// Replaces the local security policy.
+    #[must_use]
+    pub fn with_security_policy(mut self, security_policy: SecurityPolicy) -> Self {
+        self.security_policy = security_policy;
+        self
+    }
+
+    /// Replaces explicit limits for remote-controlled resources.
+    #[must_use]
+    pub fn with_resource_limits(mut self, resource_limits: ResourceLimits) -> Self {
+        self.resource_limits = resource_limits;
+        self
+    }
+
+    /// Replaces internal connect and request deadlines.
+    #[must_use]
+    pub fn with_operation_timeouts(mut self, operation_timeouts: OperationTimeouts) -> Self {
+        self.operation_timeouts = operation_timeouts;
+        self
+    }
+
     /// Configures NTLM credentials for the client.
     #[must_use]
     pub fn with_ntlm_credentials(mut self, credentials: NtlmCredentials) -> Self {
@@ -174,10 +211,14 @@ impl ClientBuilder {
     }
 
     /// Configures Kerberos credentials for the client.
-    #[cfg(feature = "kerberos-api")]
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(feature = "kerberos", feature = "kerberos-gssapi")))
+        doc(cfg(any(
+            feature = "kerberos",
+            feature = "kerberos-sspi",
+            feature = "kerberos-gssapi"
+        )))
     )]
     #[must_use]
     pub fn with_kerberos_credentials(
@@ -202,7 +243,7 @@ impl ClientBuilder {
             BuilderAuth::Ntlm(credentials) => {
                 SmbSessionConfig::new(self.target.server().to_owned(), credentials)
             }
-            #[cfg(feature = "kerberos-api")]
+            #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
             BuilderAuth::Kerberos {
                 credentials,
                 target,
@@ -212,7 +253,10 @@ impl ClientBuilder {
         .with_signing_mode(self.signing_mode)
         .with_capabilities(self.capabilities)
         .with_dialects(self.dialects)
-        .with_client_guid(self.client_guid);
+        .with_client_guid(self.client_guid)
+        .with_security_policy(self.security_policy)
+        .with_resource_limits(self.resource_limits)
+        .with_operation_timeouts(self.operation_timeouts);
         let config = if let Some(compression) = self.compression {
             config.with_compression_capabilities(compression)
         } else {
@@ -234,6 +278,12 @@ impl Client {
     #[must_use]
     pub fn builder(server: impl Into<String>) -> ClientBuilder {
         ClientBuilder::new(server)
+    }
+
+    /// Starts a strict Pandora-compatible SMB 3.1.1 builder.
+    #[must_use]
+    pub fn pandora_builder(server: impl Into<String>) -> ClientBuilder {
+        ClientBuilder::pandora(server)
     }
 
     /// Wraps an existing session configuration as a high-level client.
@@ -500,7 +550,9 @@ where
         let mut rpc = self
             .connect_rpc_pipe(pipe_name, PipeAccess::ReadWrite)
             .await?;
-        rpc.bind_context(context_id, abstract_syntax).await?;
+        if let Err(error) = rpc.bind_context(context_id, abstract_syntax).await {
+            return Err(rpc.close_after_error(error).await);
+        }
         Ok(rpc)
     }
 
@@ -625,7 +677,16 @@ where
         };
 
         let resilient_handle = if let Some(timeout) = options.resilient_timeout {
-            Some(self.connection.request_resiliency(file_id, timeout).await?)
+            match self.connection.request_resiliency(file_id, timeout).await {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    let _ = self
+                        .connection
+                        .close(&CloseRequest { flags: 0, file_id })
+                        .await;
+                    return Err(error);
+                }
+            }
         } else {
             None
         };
@@ -669,7 +730,9 @@ where
         let mut rpc = self
             .connect_rpc_pipe(pipe_name, PipeAccess::ReadWrite)
             .await?;
-        rpc.bind_context(context_id, abstract_syntax).await?;
+        if let Err(error) = rpc.bind_context(context_id, abstract_syntax).await {
+            return Err(rpc.close_after_error(error).await);
+        }
         Ok(rpc)
     }
 
@@ -718,28 +781,69 @@ where
             .to_create_request(&normalized_path)?;
         let response = self.connection.create(&create_request).await?;
         let file_id = response.file_id;
-        let size = self.stat_by_id(file_id).await?.size;
-        let mut output = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
-        let mut offset = 0u64;
-
-        while offset < size {
-            let remaining = size - offset;
-            let chunk_len = remaining.min(MAX_IO_CHUNK_SIZE as u64) as u32;
-            let response = self
-                .connection
-                .read(&ReadRequest::for_file(file_id, offset, chunk_len))
-                .await?;
-            if response.data.is_empty() {
-                break;
+        let maximum = self.connection.resource_limits().max_whole_file_size;
+        let operation = async {
+            let size = self.stat_by_id(file_id).await?.size;
+            if size > maximum {
+                return Err(CoreError::ResourceLimit {
+                    resource: "whole-file read",
+                    requested: size,
+                    maximum,
+                });
             }
-            offset = offset.saturating_add(response.data.len() as u64);
-            output.extend_from_slice(&response.data);
-        }
+            let capacity = usize::try_from(size).map_err(|_| CoreError::ResourceLimit {
+                resource: "whole-file read",
+                requested: size,
+                maximum,
+            })?;
+            let mut output = Vec::new();
+            output
+                .try_reserve_exact(capacity)
+                .map_err(|_| CoreError::AllocationFailed("whole-file read"))?;
+            let mut offset = 0u64;
 
-        self.connection
+            while offset < size {
+                let remaining = size - offset;
+                let chunk_len = remaining.min(MAX_IO_CHUNK_SIZE as u64) as u32;
+                let response = self
+                    .connection
+                    .read(&ReadRequest::for_file(file_id, offset, chunk_len))
+                    .await?;
+                if response.data.is_empty() {
+                    break;
+                }
+                let new_len = output.len().checked_add(response.data.len()).ok_or(
+                    CoreError::ResourceLimit {
+                        resource: "whole-file read",
+                        requested: u64::MAX,
+                        maximum,
+                    },
+                )?;
+                if new_len as u64 > maximum {
+                    return Err(CoreError::ResourceLimit {
+                        resource: "whole-file read",
+                        requested: new_len as u64,
+                        maximum,
+                    });
+                }
+                offset = offset
+                    .checked_add(response.data.len() as u64)
+                    .ok_or(CoreError::InvalidResponse("file read offset overflowed"))?;
+                output.extend_from_slice(&response.data);
+            }
+            Ok(output)
+        }
+        .await;
+
+        let close = self
+            .connection
             .close(&CloseRequest { flags: 0, file_id })
-            .await?;
-        Ok(output)
+            .await;
+        match (operation, close) {
+            (Ok(output), Ok(_)) => Ok(output),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     /// Reads the full contents of a file on the current tree.
@@ -751,7 +855,18 @@ where
     }
 
     /// Writes the full contents of a file on the current tree, creating it when absent.
+    ///
+    /// The in-memory convenience helper is capped by [`ResourceLimits::max_whole_file_size`]. Use
+    /// [`Share::open_writer`] and chunked [`File::write_all`] calls for larger streaming writes.
     pub async fn write(&mut self, path: &str, data: &[u8]) -> Result<(), CoreError> {
+        let maximum = self.connection.resource_limits().max_whole_file_size;
+        if data.len() as u64 > maximum {
+            return Err(CoreError::ResourceLimit {
+                resource: "whole-file write",
+                requested: data.len() as u64,
+                maximum,
+            });
+        }
         let normalized_path = normalize_share_path(path)?;
         let create_request = OpenOptions::new()
             .write(true)
@@ -760,27 +875,34 @@ where
             .to_create_request(&normalized_path)?;
         let response = self.connection.create(&create_request).await?;
         let file_id = response.file_id;
-        let mut offset = 0u64;
-
-        while (offset as usize) < data.len() {
-            let chunk_end = (offset as usize + MAX_IO_CHUNK_SIZE).min(data.len());
+        let operation = async {
+            let mut offset = 0usize;
+            while offset < data.len() {
+                let chunk_end = offset.saturating_add(MAX_IO_CHUNK_SIZE).min(data.len());
+                self.connection
+                    .write(&WriteRequest::for_file(
+                        file_id,
+                        offset as u64,
+                        data[offset..chunk_end].to_vec(),
+                    ))
+                    .await?;
+                offset = chunk_end;
+            }
             self.connection
-                .write(&WriteRequest::for_file(
-                    file_id,
-                    offset,
-                    data[offset as usize..chunk_end].to_vec(),
-                ))
+                .flush(&FlushRequest::for_file(file_id))
                 .await?;
-            offset = chunk_end as u64;
+            Ok(())
         }
-
-        self.connection
-            .flush(&FlushRequest::for_file(file_id))
-            .await?;
-        self.connection
+        .await;
+        let close = self
+            .connection
             .close(&CloseRequest { flags: 0, file_id })
-            .await?;
-        Ok(())
+            .await;
+        match (operation, close) {
+            (Ok(()), Ok(_)) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+        }
     }
 
     /// Writes the full contents of a file on the current tree, creating it when absent.
@@ -801,11 +923,16 @@ where
         create_request.create_options = CreateOptions::NON_DIRECTORY_FILE;
         let response = self.connection.create(&create_request).await?;
         let file_id = response.file_id;
-        let metadata = self.stat_by_id(file_id).await?;
-        self.connection
+        let metadata = self.stat_by_id(file_id).await;
+        let close = self
+            .connection
             .close(&CloseRequest { flags: 0, file_id })
-            .await?;
-        Ok(metadata)
+            .await;
+        match (metadata, close) {
+            (Ok(metadata), Ok(_)) => Ok(metadata),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     /// Queries file metadata on the current tree.
@@ -830,29 +957,56 @@ where
         let response = self.connection.create(&create_request).await?;
         let file_id = response.file_id;
 
+        let limits = self.connection.resource_limits();
         let list_result = async {
             let mut request =
                 QueryDirectoryRequest::for_pattern(file_id, "*", DIRECTORY_QUERY_BUFFER_SIZE);
             let mut entries = Vec::new();
 
-            loop {
+            for _ in 0..limits.max_directory_pages {
                 let response = self.connection.query_directory(&request).await?;
-                let batch = response
-                    .directory_entries()
-                    .map_err(CoreError::from)?
-                    .into_iter()
-                    .filter(|entry| entry.file_name != "." && entry.file_name != "..")
-                    .map(directory_entry_from_info)
-                    .collect::<Vec<_>>();
-                if batch.is_empty() {
-                    break;
+                let decoded = response.directory_entries().map_err(CoreError::from)?;
+                if decoded.is_empty() {
+                    return Ok(entries);
                 }
+                let mut batch = Vec::new();
+                batch
+                    .try_reserve_exact(decoded.len())
+                    .map_err(|_| CoreError::AllocationFailed("SMB directory entry page"))?;
+                for entry in decoded {
+                    if entry.file_name != "." && entry.file_name != ".." {
+                        batch.push(directory_entry_from_info(entry));
+                    }
+                }
+                let new_len =
+                    entries
+                        .len()
+                        .checked_add(batch.len())
+                        .ok_or(CoreError::ResourceLimit {
+                            resource: "SMB directory entries",
+                            requested: u64::MAX,
+                            maximum: limits.max_directory_entries as u64,
+                        })?;
+                if new_len > limits.max_directory_entries {
+                    return Err(CoreError::ResourceLimit {
+                        resource: "SMB directory entries",
+                        requested: new_len as u64,
+                        maximum: limits.max_directory_entries as u64,
+                    });
+                }
+                entries
+                    .try_reserve(batch.len())
+                    .map_err(|_| CoreError::AllocationFailed("SMB directory entries"))?;
                 entries.extend(batch);
                 request.flags = QueryDirectoryFlags::empty();
                 request.file_name.clear();
             }
 
-            Ok(entries)
+            Err(CoreError::ResourceLimit {
+                resource: "SMB directory pages",
+                requested: limits.max_directory_pages.saturating_add(1) as u64,
+                maximum: limits.max_directory_pages as u64,
+            })
         }
         .await;
 
@@ -943,7 +1097,8 @@ where
         create_request.create_options = CreateOptions::NON_DIRECTORY_FILE;
         let response = self.connection.create(&create_request).await?;
         let file_id = response.file_id;
-        self.connection
+        let remove = self
+            .connection
             .set_info(&SetInfoRequest::for_file_info(
                 file_id,
                 FileInfoClass::DispositionInformation,
@@ -952,11 +1107,16 @@ where
                 }
                 .encode(),
             ))
-            .await?;
-        self.connection
+            .await;
+        let close = self
+            .connection
             .close(&CloseRequest { flags: 0, file_id })
-            .await?;
-        Ok(())
+            .await;
+        match (remove, close) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     /// Opens an existing file on the current tree for read access.
@@ -1013,7 +1173,7 @@ where
 }
 
 /// High-level open options for the embedded client facade.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenOptions {
     read: bool,
     write: bool,
@@ -1109,20 +1269,6 @@ impl OpenOptions {
                 durable
             }
         })
-    }
-}
-
-impl Default for OpenOptions {
-    fn default() -> Self {
-        Self {
-            read: false,
-            write: false,
-            create: false,
-            create_new: false,
-            truncate: false,
-            durable: None,
-            resilient_timeout: None,
-        }
     }
 }
 
@@ -1239,7 +1385,23 @@ where
     /// Reads the full contents of the open file.
     pub async fn read_all(&mut self) -> Result<Vec<u8>, CoreError> {
         let metadata = self.stat().await?;
-        let mut output = Vec::with_capacity(usize::try_from(metadata.size).unwrap_or(0));
+        let maximum = self.share.connection.resource_limits().max_whole_file_size;
+        if metadata.size > maximum {
+            return Err(CoreError::ResourceLimit {
+                resource: "whole-file read",
+                requested: metadata.size,
+                maximum,
+            });
+        }
+        let capacity = usize::try_from(metadata.size).map_err(|_| CoreError::ResourceLimit {
+            resource: "whole-file read",
+            requested: metadata.size,
+            maximum,
+        })?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .map_err(|_| CoreError::AllocationFailed("whole-file read"))?;
         let mut offset = 0u64;
 
         while offset < metadata.size {
@@ -1253,7 +1415,25 @@ where
             if response.data.is_empty() {
                 break;
             }
-            offset = offset.saturating_add(response.data.len() as u64);
+            let new_len =
+                output
+                    .len()
+                    .checked_add(response.data.len())
+                    .ok_or(CoreError::ResourceLimit {
+                        resource: "whole-file read",
+                        requested: u64::MAX,
+                        maximum,
+                    })?;
+            if new_len as u64 > maximum {
+                return Err(CoreError::ResourceLimit {
+                    resource: "whole-file read",
+                    requested: new_len as u64,
+                    maximum,
+                });
+            }
+            offset = offset
+                .checked_add(response.data.len() as u64)
+                .ok_or(CoreError::InvalidResponse("file read offset overflowed"))?;
             output.extend_from_slice(&response.data);
         }
 
@@ -1512,11 +1692,11 @@ mod tests {
     };
     use smolder_proto::smb::status::NtStatus;
 
-    use crate::auth::NtlmAuthenticator;
-    use crate::auth::NtlmCredentials;
-    #[cfg(feature = "kerberos-api")]
+    use crate::auth::{AuthError, AuthProvider, NtlmCredentials};
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     use crate::auth::{KerberosCredentials, KerberosTarget};
     use crate::client::Connection;
+    use crate::policy::{ResourceLimits, SecurityPolicy};
     use crate::transport::Transport;
     use crate::transport::{TransportProtocol, TransportTarget};
 
@@ -1536,6 +1716,30 @@ mod tests {
             Self {
                 reads: reads.into(),
                 writes: Vec::new(),
+            }
+        }
+    }
+
+    struct FixtureAuthProvider;
+
+    impl AuthProvider for FixtureAuthProvider {
+        fn initial_token(&mut self, _negotiate: &NegotiateResponse) -> Result<Vec<u8>, AuthError> {
+            Ok(vec![0x60, 0x48])
+        }
+
+        fn next_token(&mut self, _incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
+            Err(AuthError::InvalidState(
+                "facade fixture unexpectedly requested another token",
+            ))
+        }
+
+        fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
+            if incoming.is_empty() {
+                Ok(())
+            } else {
+                Err(AuthError::InvalidToken(
+                    "facade fixture rejected the final token",
+                ))
             }
         }
     }
@@ -1563,6 +1767,7 @@ mod tests {
         body: Vec<u8>,
     ) -> Vec<u8> {
         let mut header = Header::new(command, MessageId(message_id));
+        header.flags |= smolder_proto::smb::smb2::HeaderFlags::SERVER_TO_REDIR;
         header.status = status;
         header.credit_request_response = 1;
         header.session_id = smolder_proto::smb::smb2::SessionId(session_id);
@@ -1609,6 +1814,13 @@ mod tests {
     }
 
     async fn build_share(reads: Vec<Vec<u8>>) -> Share<ScriptedTransport> {
+        build_share_with_limits(reads, ResourceLimits::default()).await
+    }
+
+    async fn build_share_with_limits(
+        reads: Vec<Vec<u8>>,
+        limits: ResourceLimits,
+    ) -> Share<ScriptedTransport> {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb302,
@@ -1670,12 +1882,12 @@ mod tests {
             negotiate_contexts: Vec::new(),
         };
         let connection = Connection::new(transport)
+            .with_resource_limits(limits)
             .negotiate(&negotiate_request)
             .await
             .expect("negotiate should succeed");
-        let mut auth = NtlmAuthenticator::new(NtlmCredentials::new("user", "pass"));
         let connection = connection
-            .authenticate(&mut auth)
+            .authenticate(&mut FixtureAuthProvider)
             .await
             .expect("authenticate should succeed");
         let connection = connection
@@ -1727,6 +1939,22 @@ mod tests {
     }
 
     #[test]
+    fn pandora_builder_constructs_the_strict_smb311_boundary() {
+        let client = Client::pandora_builder("server")
+            .with_ntlm_credentials(NtlmCredentials::new("user", "pass"))
+            .build()
+            .expect("Pandora builder should produce a client");
+        let config = client.session_config();
+
+        assert_eq!(config.dialects(), &[Dialect::Smb311]);
+        assert!(config.signing_mode().contains(SigningMode::REQUIRED));
+        assert_eq!(config.security_policy(), SecurityPolicy::pandora());
+        assert!(config
+            .capabilities()
+            .contains(GlobalCapabilities::ENCRYPTION));
+    }
+
+    #[test]
     fn builder_can_override_transport_target() {
         let client = ClientBuilder::new("server")
             .with_transport_target(
@@ -1767,7 +1995,7 @@ mod tests {
         assert_eq!(client.transport_protocol(), TransportProtocol::Tcp);
     }
 
-    #[cfg(feature = "kerberos-api")]
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     #[test]
     fn kerberos_builder_produces_client() {
         let credentials = {
@@ -1834,6 +2062,32 @@ mod tests {
         );
         assert!(normalize_pipe_name("").is_err());
         assert!(normalize_pipe_name("\0bad").is_err());
+    }
+
+    #[tokio::test]
+    async fn whole_file_write_rejects_the_policy_limit_before_opening_a_handle() {
+        let mut share = build_share_with_limits(
+            Vec::new(),
+            ResourceLimits {
+                max_whole_file_size: 3,
+                ..ResourceLimits::default()
+            },
+        )
+        .await;
+
+        let error = share
+            .write("too-large.txt", b"four")
+            .await
+            .expect_err("whole-file write should honor its resource limit");
+        assert!(matches!(
+            error,
+            crate::error::CoreError::ResourceLimit {
+                resource: "whole-file write",
+                requested: 4,
+                maximum: 3,
+            }
+        ));
+        assert_eq!(share.connection.into_transport().writes.len(), 3);
     }
 
     #[tokio::test]

@@ -123,6 +123,15 @@ impl CompressionTransformHeader {
             reason: "unknown compression flags set",
         })?;
 
+        let payload_bytes = &packet[COMPRESSION_TRANSFORM_HEADER_LEN..];
+        let mut payload = Vec::new();
+        payload
+            .try_reserve_exact(payload_bytes.len())
+            .map_err(|_| ProtocolError::SizeLimitExceeded {
+                field: "compression_payload",
+            })?;
+        payload.extend_from_slice(payload_bytes);
+
         Ok(Self {
             original_compressed_segment_size: u32::from_le_bytes(packet[4..8].try_into().map_err(
                 |_| ProtocolError::UnexpectedEof {
@@ -142,7 +151,7 @@ impl CompressionTransformHeader {
                     field: "offset_or_length",
                 }
             })?),
-            payload: packet[COMPRESSION_TRANSFORM_HEADER_LEN..].to_vec(),
+            payload,
         })
     }
 

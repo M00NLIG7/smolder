@@ -67,7 +67,7 @@ scripts/run-windows-quic-interop.sh
 That runs:
 
 ```bash
-cargo test -p smolder-smb-core --features quic --test windows_quic -- --nocapture
+cargo test -p smolder-smb-core --features quic --test windows_quic -- --ignored --nocapture
 ```
 
 ## Current Coverage

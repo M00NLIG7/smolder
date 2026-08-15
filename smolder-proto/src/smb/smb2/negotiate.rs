@@ -6,7 +6,7 @@ use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
 
 use super::{
-    check_fixed_structure_size, get_array, get_u16, get_u32, get_u64, put_padding,
+    check_fixed_structure_size, copy_bytes, get_array, get_u16, get_u32, get_u64, put_padding,
     slice_from_offset, HEADER_LEN,
 };
 use crate::smb::compression::{CompressionAlgorithm, CompressionCapabilityFlags};
@@ -230,7 +230,12 @@ impl CompressionCapabilities {
     pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
         let mut input = data;
         let algorithm_count = usize::from(get_u16(&mut input, "compression_algorithm_count")?);
-        let _padding = get_u16(&mut input, "padding")?;
+        if get_u16(&mut input, "padding")? != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "padding",
+                reason: "must be zero",
+            });
+        }
         let flags = CompressionCapabilityFlags::from_bits(get_u32(&mut input, "flags")?).ok_or(
             ProtocolError::InvalidField {
                 field: "flags",
@@ -244,12 +249,39 @@ impl CompressionCapabilities {
             });
         }
 
-        let mut compression_algorithms = Vec::with_capacity(algorithm_count);
+        let algorithm_bytes =
+            algorithm_count
+                .checked_mul(2)
+                .ok_or(ProtocolError::SizeLimitExceeded {
+                    field: "compression_algorithms",
+                })?;
+        if input.len() < algorithm_bytes {
+            return Err(ProtocolError::UnexpectedEof {
+                field: "compression_algorithm",
+            });
+        }
+        let mut compression_algorithms = Vec::new();
+        compression_algorithms
+            .try_reserve_exact(algorithm_count)
+            .map_err(|_| ProtocolError::SizeLimitExceeded {
+                field: "compression_algorithms",
+            })?;
         for _ in 0..algorithm_count {
-            compression_algorithms.push(CompressionAlgorithm::try_from(get_u16(
-                &mut input,
-                "compression_algorithm",
-            )?)?);
+            let algorithm =
+                CompressionAlgorithm::try_from(get_u16(&mut input, "compression_algorithm")?)?;
+            if compression_algorithms.contains(&algorithm) {
+                return Err(ProtocolError::InvalidField {
+                    field: "compression_algorithm",
+                    reason: "duplicate compression algorithm",
+                });
+            }
+            compression_algorithms.push(algorithm);
+        }
+        if !input.is_empty() {
+            return Err(ProtocolError::InvalidField {
+                field: "compression_capabilities",
+                reason: "trailing bytes after compression algorithms",
+            });
         }
 
         Ok(Self {
@@ -277,6 +309,12 @@ impl TransportCapabilities {
                 reason: "unknown transport capability flags set",
             },
         )?;
+        if !input.is_empty() {
+            return Err(ProtocolError::InvalidField {
+                field: "transport_capabilities",
+                reason: "trailing bytes after transport capability flags",
+            });
+        }
         Ok(Self { flags })
     }
 }
@@ -304,9 +342,31 @@ impl EncryptionCapabilities {
             });
         }
 
-        let mut ciphers = Vec::with_capacity(cipher_count);
+        let cipher_bytes = cipher_count
+            .checked_mul(2)
+            .ok_or(ProtocolError::SizeLimitExceeded { field: "ciphers" })?;
+        if input.len() < cipher_bytes {
+            return Err(ProtocolError::UnexpectedEof { field: "cipher_id" });
+        }
+        let mut ciphers = Vec::new();
+        ciphers
+            .try_reserve_exact(cipher_count)
+            .map_err(|_| ProtocolError::SizeLimitExceeded { field: "ciphers" })?;
         for _ in 0..cipher_count {
-            ciphers.push(CipherId::try_from(get_u16(&mut input, "cipher_id")?)?);
+            let cipher = CipherId::try_from(get_u16(&mut input, "cipher_id")?)?;
+            if ciphers.contains(&cipher) {
+                return Err(ProtocolError::InvalidField {
+                    field: "cipher_id",
+                    reason: "duplicate encryption cipher",
+                });
+            }
+            ciphers.push(cipher);
+        }
+        if !input.is_empty() {
+            return Err(ProtocolError::InvalidField {
+                field: "encryption_capabilities",
+                reason: "trailing bytes after encryption ciphers",
+            });
         }
 
         Ok(Self { ciphers })
@@ -348,17 +408,51 @@ impl PreauthIntegrityCapabilities {
             });
         }
 
-        let mut hash_algorithms = Vec::with_capacity(hash_algorithm_count);
+        let algorithm_bytes =
+            hash_algorithm_count
+                .checked_mul(2)
+                .ok_or(ProtocolError::SizeLimitExceeded {
+                    field: "hash_algorithms",
+                })?;
+        let required =
+            algorithm_bytes
+                .checked_add(salt_length)
+                .ok_or(ProtocolError::SizeLimitExceeded {
+                    field: "preauth_integrity_capabilities",
+                })?;
+        if input.len() < required {
+            return Err(ProtocolError::UnexpectedEof {
+                field: "preauth_integrity_capabilities",
+            });
+        }
+        let mut hash_algorithms = Vec::new();
+        hash_algorithms
+            .try_reserve_exact(hash_algorithm_count)
+            .map_err(|_| ProtocolError::SizeLimitExceeded {
+                field: "hash_algorithms",
+            })?;
         for _ in 0..hash_algorithm_count {
-            hash_algorithms.push(PreauthIntegrityHashId::try_from(get_u16(
-                &mut input,
-                "hash_algorithm",
-            )?)?);
+            let algorithm =
+                PreauthIntegrityHashId::try_from(get_u16(&mut input, "hash_algorithm")?)?;
+            if hash_algorithms.contains(&algorithm) {
+                return Err(ProtocolError::InvalidField {
+                    field: "hash_algorithm",
+                    reason: "duplicate preauth hash algorithm",
+                });
+            }
+            hash_algorithms.push(algorithm);
         }
-        if input.len() < salt_length {
-            return Err(ProtocolError::UnexpectedEof { field: "salt" });
+        let mut salt = Vec::new();
+        salt.try_reserve_exact(salt_length)
+            .map_err(|_| ProtocolError::SizeLimitExceeded { field: "salt" })?;
+        salt.extend_from_slice(&input[..salt_length]);
+        input = &input[salt_length..];
+        if !input.is_empty() {
+            return Err(ProtocolError::InvalidField {
+                field: "preauth_integrity_capabilities",
+                reason: "trailing bytes after preauth salt",
+            });
         }
-        let salt = input[..salt_length].to_vec();
 
         Ok(Self {
             hash_algorithms,
@@ -483,6 +577,30 @@ impl NegotiateRequest {
                 reason: "at least one dialect is required",
             });
         }
+        for (index, dialect) in self.dialects.iter().enumerate() {
+            if self.dialects[..index].contains(dialect) {
+                return Err(ProtocolError::InvalidField {
+                    field: "dialects",
+                    reason: "duplicate dialect revision",
+                });
+            }
+        }
+        for (index, context) in self.negotiate_contexts.iter().enumerate() {
+            if context.data.len() > usize::from(u16::MAX) {
+                return Err(ProtocolError::SizeLimitExceeded {
+                    field: "negotiate_context_data",
+                });
+            }
+            if self.negotiate_contexts[..index]
+                .iter()
+                .any(|prior| prior.context_type == context.context_type)
+            {
+                return Err(ProtocolError::InvalidField {
+                    field: "negotiate_contexts",
+                    reason: "duplicate negotiate context type",
+                });
+            }
+        }
 
         let dialect_count = u16::try_from(self.dialects.len())
             .map_err(|_| ProtocolError::SizeLimitExceeded { field: "dialects" })?;
@@ -539,7 +657,12 @@ impl NegotiateRequest {
                 reason: "unknown signing bits set",
             },
         )?;
-        let _reserved = get_u16(&mut input, "reserved")?;
+        if get_u16(&mut input, "reserved")? != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "must be zero",
+            });
+        }
         let capabilities = GlobalCapabilities::from_bits(get_u32(&mut input, "capabilities")?)
             .ok_or(ProtocolError::InvalidField {
                 field: "capabilities",
@@ -548,17 +671,66 @@ impl NegotiateRequest {
         let client_guid = get_array::<16>(&mut input, "client_guid")?;
         let context_offset = get_u32(&mut input, "context_offset")?;
         let context_count = usize::from(get_u16(&mut input, "context_count")?);
-        let _reserved2 = get_u16(&mut input, "reserved2")?;
-
-        let mut dialects = Vec::with_capacity(dialect_count);
-        for _ in 0..dialect_count {
-            dialects.push(Dialect::try_from(get_u16(&mut input, "dialect")?)?);
+        if get_u16(&mut input, "reserved2")? != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved2",
+                reason: "must be zero",
+            });
         }
 
-        let negotiate_contexts = if context_count == 0 {
-            Vec::new()
-        } else {
-            decode_contexts(body, context_offset as u16, context_count)?
+        if dialect_count == 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "dialect_count",
+                reason: "at least one dialect is required",
+            });
+        }
+        let dialect_bytes = dialect_count
+            .checked_mul(2)
+            .ok_or(ProtocolError::SizeLimitExceeded { field: "dialects" })?;
+        if input.len() < dialect_bytes {
+            return Err(ProtocolError::UnexpectedEof { field: "dialect" });
+        }
+        let mut dialects = Vec::new();
+        dialects
+            .try_reserve_exact(dialect_count)
+            .map_err(|_| ProtocolError::SizeLimitExceeded { field: "dialects" })?;
+        for _ in 0..dialect_count {
+            let dialect = Dialect::try_from(get_u16(&mut input, "dialect")?)?;
+            if dialects.contains(&dialect) {
+                return Err(ProtocolError::InvalidField {
+                    field: "dialect",
+                    reason: "duplicate dialect revision",
+                });
+            }
+            dialects.push(dialect);
+        }
+
+        let negotiate_contexts = match (context_count, context_offset) {
+            (0, 0) => Vec::new(),
+            (0, _) => {
+                return Err(ProtocolError::InvalidField {
+                    field: "context_offset",
+                    reason: "context offset must be zero when context count is zero",
+                });
+            }
+            (_, 0) => {
+                return Err(ProtocolError::InvalidField {
+                    field: "context_offset",
+                    reason: "context offset must be nonzero when contexts are present",
+                });
+            }
+            (_, _) => {
+                if !dialects.contains(&Dialect::Smb311) {
+                    return Err(ProtocolError::InvalidField {
+                        field: "context_count",
+                        reason: "negotiate contexts require the SMB 3.1.1 dialect",
+                    });
+                }
+                let variable_end = 36usize
+                    .checked_add(dialect_bytes)
+                    .ok_or(ProtocolError::SizeLimitExceeded { field: "dialects" })?;
+                decode_contexts(body, context_offset, context_count, align_8(variable_end))?
+            }
         };
 
         Ok(Self {
@@ -664,17 +836,56 @@ impl NegotiateResponse {
         let security_buffer_len = usize::from(get_u16(&mut input, "security_buffer_len")?);
         let context_offset = get_u32(&mut input, "context_offset")?;
 
-        let security_buffer = slice_from_offset(
-            body,
-            security_buffer_offset,
-            security_buffer_len,
+        let security_buffer = copy_bytes(
+            slice_from_offset(
+                body,
+                security_buffer_offset,
+                security_buffer_len,
+                "security_buffer",
+            )?,
             "security_buffer",
-        )?
-        .to_vec();
-        let negotiate_contexts = if context_count == 0 || context_offset == 0 {
-            Vec::new()
-        } else {
-            decode_contexts(body, context_offset as u16, context_count)?
+        )?;
+        let security_start = usize::from(security_buffer_offset)
+            .checked_sub(HEADER_LEN)
+            .ok_or(ProtocolError::InvalidField {
+                field: "security_buffer_offset",
+                reason: "offset points before SMB2 body",
+            })?;
+        if security_buffer_len != 0 && security_start < 64 {
+            return Err(ProtocolError::InvalidField {
+                field: "security_buffer_offset",
+                reason: "security buffer overlaps the fixed negotiate response",
+            });
+        }
+        let security_end = security_start.checked_add(security_buffer_len).ok_or(
+            ProtocolError::SizeLimitExceeded {
+                field: "security_buffer",
+            },
+        )?;
+        let minimum_context_offset = align_8(64usize.max(security_end));
+        let negotiate_contexts = match (context_count, context_offset) {
+            (0, 0) => Vec::new(),
+            (0, _) => {
+                return Err(ProtocolError::InvalidField {
+                    field: "context_offset",
+                    reason: "context offset must be zero when context count is zero",
+                });
+            }
+            (_, 0) => {
+                return Err(ProtocolError::InvalidField {
+                    field: "context_offset",
+                    reason: "context offset must be nonzero when contexts are present",
+                });
+            }
+            (_, _) => {
+                if dialect_revision != Dialect::Smb311 {
+                    return Err(ProtocolError::InvalidField {
+                        field: "context_count",
+                        reason: "negotiate contexts require the SMB 3.1.1 dialect",
+                    });
+                }
+                decode_contexts(body, context_offset, context_count, minimum_context_offset)?
+            }
         };
 
         Ok(Self {
@@ -693,23 +904,59 @@ impl NegotiateResponse {
     }
 }
 
+fn align_8(value: usize) -> usize {
+    value.saturating_add(7) & !7
+}
+
 fn decode_contexts(
     body: &[u8],
-    offset_from_header: u16,
+    offset_from_header: u32,
     count: usize,
+    minimum_body_offset: usize,
 ) -> Result<Vec<NegotiateContext>, ProtocolError> {
-    let offset = usize::from(offset_from_header);
+    let offset =
+        usize::try_from(offset_from_header).map_err(|_| ProtocolError::SizeLimitExceeded {
+            field: "context_offset",
+        })?;
     if offset < HEADER_LEN {
         return Err(ProtocolError::InvalidField {
             field: "context_offset",
             reason: "offset points before SMB2 body",
         });
     }
+    if offset % 8 != 0 {
+        return Err(ProtocolError::InvalidField {
+            field: "context_offset",
+            reason: "negotiate contexts must start on an 8-byte boundary",
+        });
+    }
 
-    let mut index = offset - HEADER_LEN;
-    let mut contexts = Vec::with_capacity(count);
+    let mut index = offset
+        .checked_sub(HEADER_LEN)
+        .ok_or(ProtocolError::InvalidField {
+            field: "context_offset",
+            reason: "offset points before SMB2 body",
+        })?;
+    if index < minimum_body_offset {
+        return Err(ProtocolError::InvalidField {
+            field: "context_offset",
+            reason: "negotiate contexts overlap fixed or variable response data",
+        });
+    }
+    if index > body.len() || count > body.len().saturating_sub(index) / 8 {
+        return Err(ProtocolError::UnexpectedEof {
+            field: "negotiate_context",
+        });
+    }
 
-    for _ in 0..count {
+    let mut contexts = Vec::new();
+    contexts
+        .try_reserve_exact(count)
+        .map_err(|_| ProtocolError::SizeLimitExceeded {
+            field: "negotiate_contexts",
+        })?;
+
+    for context_index in 0..count {
         if body.len().saturating_sub(index) < 8 {
             return Err(ProtocolError::UnexpectedEof {
                 field: "negotiate_context",
@@ -718,11 +965,34 @@ fn decode_contexts(
 
         let mut input = &body[index..];
         let context_type = get_u16(&mut input, "context_type")?;
+        if contexts
+            .iter()
+            .any(|context: &NegotiateContext| context.context_type == context_type)
+        {
+            return Err(ProtocolError::InvalidField {
+                field: "context_type",
+                reason: "duplicate negotiate context type",
+            });
+        }
         let data_len = usize::from(get_u16(&mut input, "context_data_len")?);
-        let _reserved = get_u32(&mut input, "context_reserved")?;
-        let header_len = 8;
-        let data_start = index + header_len;
-        let data_end = data_start + data_len;
+        let reserved = get_u32(&mut input, "context_reserved")?;
+        if reserved != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "context_reserved",
+                reason: "reserved negotiate context field must be zero",
+            });
+        }
+        let data_start = index
+            .checked_add(8)
+            .ok_or(ProtocolError::SizeLimitExceeded {
+                field: "context_data",
+            })?;
+        let data_end =
+            data_start
+                .checked_add(data_len)
+                .ok_or(ProtocolError::SizeLimitExceeded {
+                    field: "context_data",
+                })?;
         if data_end > body.len() {
             return Err(ProtocolError::UnexpectedEof {
                 field: "context_data",
@@ -731,12 +1001,17 @@ fn decode_contexts(
 
         contexts.push(NegotiateContext {
             context_type,
-            data: body[data_start..data_end].to_vec(),
+            data: copy_bytes(&body[data_start..data_end], "context_data")?,
         });
 
-        index = data_end;
-        let aligned = (index + 7) & !7;
-        index = aligned;
+        if context_index + 1 < count {
+            index = data_end
+                .checked_add(7)
+                .ok_or(ProtocolError::SizeLimitExceeded {
+                    field: "negotiate_context",
+                })?
+                & !7;
+        }
     }
 
     Ok(contexts)
@@ -859,6 +1134,24 @@ mod tests {
     }
 
     #[test]
+    fn negotiate_request_rejects_wrapped_misaligned_and_overlapping_context_offsets() {
+        for (declared_offset, reason) in [
+            (65_640_u32, "wrapped"),
+            (105_u32, "misaligned"),
+            (96_u32, "overlapping"),
+        ] {
+            let mut encoded = sample_negotiate_request()
+                .encode()
+                .expect("sample request should encode");
+            encoded[28..32].copy_from_slice(&declared_offset.to_le_bytes());
+            assert!(
+                NegotiateRequest::decode(&encoded).is_err(),
+                "{reason} request context offset must fail"
+            );
+        }
+    }
+
+    #[test]
     fn negotiate_response_roundtrips() {
         let response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
@@ -883,5 +1176,116 @@ mod tests {
         let decoded = NegotiateResponse::decode(&encoded).expect("response should decode");
 
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn negotiate_response_rejects_wrapped_u32_context_offset() {
+        let response = sample_negotiate_response();
+        let mut encoded = response.encode();
+        encoded[60..64].copy_from_slice(&65_664_u32.to_le_bytes());
+
+        let error = NegotiateResponse::decode(&encoded).expect_err("wrapped offset must fail");
+        assert!(matches!(
+            error,
+            crate::smb::ProtocolError::UnexpectedEof {
+                field: "negotiate_context"
+            }
+        ));
+    }
+
+    #[test]
+    fn negotiate_response_rejects_misaligned_context_offset() {
+        let response = sample_negotiate_response();
+        let mut encoded = response.encode();
+        let offset = u32::from_le_bytes(encoded[60..64].try_into().unwrap());
+        encoded[60..64].copy_from_slice(&(offset + 1).to_le_bytes());
+
+        let error = NegotiateResponse::decode(&encoded).expect_err("misaligned offset must fail");
+        assert!(matches!(
+            error,
+            crate::smb::ProtocolError::InvalidField {
+                field: "context_offset",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn negotiate_response_rejects_context_overlapping_security_buffer() {
+        let response = sample_negotiate_response();
+        let mut encoded = response.encode();
+        encoded[60..64].copy_from_slice(&128_u32.to_le_bytes());
+
+        let error = NegotiateResponse::decode(&encoded).expect_err("overlap must fail");
+        assert!(matches!(
+            error,
+            crate::smb::ProtocolError::InvalidField {
+                field: "context_offset",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn negotiate_response_rejects_fixed_buffer_overlap_and_nonzero_context_reserved() {
+        let mut overlapping = sample_negotiate_response().encode();
+        overlapping[56..58].copy_from_slice(&64_u16.to_le_bytes());
+        assert!(matches!(
+            NegotiateResponse::decode(&overlapping),
+            Err(crate::smb::ProtocolError::InvalidField {
+                field: "security_buffer_offset",
+                ..
+            })
+        ));
+
+        let mut reserved = sample_negotiate_response().encode();
+        let context_offset =
+            usize::try_from(u32::from_le_bytes(reserved[60..64].try_into().unwrap()))
+                .expect("test offset should fit")
+                - super::HEADER_LEN;
+        reserved[context_offset + 4..context_offset + 8].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(matches!(
+            NegotiateResponse::decode(&reserved),
+            Err(crate::smb::ProtocolError::InvalidField {
+                field: "context_reserved",
+                ..
+            })
+        ));
+    }
+
+    fn sample_negotiate_request() -> NegotiateRequest {
+        NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::ENCRYPTION,
+            client_guid: *b"0123456789abcdef",
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![NegotiateContext::preauth_integrity(
+                PreauthIntegrityCapabilities {
+                    hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
+                    salt: vec![1, 2, 3, 4],
+                },
+            )],
+        }
+    }
+
+    fn sample_negotiate_response() -> NegotiateResponse {
+        NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![NegotiateContext::preauth_integrity(
+                PreauthIntegrityCapabilities {
+                    hash_algorithms: vec![PreauthIntegrityHashId::Sha512],
+                    salt: vec![0xaa, 0xbb, 0xcc, 0xdd],
+                },
+            )],
+            server_guid: *b"fedcba9876543210",
+            capabilities: GlobalCapabilities::DFS | GlobalCapabilities::ENCRYPTION,
+            max_transact_size: 65_536,
+            max_read_size: 131_072,
+            max_write_size: 131_072,
+            system_time: 1234,
+            server_start_time: 5678,
+            security_buffer: vec![0x60, 0x82, 0x01, 0x23],
+        }
     }
 }

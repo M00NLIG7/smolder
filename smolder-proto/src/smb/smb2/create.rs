@@ -4,7 +4,7 @@ use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
 
 use super::{
-    check_fixed_structure_size, get_array, get_u16, get_u32, get_u64, put_padding,
+    check_fixed_structure_size, copy_bytes, get_array, get_u16, get_u32, get_u64, put_padding,
     slice_from_offset, slice_from_offset32, utf16le, HEADER_LEN,
 };
 use crate::smb::ProtocolError;
@@ -819,7 +819,10 @@ impl CreateRequest {
         let name = if name_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(body, name_offset, name_length, "name")?.to_vec()
+            copy_bytes(
+                slice_from_offset(body, name_offset, name_length, "name")?,
+                "name",
+            )?
         };
         let create_contexts = if context_offset == 0 || context_length == 0 {
             Vec::new()
@@ -1023,15 +1026,32 @@ fn decode_create_contexts(buffer: &[u8]) -> Result<Vec<CreateContext>, ProtocolE
         let _next = get_u32(&mut input, "next")?;
         let name_offset = usize::from(get_u16(&mut input, "name_offset")?);
         let name_length = usize::from(get_u16(&mut input, "name_length")?);
-        let _reserved = get_u16(&mut input, "reserved")?;
+        let reserved = get_u16(&mut input, "reserved")?;
+        if reserved != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "create context reserved field must be zero",
+            });
+        }
         let data_offset = usize::from(get_u16(&mut input, "data_offset")?);
         let data_length = get_u32(&mut input, "data_length")? as usize;
-        let name = slice_from_context(entry, name_offset, name_length, "name")?.to_vec();
+        let name = copy_bytes(
+            slice_from_context(entry, name_offset, name_length, "name")?,
+            "name",
+        )?;
         let data = if data_offset == 0 || data_length == 0 {
             Vec::new()
         } else {
-            slice_from_context(entry, data_offset, data_length, "data")?.to_vec()
+            copy_bytes(
+                slice_from_context(entry, data_offset, data_length, "data")?,
+                "data",
+            )?
         };
+        contexts
+            .try_reserve(1)
+            .map_err(|_| ProtocolError::SizeLimitExceeded {
+                field: "create_contexts",
+            })?;
         contexts.push(CreateContext { name, data });
 
         if next == 0 {

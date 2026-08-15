@@ -19,7 +19,10 @@
 //! - `SMOLDER_KERBEROS_TARGET_HOST` (defaults to `SMOLDER_KERBEROS_HOST`)
 //! - `SMOLDER_KERBEROS_PRINCIPAL` (explicit SPN override)
 //! - `SMOLDER_KERBEROS_REALM`
-//! - `SMOLDER_KERBEROS_KDC_URL`
+//!
+//! Configure KDC discovery in the native Kerberos provider before starting this process (for
+//! example, with a private `KRB5_CONFIG` file on Unix). Smolder does not mutate process-global
+//! Kerberos configuration.
 
 use smolder_tools::prelude::{KerberosCredentials, KerberosTarget, SmbClientBuilder};
 
@@ -35,13 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let share_name = optional_prefixed_env("SMOLDER_KERBEROS", "SHARE")
         .unwrap_or_else(|| DEFAULT_SHARE.to_owned());
 
-    let mut credentials = KerberosCredentials::new(
+    let credentials = KerberosCredentials::new(
         required_prefixed_env("SMOLDER_KERBEROS", "USERNAME")?,
         required_prefixed_env("SMOLDER_KERBEROS", "PASSWORD")?,
     );
-    if let Some(kdc_url) = optional_prefixed_env("SMOLDER_KERBEROS", "KDC_URL") {
-        credentials = credentials.with_kdc_url(kdc_url);
-    }
 
     let target_host =
         optional_prefixed_env("SMOLDER_KERBEROS", "TARGET_HOST").unwrap_or_else(|| host.clone());

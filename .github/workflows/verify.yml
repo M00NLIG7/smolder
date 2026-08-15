@@ -1,0 +1,86 @@
+name: Deterministic verification
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install pinned MSRV toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt
+
+      - name: Check formatting
+        run: cargo +1.85.0 fmt --all -- --check
+
+      - name: Check workspace and every advertised feature
+        run: cargo +1.85.0 check --workspace --all-targets --all-features --locked
+
+      - name: Lint with warnings denied
+        run: cargo +1.85.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run deterministic debug tests
+        run: cargo +1.85.0 test --workspace --all-targets --all-features --locked
+
+      - name: Run deterministic release tests
+        run: cargo +1.85.0 test --workspace --lib --all-features --release --locked
+
+      - name: Run malformed-input properties
+        env:
+          PROPTEST_CASES: "4096"
+        run: cargo +1.85.0 test -p smolder-proto --test property_codecs --locked
+
+      - name: Build documentation with warnings denied
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +1.85.0 doc --workspace --all-features --no-deps --locked
+
+      - name: Verify normalized extracted packages as a downstream consumer
+        run: scripts/test-package-consumer.sh
+
+  cross-target:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-pc-windows-gnullvm
+          - aarch64-pc-windows-msvc
+          - i686-pc-windows-gnu
+          - x86_64-pc-windows-gnu
+          - x86_64-pc-windows-msvc
+          - i686-unknown-linux-musl
+          - x86_64-unknown-linux-musl
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install pinned Rust toolchain and target
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup target add --toolchain 1.85.0 "${{ matrix.target }}"
+
+      - name: Check workspace target
+        run: cargo +1.85.0 check --workspace --all-targets --target "${{ matrix.target }}" --locked
+
+      - name: Check internal Windows Kerberos boundary
+        if: contains(matrix.target, 'windows')
+        run: cargo +1.85.0 check -p smolder-smb-core --features kerberos-sspi --target "${{ matrix.target }}" --locked
+
+      - name: Check extracted Kerberos package on Windows
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        env:
+          SMOLDER_PACKAGE_TARGET: ${{ matrix.target }}
+        run: scripts/test-package-consumer.sh

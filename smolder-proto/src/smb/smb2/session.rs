@@ -1,9 +1,14 @@
 //! SMB2 session setup bodies.
 
+use std::fmt;
+
 use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
 
-use super::{check_fixed_structure_size, get_u16, get_u32, get_u64, slice_from_offset, HEADER_LEN};
+use super::{
+    check_fixed_structure_size, copy_bytes, get_u16, get_u32, get_u64, slice_from_offset,
+    HEADER_LEN,
+};
 use crate::smb::ProtocolError;
 
 bitflags! {
@@ -77,7 +82,7 @@ impl LogoffResponse {
 }
 
 /// SMB2 session setup request body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionSetupRequest {
     /// Binding flags.
     pub flags: u8,
@@ -91,6 +96,20 @@ pub struct SessionSetupRequest {
     pub security_buffer: Vec<u8>,
     /// Previous session identifier used for binding or reconnect.
     pub previous_session_id: u64,
+}
+
+impl fmt::Debug for SessionSetupRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionSetupRequest")
+            .field("flags", &self.flags)
+            .field("security_mode", &self.security_mode)
+            .field("capabilities", &self.capabilities)
+            .field("channel", &self.channel)
+            .field("security_buffer", &"<redacted authentication token>")
+            .field("previous_session_id", &self.previous_session_id)
+            .finish()
+    }
 }
 
 impl SessionSetupRequest {
@@ -126,13 +145,15 @@ impl SessionSetupRequest {
         let security_buffer_offset = get_u16(&mut input, "security_buffer_offset")?;
         let security_buffer_length = usize::from(get_u16(&mut input, "security_buffer_length")?);
         let previous_session_id = get_u64(&mut input, "previous_session_id")?;
-        let security_buffer = slice_from_offset(
-            body,
-            security_buffer_offset,
-            security_buffer_length,
+        let security_buffer = copy_bytes(
+            slice_from_offset(
+                body,
+                security_buffer_offset,
+                security_buffer_length,
+                "security_buffer",
+            )?,
             "security_buffer",
-        )?
-        .to_vec();
+        )?;
 
         Ok(Self {
             flags,
@@ -146,12 +167,22 @@ impl SessionSetupRequest {
 }
 
 /// SMB2 session setup response body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionSetupResponse {
     /// Resulting session flags.
     pub session_flags: SessionFlags,
     /// Security token or challenge payload.
     pub security_buffer: Vec<u8>,
+}
+
+impl fmt::Debug for SessionSetupResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionSetupResponse")
+            .field("session_flags", &self.session_flags)
+            .field("security_buffer", &"<redacted authentication token>")
+            .finish()
+    }
 }
 
 impl SessionSetupResponse {
@@ -179,13 +210,15 @@ impl SessionSetupResponse {
         )?;
         let security_buffer_offset = get_u16(&mut input, "security_buffer_offset")?;
         let security_buffer_length = usize::from(get_u16(&mut input, "security_buffer_length")?);
-        let security_buffer = slice_from_offset(
-            body,
-            security_buffer_offset,
-            security_buffer_length,
+        let security_buffer = copy_bytes(
+            slice_from_offset(
+                body,
+                security_buffer_offset,
+                security_buffer_length,
+                "security_buffer",
+            )?,
             "security_buffer",
-        )?
-        .to_vec();
+        )?;
 
         Ok(Self {
             session_flags,
@@ -232,6 +265,27 @@ mod tests {
         let decoded = SessionSetupRequest::decode(&encoded).expect("request should decode");
 
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn session_setup_debug_redacts_authentication_tokens() {
+        const SECRET: &str = "AUDIT-SUPER-SECRET";
+        let request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: SECRET.as_bytes().to_vec(),
+            previous_session_id: 0,
+        };
+        let response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: SECRET.as_bytes().to_vec(),
+        };
+
+        let debug = format!("{request:?} {response:?}");
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("<redacted authentication token>"));
     }
 
     #[test]

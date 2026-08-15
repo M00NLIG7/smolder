@@ -5,6 +5,8 @@ use super::{AuthError, SpnegoMechanism};
 const SPNEGO_OID: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
 const NTLM_OID: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a];
 const KERBEROS_V5_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+const MAX_SPNEGO_TOKEN_SIZE: usize = 16 * 1024 * 1024;
+const MAX_SPNEGO_MECHANISMS: usize = 16;
 pub(crate) const NEG_STATE_ACCEPT_COMPLETE: u8 = 0;
 pub(crate) const NEG_STATE_REJECT: u8 = 2;
 
@@ -17,6 +19,7 @@ pub(crate) struct NegTokenInit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NegTokenResp {
     pub(crate) neg_state: Option<u8>,
+    pub(crate) supported_mech: Option<SpnegoMechanism>,
     pub(crate) response_token: Option<Vec<u8>>,
     pub(crate) mech_list_mic: Option<Vec<u8>>,
 }
@@ -88,6 +91,7 @@ pub(crate) fn extract_mech_token(token: &[u8]) -> Result<Vec<u8>, AuthError> {
 }
 
 pub(crate) fn parse_neg_token_init(token: &[u8]) -> Result<NegTokenInit, AuthError> {
+    validate_token_size(token)?;
     let token = unwrap_initial_context_token(token)?;
     let (choice_tag, seq_content, _) = read_choice(token)?;
     if choice_tag != 0xa0 {
@@ -96,9 +100,20 @@ pub(crate) fn parse_neg_token_init(token: &[u8]) -> Result<NegTokenInit, AuthErr
 
     let mut mech_types = None;
     let mut mech_token = None;
+    let mut seen_fields = [false; 4];
     let mut fields = seq_content;
     while !fields.is_empty() {
         let (tag, content, rest) = read_tlv(fields)?;
+        let field_index = usize::from(
+            tag.checked_sub(0xa0)
+                .ok_or(AuthError::InvalidToken("invalid negTokenInit field tag"))?,
+        );
+        if field_index >= seen_fields.len() || seen_fields[field_index] {
+            return Err(AuthError::InvalidToken(
+                "duplicate or unknown negTokenInit field",
+            ));
+        }
+        seen_fields[field_index] = true;
         match tag {
             0xa0 => {
                 let (seq_tag, seq, seq_rest) = read_tlv(content)?;
@@ -112,9 +127,14 @@ pub(crate) fn parse_neg_token_init(token: &[u8]) -> Result<NegTokenInit, AuthErr
                 if octet_tag != 0x04 || !octet_rest.is_empty() {
                     return Err(AuthError::InvalidToken("invalid SPNEGO mech token field"));
                 }
-                mech_token = Some(octets.to_vec());
+                mech_token = Some(copy_token_bytes(octets)?);
             }
-            _ => {}
+            0xa1 | 0xa3 => {
+                return Err(AuthError::InvalidToken(
+                    "unsupported negTokenInit negotiation field",
+                ));
+            }
+            _ => unreachable!("field tag was range-checked"),
         }
         fields = rest;
     }
@@ -126,6 +146,7 @@ pub(crate) fn parse_neg_token_init(token: &[u8]) -> Result<NegTokenInit, AuthErr
 }
 
 pub(crate) fn parse_neg_token_resp(token: &[u8]) -> Result<NegTokenResp, AuthError> {
+    validate_token_size(token)?;
     let token = unwrap_initial_context_token(token)?;
     let (choice_tag, seq_content, _) = read_choice(token)?;
     if choice_tag != 0xa1 {
@@ -133,40 +154,63 @@ pub(crate) fn parse_neg_token_resp(token: &[u8]) -> Result<NegTokenResp, AuthErr
     }
 
     let mut neg_state = None;
+    let mut supported_mech = None;
     let mut response_token = None;
     let mut mech_list_mic = None;
+    let mut seen_fields = [false; 4];
     let mut fields = seq_content;
     while !fields.is_empty() {
         let (tag, content, rest) = read_tlv(fields)?;
+        let field_index = usize::from(
+            tag.checked_sub(0xa0)
+                .ok_or(AuthError::InvalidToken("invalid negTokenResp field tag"))?,
+        );
+        if field_index >= seen_fields.len() || seen_fields[field_index] {
+            return Err(AuthError::InvalidToken(
+                "duplicate or unknown negTokenResp field",
+            ));
+        }
+        seen_fields[field_index] = true;
         match tag {
             0xa0 => {
                 let (enum_tag, value, enum_rest) = read_tlv(content)?;
                 if enum_tag != 0x0a || !enum_rest.is_empty() || value.len() != 1 {
                     return Err(AuthError::InvalidToken("invalid negState field"));
                 }
+                if value[0] > 3 {
+                    return Err(AuthError::InvalidToken("invalid negState value"));
+                }
                 neg_state = Some(value[0]);
+            }
+            0xa1 => {
+                let (oid_tag, oid, oid_rest) = read_tlv(content)?;
+                if oid_tag != 0x06 || !oid_rest.is_empty() {
+                    return Err(AuthError::InvalidToken("invalid supportedMech field"));
+                }
+                supported_mech = Some(parse_mechanism_oid(oid)?);
             }
             0xa2 => {
                 let (octet_tag, value, octet_rest) = read_tlv(content)?;
                 if octet_tag != 0x04 || !octet_rest.is_empty() {
                     return Err(AuthError::InvalidToken("invalid responseToken field"));
                 }
-                response_token = Some(value.to_vec());
+                response_token = Some(copy_token_bytes(value)?);
             }
             0xa3 => {
                 let (octet_tag, value, octet_rest) = read_tlv(content)?;
                 if octet_tag != 0x04 || !octet_rest.is_empty() {
                     return Err(AuthError::InvalidToken("invalid mechListMIC field"));
                 }
-                mech_list_mic = Some(value.to_vec());
+                mech_list_mic = Some(copy_token_bytes(value)?);
             }
-            _ => {}
+            _ => unreachable!("field tag was range-checked"),
         }
         fields = rest;
     }
 
     Ok(NegTokenResp {
         neg_state,
+        supported_mech,
         response_token,
         mech_list_mic,
     })
@@ -187,6 +231,14 @@ fn parse_mech_type_list(input: &[u8]) -> Result<Vec<SpnegoMechanism>, AuthError>
         if tag != 0x06 {
             return Err(AuthError::InvalidToken("invalid SPNEGO mechanism list"));
         }
+        if mechanisms.len() >= MAX_SPNEGO_MECHANISMS {
+            return Err(AuthError::InvalidToken(
+                "SPNEGO mechanism list exceeded the configured maximum",
+            ));
+        }
+        mechanisms
+            .try_reserve(1)
+            .map_err(|_| AuthError::InvalidToken("SPNEGO mechanism allocation failed"))?;
         mechanisms.push(parse_mechanism_oid(oid)?);
         fields = rest;
     }
@@ -204,6 +256,24 @@ fn parse_mechanism_oid(oid: &[u8]) -> Result<SpnegoMechanism, AuthError> {
         KERBEROS_V5_OID => Ok(SpnegoMechanism::KerberosV5),
         _ => Err(AuthError::InvalidToken("unsupported SPNEGO mechanism oid")),
     }
+}
+
+fn validate_token_size(token: &[u8]) -> Result<(), AuthError> {
+    if token.len() > MAX_SPNEGO_TOKEN_SIZE {
+        return Err(AuthError::InvalidToken(
+            "SPNEGO token exceeded the configured maximum",
+        ));
+    }
+    Ok(())
+}
+
+fn copy_token_bytes(bytes: &[u8]) -> Result<Vec<u8>, AuthError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| AuthError::InvalidToken("SPNEGO token allocation failed"))?;
+    output.extend_from_slice(bytes);
+    Ok(output)
 }
 
 fn unwrap_initial_context_token(token: &[u8]) -> Result<&[u8], AuthError> {
@@ -295,13 +365,23 @@ fn read_length(input: &[u8]) -> Result<(usize, &[u8]), AuthError> {
     }
 
     let byte_count = usize::from(first & 0x7f);
-    if byte_count == 0 || rest.len() < byte_count {
+    if byte_count == 0
+        || byte_count > std::mem::size_of::<usize>()
+        || rest.len() < byte_count
+        || rest[0] == 0
+    {
         return Err(AuthError::InvalidToken("invalid length encoding"));
     }
 
     let mut value = 0usize;
     for byte in &rest[..byte_count] {
-        value = (value << 8) | usize::from(*byte);
+        value = value
+            .checked_mul(256)
+            .and_then(|value| value.checked_add(usize::from(*byte)))
+            .ok_or(AuthError::InvalidToken("ASN.1 length overflowed"))?;
+    }
+    if value < 0x80 {
+        return Err(AuthError::InvalidToken("non-canonical length encoding"));
     }
     Ok((value, &rest[byte_count..]))
 }
@@ -376,5 +456,18 @@ mod tests {
         assert_eq!(parsed.neg_state, Some(NEG_STATE_ACCEPT_COMPLETE));
         assert_eq!(parsed.response_token, None);
         assert_eq!(parsed.mech_list_mic, Some(b"mic".to_vec()));
+    }
+
+    #[test]
+    fn response_parser_rejects_duplicate_state_and_oversized_lengths() {
+        let duplicate_state = [
+            0xa1, 0x0c, 0x30, 0x0a, 0xa0, 0x03, 0x0a, 0x01, 0x00, 0xa0, 0x03, 0x0a, 0x01, 0x02,
+        ];
+        assert!(parse_neg_token_resp(&duplicate_state).is_err());
+
+        let overflowing_length = [
+            0xa1, 0x89, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ];
+        assert!(parse_neg_token_resp(&overflowing_length).is_err());
     }
 }
