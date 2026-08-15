@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-COMPOSE_FILE="${REPO_ROOT}/docker/samba/compose.yaml"
 
 export SMOLDER_SAMBA_HOST="${SMOLDER_SAMBA_HOST:-127.0.0.1}"
 export SMOLDER_SAMBA_PORT="${SMOLDER_SAMBA_PORT:-1445}"
@@ -13,14 +12,16 @@ export SMOLDER_SAMBA_DOMAIN="${SMOLDER_SAMBA_DOMAIN:-WORKGROUP}"
 
 cd "${REPO_ROOT}"
 
-docker compose -f "${COMPOSE_FILE}" up -d samba
+scripts/prepare-samba-fixture.sh
+scripts/start-samba-fixture.sh samba
 
-printf '%s' "${SMOLDER_SAMBA_PASSWORD}" | \
-  docker exec -i -e PASSWD_FD=0 smolder-samba \
-    rpcclient -U "${SMOLDER_SAMBA_USERNAME}" localhost -c lsaquery
-printf '%s' "${SMOLDER_SAMBA_PASSWORD}" | \
-  docker exec -i -e PASSWD_FD=0 smolder-samba \
-    rpcclient -U "${SMOLDER_SAMBA_USERNAME}" localhost -c enumdomusers
+docker exec smolder-samba \
+  rpcclient -A /run/samba/fixture.auth localhost -c lsaquery
+docker exec smolder-samba \
+  rpcclient -A /run/samba/fixture.auth localhost -c enumdomusers
+docker exec smolder-samba \
+  rpcclient -A /run/samba/fixture.auth localhost -c 'enumalsgroups builtin' | \
+  grep -Fqi 'group:[Administrators] rid:[0x220]'
 
 password_file="$(mktemp "${TMPDIR:-/tmp}/smolder-samba-password.XXXXXX")"
 trap 'rm -f -- "${password_file}"' EXIT

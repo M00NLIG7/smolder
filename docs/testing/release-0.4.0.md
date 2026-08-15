@@ -95,6 +95,7 @@ A release candidate must pass:
 
 ```bash
 cargo +1.85.0 fmt --all -- --check
+scripts/test-samba-fixture-readiness.sh
 cargo +1.85.0 check --workspace --all-targets --all-features --locked
 cargo +1.85.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.85.0 test --workspace --all-targets --all-features --locked

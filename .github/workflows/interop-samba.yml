@@ -29,17 +29,12 @@ jobs:
       - name: Prepare Samba fixture directories
         run: scripts/prepare-samba-fixture.sh
 
-      - name: Start Samba fixtures
-        run: |
-          docker compose -f docker/samba/compose.yaml up -d samba samba-netbios
-          docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
-
-      - name: Show Samba fixture status
-        run: docker compose -f docker/samba/compose.yaml ps
+      - name: Build and start ready Samba fixtures
+        run: scripts/start-samba-fixture.sh
 
       - name: Run Samba core and tools matrix
         run: scripts/run-interop.sh --samba --core --tools
 
       - name: Stop Samba fixtures
         if: always()
-        run: docker compose -f docker/samba/compose.yaml down -v
+        run: docker compose -f docker/samba/compose.yaml down

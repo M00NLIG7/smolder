@@ -24,6 +24,9 @@ jobs:
       - name: Check formatting
         run: cargo +1.85.0 fmt --all -- --check
 
+      - name: Check deterministic Samba fixture readiness harness
+        run: scripts/test-samba-fixture-readiness.sh
+
       - name: Check workspace and every advertised feature
         run: cargo +1.85.0 check --workspace --all-targets --all-features --locked
 

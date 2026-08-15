@@ -71,6 +71,9 @@ not published as part of this release.
   normalized across a security boundary.
 - The documented support line moved from `0.3.x` to `0.4.x`; the MSRV remains
   Rust `1.85`.
+- The disposable Samba gate now uses a digest-pinned, winbind-capable fixture
+  and authenticated health checks, so live tests begin only after Direct TCP,
+  NetBIOS, encrypted SMB, and Builtin SAMR surfaces are ready.
 
 ### Security
 
@@ -97,6 +100,11 @@ not published as part of this release.
   verification for interim `STATUS_PENDING` responses as required by MS-SMB2,
   while continuing to validate final-response signatures and actual credit
   grants; this restores named-pipe RPC interoperability with Samba.
+- Correctly decoded deferred `SamrQueryInformationAlias` strings and `srvsvc`
+  union/container pointers returned by Samba, emitted required enumeration
+  container referents, and used the level-1 session superset when a server
+  rejects level 10; live Builtin alias and encrypted RPC assertions remain
+  enforced.
 - Rejected non-session RFC1002 frames on direct TCP and NetBIOS transports.
 - Prevented partially written, timed-out, cancelled, or mis-correlated SMB/RPC
   exchanges from silently returning a reusable connection.

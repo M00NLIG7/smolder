@@ -77,13 +77,16 @@ export SMOLDER_SAMBA_USERNAME=smolder
 export SMOLDER_SAMBA_PASSWORD=smolderpass
 ```
 
-Start the local fixtures with:
+Build and start the local fixtures with deterministic readiness checks:
 
 ```bash
 scripts/prepare-samba-fixture.sh
-docker compose -f docker/samba/compose.yaml up -d samba samba-netbios
-docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
+scripts/start-samba-fixture.sh
 ```
+
+The startup command returns only after Direct TCP, NetBIOS, encrypted SMB, and
+winbind-backed Builtin `Administrators` SAMR probes are healthy. It does not
+retry a failed interoperability test.
 
 ## Current Matrix
 
@@ -157,7 +160,7 @@ Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 - GitHub Actions runs the Samba-backed subset through `scripts/run-interop.sh --samba --core --tools`.
 - GitHub Actions can also run the Windows gate through the self-hosted `interop-windows-self-hosted.yml` workflow when a runner labeled `smolder-windows-gate` is available.
 - Tiny11 / Windows still depends on the local VM fixture, local credentials, and the current VirtualBox port-forward setup.
-- The standalone Samba RPC fixture is local-only today and currently proves typed `lsarpc` policy queries plus the deeper standalone `samr` flow: bind, domain enumeration, `SamrOpenDomain`, user enumeration, `SamrOpenUser`, and `SamrQueryInformationUser` account-name lookup.
+- The hosted Samba workflow includes the standalone RPC fixture and proves typed `lsarpc` policy queries plus the deeper standalone `samr` flow: bind, domain enumeration, `SamrOpenDomain`, user and Builtin alias enumeration, `SamrOpenUser`, `SamrOpenAlias`, and typed user/alias information queries.
 - The SMB over QUIC lane is manual today and can be proven either against a dedicated Windows Server target through [run-windows-quic-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-windows-quic-interop.sh) or against the UTM-backed Linux Samba path in [samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 
 ## Core Commands

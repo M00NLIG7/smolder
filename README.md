@@ -256,8 +256,16 @@ SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test windows_rpc_encryption -- --ignored --nocapture
 ```
 
-The local Samba fixture now includes an encrypted share named `SMOLDERENC` on
-port `1445`. Run the core encryption interop test with:
+Build the local Samba fixtures and wait for their authenticated SMB/SAMR
+health probes before running live tests:
+
+```bash
+scripts/prepare-samba-fixture.sh
+scripts/start-samba-fixture.sh
+```
+
+The fixture includes an encrypted share named `SMOLDERENC` on port `1445`.
+Run the core encryption interop test with:
 
 ```bash
 SMOLDER_SAMBA_HOST=127.0.0.1 \
