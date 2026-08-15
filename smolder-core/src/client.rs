@@ -1854,6 +1854,29 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_pending_response_defers_required_signature_to_the_final_response() {
+        let context = super::RequestContext::new(SessionId(44), TreeId(0), true, None);
+        let mut header = Header::new(Command::Read, MessageId(3));
+        header.flags = HeaderFlags::SERVER_TO_REDIR | HeaderFlags::ASYNC_COMMAND;
+        header.status = NtStatus::PENDING.to_u32();
+        header.session_id = SessionId(44);
+        header.async_id = Some(AsyncId(99));
+        let pending_packet = header.encode();
+
+        super::verify_response_signature(&header, &pending_packet, &context)
+            .expect("STATUS_PENDING must defer signature verification");
+
+        header.status = NtStatus::SUCCESS.to_u32();
+        let final_packet = header.encode();
+        let error = super::verify_response_signature(&header, &final_packet, &context)
+            .expect_err("the correlated final response must still satisfy required signing");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse("session requires signed SMB responses")
+        ));
+    }
+
+    #[test]
     fn response_identity_rejects_wrong_direction_session_and_tree() {
         let context = super::RequestContext::unsigned(SessionId(11), TreeId(7));
         let mut header = Header::new(Command::Echo, MessageId(3));

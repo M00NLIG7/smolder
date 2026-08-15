@@ -93,9 +93,10 @@ not published as part of this release.
 - Accepted SMB 3.1.1 encryption selection from the negotiated encryption
   context when a server, including Samba, omits the legacy global encryption
   capability bit as permitted by the dialect.
-- Ignored the advisory response `CreditCharge` field as required by MS-SMB2
-  while continuing to validate and account actual credit grants, restoring
-  named-pipe RPC interoperability with Samba.
+- Ignored the advisory response `CreditCharge` field and deferred signature
+  verification for interim `STATUS_PENDING` responses as required by MS-SMB2,
+  while continuing to validate final-response signatures and actual credit
+  grants; this restores named-pipe RPC interoperability with Samba.
 - Rejected non-session RFC1002 frames on direct TCP and NetBIOS transports.
 - Prevented partially written, timed-out, cancelled, or mis-correlated SMB/RPC
   exchanges from silently returning a reusable connection.

@@ -333,6 +333,13 @@ pub(super) fn verify_response_signature(
     response_packet: &[u8],
     context: &RequestContext,
 ) -> Result<(), CoreError> {
+    // MS-SMB2 3.2.5.1.3 requires clients to skip signature verification for an interim
+    // STATUS_PENDING response. The connection remains poisoned until a signed final response is
+    // correlated and validated, so the unsigned interim cannot make the stream reusable.
+    if header.status == NtStatus::PENDING.to_u32() {
+        return Ok(());
+    }
+
     if header.flags.contains(HeaderFlags::SIGNED) {
         let signing = context
             .signing
