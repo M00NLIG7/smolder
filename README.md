@@ -75,7 +75,7 @@ Release notes and published change summaries live in
 
 ## Can I Use This In A Real Project?
 
-Yes, if your usage fits the documented `0.3.x` support surface.
+Yes, if your usage fits the documented `0.4.x` support surface.
 
 The practical promise is:
 
@@ -160,7 +160,7 @@ Current priorities:
 - `smolder-core` is in an API-stability and docs phase. The current
   public-surface notes are in
   [docs/reference/smolder-core-api.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md).
-  The formal `0.3.x` support contract is in
+  The formal `0.4.x` support contract is in
   [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
   MSRV and semver rules are in
   [docs/reference/versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md).
@@ -303,7 +303,7 @@ On Apple Silicon, the local UTM-backed Linux path is documented in
 [docs/testing/samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 For merge/release policy, required gate selection, and failure triage, use
 [docs/testing/release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md).
-For the formal `0.3.x` support scope and guarantees behind those gates, use
+For the formal `0.4.x` support scope and guarantees behind those gates, use
 [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
 
 ## Security Notice

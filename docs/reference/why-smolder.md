@@ -63,7 +63,7 @@ are not implemented as a completely separate code path from the reusable core.
 
 ## Modern Transport Coverage
 
-The current `0.3.x` line supports:
+The current `0.4.x` line supports:
 
 - Direct TCP
 - NetBIOS session service

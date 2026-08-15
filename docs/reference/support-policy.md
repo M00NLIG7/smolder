@@ -1,7 +1,9 @@
-# Smolder `0.3.x` Support Policy
+# Smolder `0.4.x` Support Policy
 
-This document defines the current support contract for the published `0.3.x`
-line.
+This document defines the current support contract for the published `0.4.x`
+line of `smolder-proto`, `smolder-smb-core`, and `smolder`. The separately
+versioned `smolder-psexecsvc` package remains at `0.3.0` and is not part of the
+`0.4.0` release.
 
 It is intentionally stricter than "whatever exists in the repo." The goal is to
 separate:
@@ -19,7 +21,7 @@ MSRV and semver rules live in
 
 ## Versioning Direction
 
-For the `0.3.x` line:
+For the `0.4.x` line:
 
 - additive changes are preferred over public API churn
 - public behavior that is documented here should not change casually
@@ -30,7 +32,7 @@ For the `0.3.x` line:
 
 ## Readiness Statement
 
-The `0.3.x` line is intended to be usable in real projects.
+The `0.4.x` line is intended to be usable in real projects.
 
 That does not mean "frozen forever." It means:
 
@@ -104,11 +106,15 @@ Not in scope:
 - claiming operator workflows are as stable as the lower-level core primitives
 - non-Windows parity for remote-exec backends
 
-### `smolder-psexecsvc`
+### `smolder-psexecsvc` (separately versioned)
+
+The optional Windows helper payload remains published at `0.3.0`. The
+`smolder` `0.4.0` package does not depend on it; tools workflows may explicitly
+stage a compatible helper binary. Source changes to this workspace member are
+excluded from the public `0.4.0` crate set.
 
 Supported:
 
-- published remote service payload crate
 - Windows helper-binary path when explicitly used by tools workflows
 
 Not guaranteed:
@@ -159,7 +165,7 @@ workspace test runs report them as ignored and do not establish live coverage.
 
 ### NTLM / SPNEGO
 
-Supported in `0.3.x`:
+Supported in `0.4.x`:
 
 - NTLMv2 over SPNEGO for SMB `SESSION_SETUP`
 - NTLM Authenticate MIC binding when `MsvAvFlags` requires it
@@ -179,7 +185,7 @@ session typestate is constructed.
 
 ### Kerberos
 
-Supported in `0.3.x`, but feature-gated:
+Supported in `0.4.x`, but feature-gated:
 
 - `kerberos` is the target-selecting umbrella: native SSPI on Windows and the
   internal bounded GSSAPI wrapper on Unix
@@ -198,7 +204,7 @@ Current constraints:
 
 ## Transport, Encryption, and RPC Policy
 
-Supported in `0.3.x`:
+Supported in `0.4.x`:
 
 - SMB2/3 only
 - SMB signing
@@ -277,7 +283,7 @@ The policy is only as strong as the gates behind it.
 The narrower change-to-gate mapping remains in
 [release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md).
 
-## Non-Goals for `0.3.x`
+## Non-Goals for `0.4.x`
 
 - SMB1 support
 - claiming universal parity with every Windows or Samba deployment
@@ -293,4 +299,4 @@ If behavior is:
 - backed by the interop matrix
 - and covered by the required gates
 
-then it is part of the `0.3.x` support story and should not be changed lightly.
+then it is part of the `0.4.x` support story and should not be changed lightly.

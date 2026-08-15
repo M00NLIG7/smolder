@@ -8,8 +8,8 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   live in `smolder-core/src/policy.rs`. Keep connection/authentication state generation-scoped.
 - Live SMB fixture tests are intentionally ignored in ordinary runs. Use the explicit scripts and
   matrix in `docs/testing/interop.md`; an ignored test is not a live pass.
-- `scripts/test-package-consumer.sh` verifies normalized crate archives without inheriting
-  workspace path patches and must run from a clean tracked tree.
+- `scripts/test-package-consumer.sh` verifies the exact release archives through a registry-shaped
+  Cargo directory source without workspace path patches and must run from a clean tracked tree.
 
 ## Maintaining this file
 

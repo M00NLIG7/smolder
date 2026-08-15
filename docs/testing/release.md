@@ -12,6 +12,10 @@ live in:
 - [samba.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba.md)
 - [windows.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows.md)
 
+The package order, archive evidence, live-lane limitations, and later-operator
+instructions for the current candidate are recorded in
+[release-0.4.0.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release-0.4.0.md).
+
 ## Release Notes Flow
 
 Before tagging a release:
@@ -56,8 +60,10 @@ Required:
 
 - [verify.yml](https://github.com/M00NLIG7/smolder/blob/main/.github/workflows/verify.yml)
   passes its pinned-MSRV format, all-target/all-feature check, warning-denied Clippy,
-  unit/release/property/doc, extracted-package, and cross-target jobs
+  unit/release/property/doc, exact-archive registry-consumer, and cross-target jobs
 - `Cargo.lock` is committed and every release command uses `--locked`
+- `scripts/test-package-consumer.sh` validates the exact approved archives in publish order and
+  resolves a fresh `smolder = "=0.4.0"` consumer without a path dependency
 - `cargo audit --no-fetch --stale` and `cargo deny --offline check advisories sources licenses`
   pass against the locally available advisory/index data; record advisory database staleness
   rather than silently treating an unavailable refresh as current

@@ -46,7 +46,10 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo +1.85.0 doc --workspace --all-features --no-deps --locked
 
-      - name: Verify normalized extracted packages as a downstream consumer
+      - name: Fetch the complete locked graph for offline archive verification
+        run: cargo +1.85.0 fetch --locked
+
+      - name: Verify exact release archives and registry-shaped downstream consumer
         run: scripts/test-package-consumer.sh
 
   cross-target:
@@ -79,8 +82,10 @@ jobs:
         if: contains(matrix.target, 'windows')
         run: cargo +1.85.0 check -p smolder-smb-core --features kerberos-sspi --target "${{ matrix.target }}" --locked
 
-      - name: Check extracted Kerberos package on Windows
+      - name: Check exact release archives and consumer on Windows
         if: matrix.target == 'x86_64-pc-windows-msvc'
         env:
           SMOLDER_PACKAGE_TARGET: ${{ matrix.target }}
-        run: scripts/test-package-consumer.sh
+        run: |
+          cargo +1.85.0 fetch --locked
+          scripts/test-package-consumer.sh
