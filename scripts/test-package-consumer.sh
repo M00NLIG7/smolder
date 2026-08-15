@@ -46,14 +46,14 @@ PY
 package_candidate() {
   local package="$1"
   local archive="${package_dir}/${package}-${release_version}.crate"
-  local -a source_args=()
-
-  if [[ "${package}" != "smolder-proto" ]]; then
-    source_args+=(--config "${source_config}")
-  fi
 
   rm -f "${archive}"
-  "${cargo[@]}" package --locked --offline --no-verify -p "${package}" "${source_args[@]}"
+  if [[ "${package}" == "smolder-proto" ]]; then
+    "${cargo[@]}" package --locked --offline --no-verify -p "${package}"
+  else
+    "${cargo[@]}" package --locked --offline --no-verify -p "${package}" \
+      --config "${source_config}"
+  fi
   cp "${archive}" "${archive_dir}/"
   python3 scripts/release_archive.py install \
     --archive "${archive_dir}/${package}-${release_version}.crate" \
