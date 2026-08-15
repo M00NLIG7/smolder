@@ -71,6 +71,27 @@ python3 scripts/release_archive.py verify \
   --candidate "${candidate_dir}" \
   --version "${release_version}"
 
+# An extracted package below the repository inherits the root Cargo workspace even though the
+# archive itself is standalone. Extract the unchanged, already-inspected archive bytes into a
+# task-owned temporary directory outside that workspace for the exact package checks.
+temp_parent="${SMOLDER_PACKAGE_TMPDIR:-${TMPDIR:-/tmp}}"
+archive_check_dir="$(mktemp -d "${temp_parent%/}/smolder-release-${release_version}.XXXXXX")"
+cleanup_archive_check_dir() {
+  command rm -rf -- "${archive_check_dir}"
+}
+trap cleanup_archive_check_dir EXIT
+archive_check_dir="$(cd "${archive_check_dir}" && pwd -P)"
+case "${archive_check_dir}/" in
+  "${repo_root}/"*)
+    echo "error: archive check directory must be outside the repository workspace" >&2
+    exit 1
+    ;;
+esac
+
+for package in "${packages[@]}"; do
+  tar -xzf "${archive_dir}/${package}-${release_version}.crate" -C "${archive_check_dir}"
+done
+
 cat >"${consumer_dir}/Cargo.toml" <<EOF
 [workspace]
 
@@ -196,12 +217,12 @@ cargo_check() {
 # Compile every target shipped in each exact archive, including the top-level binaries/examples,
 # rather than proving only that the workspace source happens to build.
 for package in "${packages[@]}"; do
-  cargo_check "${registry_dir}/${package}-${release_version}/Cargo.toml" --all-targets
+  cargo_check "${archive_check_dir}/${package}-${release_version}/Cargo.toml" --all-targets
 done
 
-cargo_check "${registry_dir}/smolder-smb-core-${release_version}/Cargo.toml" \
+cargo_check "${archive_check_dir}/smolder-smb-core-${release_version}/Cargo.toml" \
   --all-targets --features kerberos
-cargo_check "${registry_dir}/smolder-${release_version}/Cargo.toml" \
+cargo_check "${archive_check_dir}/smolder-${release_version}/Cargo.toml" \
   --all-targets --features kerberos
 
 consumer_check() {

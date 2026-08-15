@@ -66,8 +66,9 @@ The gate then:
   dependencies
 - verifies exact internal requirements and confirms each dependent archive's
   lockfile selects the preceding candidate archive checksum
-- compiles all targets shipped by each exact extracted archive, including the
-  top-level `smolder` binaries and examples
+- extracts each unchanged archive into a task-owned temporary directory outside
+  the repository workspace, compiles all shipped targets (including the
+  top-level `smolder` binaries and examples), and removes only that extraction
 - resolves a fresh consumer whose manifest contains only registry-shaped exact
   requirements for `smolder`, `smolder-smb-core`, and `smolder-proto`
 - independently checks the default, Kerberos backend, QUIC, and dangerous NTLM
