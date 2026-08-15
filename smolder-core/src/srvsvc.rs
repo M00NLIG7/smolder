@@ -25,6 +25,7 @@ const NETR_SHARE_ENUM_OPNUM: u16 = 15;
 const NETR_SERVER_GET_INFO_OPNUM: u16 = 21;
 const NETR_REMOTE_TOD_OPNUM: u16 = 28;
 const MAX_PREFERRED_LENGTH: u32 = u32::MAX;
+const ERROR_INVALID_LEVEL: u32 = 124;
 const ERROR_MORE_DATA: u32 = 234;
 
 struct EnumerationPage<T> {
@@ -266,7 +267,20 @@ where
     }
 
     /// Calls `NetrSessionEnum` at information level 10.
+    ///
+    /// Servers that reject level 10 with `ERROR_INVALID_LEVEL` are queried at level 1, whose
+    /// identifying and timing fields are a superset of the level-10 result exposed here.
     pub async fn session_enum_level10(&mut self) -> Result<Vec<SessionInfo10>, CoreError> {
+        match self.session_enum(10).await {
+            Err(CoreError::RemoteOperation {
+                operation: "NetrSessionEnum",
+                code: ERROR_INVALID_LEVEL,
+            }) => self.session_enum(1).await,
+            result => result,
+        }
+    }
+
+    async fn session_enum(&mut self, level: u32) -> Result<Vec<SessionInfo10>, CoreError> {
         let limits = self.rpc.pipe().resource_limits();
         let mut entries = Vec::new();
         let mut resume_handle = None;
@@ -276,10 +290,10 @@ where
                 .call(
                     self.context_id,
                     NETR_SESSION_ENUM_OPNUM,
-                    encode_session_enum_level10_page_request(resume_handle),
+                    encode_session_enum_page_request(level, resume_handle),
                 )
                 .await?;
-            let page = parse_session_enum_level10_page_with_limits(&response, limits)?;
+            let page = parse_session_enum_page_with_limits(&response, level, limits)?;
             append_bounded_entries(
                 &mut entries,
                 page.entries,
@@ -368,8 +382,9 @@ fn encode_share_enum_level1_request() -> Vec<u8> {
 }
 
 fn encode_share_enum_level1_page_request(resume_handle: Option<u32>) -> Vec<u8> {
-    let mut stub = Vec::with_capacity(if resume_handle.is_some() { 32 } else { 28 });
+    let mut stub = Vec::with_capacity(if resume_handle.is_some() { 36 } else { 32 });
     stub.extend_from_slice(&0_u32.to_le_bytes());
+    stub.extend_from_slice(&1_u32.to_le_bytes());
     stub.extend_from_slice(&1_u32.to_le_bytes());
     stub.extend_from_slice(&1_u32.to_le_bytes());
     stub.extend_from_slice(&0_u32.to_le_bytes());
@@ -384,16 +399,17 @@ fn encode_share_enum_level1_page_request(resume_handle: Option<u32>) -> Vec<u8> 
 
 #[cfg(test)]
 fn encode_session_enum_level10_request() -> Vec<u8> {
-    encode_session_enum_level10_page_request(None)
+    encode_session_enum_page_request(10, None)
 }
 
-fn encode_session_enum_level10_page_request(resume_handle: Option<u32>) -> Vec<u8> {
-    let mut stub = Vec::with_capacity(if resume_handle.is_some() { 40 } else { 36 });
+fn encode_session_enum_page_request(level: u32, resume_handle: Option<u32>) -> Vec<u8> {
+    let mut stub = Vec::with_capacity(if resume_handle.is_some() { 44 } else { 40 });
     stub.extend_from_slice(&0_u32.to_le_bytes());
     stub.extend_from_slice(&0_u32.to_le_bytes());
     stub.extend_from_slice(&0_u32.to_le_bytes());
-    stub.extend_from_slice(&10_u32.to_le_bytes());
-    stub.extend_from_slice(&10_u32.to_le_bytes());
+    stub.extend_from_slice(&level.to_le_bytes());
+    stub.extend_from_slice(&level.to_le_bytes());
+    stub.extend_from_slice(&1_u32.to_le_bytes());
     stub.extend_from_slice(&0_u32.to_le_bytes());
     stub.extend_from_slice(&0_u32.to_le_bytes());
     stub.extend_from_slice(&MAX_PREFERRED_LENGTH.to_le_bytes());
@@ -526,6 +542,12 @@ fn parse_share_enum_level1_page_with_limits(
         ));
     }
 
+    let container_referent = reader.read_u32("ShareInfo.ContainerReferent")?;
+    if container_referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "NetrShareEnum did not return a level 1 container",
+        ));
+    }
     let entries_read = reader.read_u32("EntriesRead")? as usize;
     let buffer_referent = reader.read_u32("BufferReferent")?;
     let mut entries = Vec::new();
@@ -625,70 +647,114 @@ fn parse_share_enum_level1_response(response: &[u8]) -> Result<Vec<ShareInfo1>, 
 fn parse_session_enum_level10_page(
     response: &[u8],
 ) -> Result<EnumerationPage<SessionInfo10>, CoreError> {
-    parse_session_enum_level10_page_with_limits(response, ResourceLimits::default())
+    parse_session_enum_page_with_limits(response, 10, ResourceLimits::default())
 }
 
-fn parse_session_enum_level10_page_with_limits(
+fn parse_session_enum_page_with_limits(
     response: &[u8],
+    expected_level: u32,
     limits: ResourceLimits,
 ) -> Result<EnumerationPage<SessionInfo10>, CoreError> {
+    if expected_level != 1 && expected_level != 10 {
+        return Err(CoreError::InvalidResponse(
+            "NetrSessionEnum requested an unsupported information level",
+        ));
+    }
+
     let mut reader = NdrReader::with_limits(response, limits);
     let level = reader.read_u32("Level")?;
-    if level != 10 {
+    if level != expected_level {
         return Err(CoreError::InvalidResponse(
-            "NetrSessionEnum did not return level 10 data",
+            "NetrSessionEnum returned an unexpected information level",
         ));
     }
     let union_level = reader.read_u32("SessionInfo.Level")?;
-    if union_level != 10 {
+    if union_level != expected_level {
         return Err(CoreError::InvalidResponse(
             "NetrSessionEnum returned an unexpected union level",
         ));
     }
 
-    let entries_read = reader.read_u32("EntriesRead")? as usize;
-    let buffer_referent = reader.read_u32("BufferReferent")?;
+    let container_referent = reader.read_u32("SessionInfo.ContainerReferent")?;
     let mut entries = Vec::new();
-    if buffer_referent != 0 {
-        let max_count = reader.read_u32("BufferMaxCount")? as usize;
-        if max_count < entries_read {
+    let entries_read = if container_referent != 0 {
+        let entries_read = reader.read_u32("EntriesRead")? as usize;
+        let buffer_referent = reader.read_u32("BufferReferent")?;
+        if buffer_referent != 0 {
+            let max_count = reader.read_u32("BufferMaxCount")? as usize;
+            if max_count < entries_read {
+                return Err(CoreError::InvalidResponse(
+                    "NetrSessionEnum buffer count was smaller than entries read",
+                ));
+            }
+            let entry_wire_size = if expected_level == 1 { 24 } else { 16 };
+            reader.validate_collection(entries_read, entry_wire_size, "NetrSessionEnum entries")?;
+            entries
+                .try_reserve_exact(entries_read)
+                .map_err(|_| CoreError::AllocationFailed("NetrSessionEnum entries"))?;
+
+            for _ in 0..entries_read {
+                let client_name_referent = reader.read_u32(if expected_level == 1 {
+                    "sesi1_cname"
+                } else {
+                    "sesi10_cname"
+                })?;
+                let username_referent = reader.read_u32(if expected_level == 1 {
+                    "sesi1_username"
+                } else {
+                    "sesi10_username"
+                })?;
+                let (time, idle_time) = if expected_level == 1 {
+                    let _num_opens = reader.read_u32("sesi1_num_opens")?;
+                    let time = reader.read_u32("sesi1_time")?;
+                    let idle_time = reader.read_u32("sesi1_idle_time")?;
+                    let _user_flags = reader.read_u32("sesi1_user_flags")?;
+                    (time, idle_time)
+                } else {
+                    (
+                        reader.read_u32("sesi10_time")?,
+                        reader.read_u32("sesi10_idle_time")?,
+                    )
+                };
+                entries.push(SessionInfoStub {
+                    client_name_referent,
+                    username_referent,
+                    time,
+                    idle_time,
+                    client_name: None,
+                    username: None,
+                });
+            }
+
+            for entry in &mut entries {
+                entry.client_name = if entry.client_name_referent != 0 {
+                    Some(reader.read_wide_string(if expected_level == 1 {
+                        "sesi1_cname"
+                    } else {
+                        "sesi10_cname"
+                    })?)
+                } else {
+                    None
+                };
+                entry.username = if entry.username_referent != 0 {
+                    Some(reader.read_wide_string(if expected_level == 1 {
+                        "sesi1_username"
+                    } else {
+                        "sesi10_username"
+                    })?)
+                } else {
+                    None
+                };
+            }
+        } else if entries_read != 0 {
             return Err(CoreError::InvalidResponse(
-                "NetrSessionEnum buffer count was smaller than entries read",
+                "NetrSessionEnum returned entries without a buffer",
             ));
         }
-        reader.validate_collection(entries_read, 16, "NetrSessionEnum entries")?;
-        entries
-            .try_reserve_exact(entries_read)
-            .map_err(|_| CoreError::AllocationFailed("NetrSessionEnum entries"))?;
-
-        for _ in 0..entries_read {
-            entries.push(SessionInfo10Stub {
-                client_name_referent: reader.read_u32("sesi10_cname")?,
-                username_referent: reader.read_u32("sesi10_username")?,
-                time: reader.read_u32("sesi10_time")?,
-                idle_time: reader.read_u32("sesi10_idle_time")?,
-                client_name: None,
-                username: None,
-            });
-        }
-
-        for entry in &mut entries {
-            entry.client_name = if entry.client_name_referent != 0 {
-                Some(reader.read_wide_string("sesi10_cname")?)
-            } else {
-                None
-            };
-            entry.username = if entry.username_referent != 0 {
-                Some(reader.read_wide_string("sesi10_username")?)
-            } else {
-                None
-            };
-        }
-    } else if entries_read != 0 {
-        return Err(CoreError::InvalidResponse(
-            "NetrSessionEnum returned entries without a buffer",
-        ));
-    }
+        entries_read
+    } else {
+        0
+    };
 
     let total_entries = reader.read_u32("TotalEntries")? as usize;
     if total_entries < entries_read {
@@ -710,6 +776,11 @@ fn parse_session_enum_level10_page_with_limits(
             operation: "NetrSessionEnum",
             code: status,
         });
+    }
+    if container_referent == 0 {
+        return Err(CoreError::InvalidResponse(
+            "NetrSessionEnum did not return an information container",
+        ));
     }
 
     let mut decoded = Vec::new();
@@ -754,6 +825,12 @@ fn parse_share_get_info_level2_response_with_limits(
     limits: ResourceLimits,
 ) -> Result<ShareInfo2, CoreError> {
     let mut reader = NdrReader::with_limits(response, limits);
+    let level = reader.read_u32("Level")?;
+    if level != 2 {
+        return Err(CoreError::InvalidResponse(
+            "NetrShareGetInfo returned an unexpected union level",
+        ));
+    }
     let info_referent = reader.read_u32("InfoStruct")?;
     if info_referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -823,6 +900,12 @@ fn parse_server_get_info_level101_response_with_limits(
     limits: ResourceLimits,
 ) -> Result<ServerInfo101, CoreError> {
     let mut reader = NdrReader::with_limits(response, limits);
+    let level = reader.read_u32("Level")?;
+    if level != 101 {
+        return Err(CoreError::InvalidResponse(
+            "NetrServerGetInfo returned an unexpected union level",
+        ));
+    }
     let info_referent = reader.read_u32("ServerInfo101")?;
     if info_referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -878,12 +961,23 @@ fn parse_server_get_info_level103_response_with_limits(
     limits: ResourceLimits,
 ) -> Result<ServerInfo103, CoreError> {
     if response.len() == 8 {
+        if u32::from_le_bytes(response[0..4].try_into().expect("level slice")) != 103 {
+            return Err(CoreError::InvalidResponse(
+                "NetrServerGetInfo returned an unexpected union level",
+            ));
+        }
         return Err(CoreError::RemoteOperation {
             operation: "NetrServerGetInfo",
             code: u32::from_le_bytes(response[4..8].try_into().expect("status slice")),
         });
     }
     let mut reader = NdrReader::with_limits(response, limits);
+    let level = reader.read_u32("Level")?;
+    if level != 103 {
+        return Err(CoreError::InvalidResponse(
+            "NetrServerGetInfo returned an unexpected union level",
+        ));
+    }
     let info_referent = reader.read_u32("ServerInfo103")?;
     if info_referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -960,7 +1054,7 @@ struct ShareInfo1Stub {
 }
 
 #[derive(Debug)]
-struct SessionInfo10Stub {
+struct SessionInfoStub {
     client_name_referent: u32,
     username_referent: u32,
     time: u32,
@@ -1147,10 +1241,11 @@ mod tests {
     use super::{
         encode_remote_tod_request, encode_server_get_info_level101_request,
         encode_server_get_info_level103_request, encode_session_enum_level10_request,
-        encode_share_enum_level1_page_request, encode_share_enum_level1_request,
-        encode_share_get_info_level2_request, parse_remote_tod_response,
-        parse_server_get_info_level101_response, parse_server_get_info_level103_response,
-        parse_session_enum_level10_response, parse_share_enum_level1_page_with_limits,
+        encode_session_enum_page_request, encode_share_enum_level1_page_request,
+        encode_share_enum_level1_request, encode_share_get_info_level2_request,
+        parse_remote_tod_response, parse_server_get_info_level101_response,
+        parse_server_get_info_level103_response, parse_session_enum_level10_response,
+        parse_session_enum_page_with_limits, parse_share_enum_level1_page_with_limits,
         parse_share_enum_level1_response, parse_share_get_info_level2_response, ServerInfo101,
         ServerInfo103, SessionInfo10, ShareInfo1, ShareInfo2, SrvsvcClient, TimeOfDayInfo,
         ERROR_MORE_DATA,
@@ -1229,6 +1324,7 @@ mod tests {
                 0_u32.to_le_bytes(),
                 1_u32.to_le_bytes(),
                 1_u32.to_le_bytes(),
+                1_u32.to_le_bytes(),
                 0_u32.to_le_bytes(),
                 0_u32.to_le_bytes(),
                 u32::MAX.to_le_bytes(),
@@ -1248,6 +1344,7 @@ mod tests {
                 0_u32.to_le_bytes(),
                 10_u32.to_le_bytes(),
                 10_u32.to_le_bytes(),
+                1_u32.to_le_bytes(),
                 0_u32.to_le_bytes(),
                 0_u32.to_le_bytes(),
                 u32::MAX.to_le_bytes(),
@@ -1295,6 +1392,8 @@ mod tests {
         let mut writer = ResponseWriter::new();
         writer.write_u32(1);
         writer.write_u32(1);
+        let container_referent = writer.next_referent();
+        writer.write_u32(container_referent);
         writer.write_u32(2);
         let array_referent = writer.next_referent();
         writer.write_u32(array_referent);
@@ -1373,8 +1472,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_share_enum_level1_response_decodes_standalone_samba_fixture() {
+        let response = [
+            0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x02, 0x00,
+            0x00, 0x00, 0x08, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x02, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x02, 0x00, 0x14, 0x00, 0x02, 0x00, 0x03, 0x00,
+            0x00, 0x80, 0x18, 0x00, 0x02, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x06, 0x00, 0x00, 0x00, 0x73, 0x00, 0x68, 0x00, 0x61, 0x00, 0x72, 0x00, 0x65, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00,
+            0x00, 0x00, 0x49, 0x00, 0x50, 0x00, 0x43, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x49, 0x00,
+            0x50, 0x00, 0x43, 0x00, 0x20, 0x00, 0x53, 0x00, 0x65, 0x00, 0x72, 0x00, 0x76, 0x00,
+            0x69, 0x00, 0x63, 0x00, 0x65, 0x00, 0x20, 0x00, 0x28, 0x00, 0x53, 0x00, 0x6d, 0x00,
+            0x6f, 0x00, 0x6c, 0x00, 0x64, 0x00, 0x65, 0x00, 0x72, 0x00, 0x20, 0x00, 0x53, 0x00,
+            0x61, 0x00, 0x6d, 0x00, 0x62, 0x00, 0x61, 0x00, 0x20, 0x00, 0x54, 0x00, 0x65, 0x00,
+            0x73, 0x00, 0x74, 0x00, 0x20, 0x00, 0x46, 0x00, 0x69, 0x00, 0x78, 0x00, 0x74, 0x00,
+            0x75, 0x00, 0x72, 0x00, 0x65, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+            0x00, 0x00, 0x1c, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        assert_eq!(
+            parse_share_enum_level1_response(&response).expect("Samba response should decode"),
+            vec![
+                ShareInfo1 {
+                    name: "share".to_owned(),
+                    share_type: 0,
+                    remark: Some(String::new()),
+                },
+                ShareInfo1 {
+                    name: "IPC$".to_owned(),
+                    share_type: 0x8000_0003,
+                    remark: Some("IPC Service (Smolder Samba Test Fixture)".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn share_enumeration_rejects_huge_count_before_allocation() {
         let response = [
+            1u32.to_le_bytes(),
             1u32.to_le_bytes(),
             1u32.to_le_bytes(),
             u32::MAX.to_le_bytes(),
@@ -1426,7 +1564,7 @@ mod tests {
                 successful_write_frame(4, 72),
                 successful_flush_frame(5),
                 rpc_read_frame(bind_ack, 6),
-                successful_write_frame(7, 52),
+                successful_write_frame(7, 56),
                 successful_flush_frame(8),
                 rpc_read_frame(
                     Packet::Response(ResponsePdu {
@@ -1441,7 +1579,7 @@ mod tests {
                     }),
                     9,
                 ),
-                successful_write_frame(10, 56),
+                successful_write_frame(10, 60),
                 successful_flush_frame(11),
                 rpc_read_frame(
                     Packet::Response(ResponsePdu {
@@ -1490,6 +1628,8 @@ mod tests {
         let mut writer = ResponseWriter::new();
         writer.write_u32(1);
         writer.write_u32(1);
+        let container_referent = writer.next_referent();
+        writer.write_u32(container_referent);
         writer.write_u32(1);
         let array_referent = writer.next_referent();
         writer.write_u32(array_referent);
@@ -1523,6 +1663,8 @@ mod tests {
         let mut writer = ResponseWriter::new();
         writer.write_u32(1);
         writer.write_u32(1);
+        let container_referent = writer.next_referent();
+        writer.write_u32(container_referent);
         writer.write_u32(1);
         let buffer_referent = writer.next_referent();
         writer.write_u32(buffer_referent);
@@ -1541,11 +1683,56 @@ mod tests {
         writer.into_bytes()
     }
 
+    fn samba_session_level10_invalid_response() -> Vec<u8> {
+        vec![
+            0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x7c, 0x00, 0x00, 0x00,
+        ]
+    }
+
+    fn samba_session_level1_response() -> Vec<u8> {
+        vec![
+            0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x08, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x02, 0x00,
+            0x10, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x0b, 0x00, 0x00, 0x00, 0x31, 0x00, 0x37, 0x00, 0x32, 0x00, 0x2e, 0x00, 0x32, 0x00,
+            0x31, 0x00, 0x2e, 0x00, 0x30, 0x00, 0x2e, 0x00, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x73, 0x00,
+            0x6d, 0x00, 0x6f, 0x00, 0x6c, 0x00, 0x64, 0x00, 0x65, 0x00, 0x72, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+    }
+
+    #[test]
+    fn parse_session_enum_level1_response_decodes_standalone_samba_fixture() {
+        let page = parse_session_enum_page_with_limits(
+            &samba_session_level1_response(),
+            1,
+            ResourceLimits::default(),
+        )
+        .expect("Samba level-1 response should decode");
+
+        assert_eq!(
+            page.entries,
+            vec![SessionInfo10 {
+                client_name: Some("172.21.0.1".to_owned()),
+                username: Some("smolder".to_owned()),
+                time: 0,
+                idle_time: 0,
+            }]
+        );
+        assert_eq!(page.status, 0);
+    }
+
     #[test]
     fn parse_session_enum_level10_response_decodes_entries() {
         let mut writer = ResponseWriter::new();
         writer.write_u32(10);
         writer.write_u32(10);
+        let container_referent = writer.next_referent();
+        writer.write_u32(container_referent);
         writer.write_u32(2);
         let array_referent = writer.next_referent();
         writer.write_u32(array_referent);
@@ -1589,6 +1776,97 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn session_enumeration_falls_back_to_level1_when_samba_rejects_level10() {
+        let bind_ack = Packet::BindAck(BindAckPdu {
+            call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            max_xmit_frag: 4_280,
+            max_recv_frag: 4_280,
+            assoc_group_id: 0,
+            secondary_address: b"\\PIPE\\srvsvc\0".to_vec(),
+            result: BindAckResult {
+                result: 0,
+                reason: 0,
+                transfer_syntax: SyntaxId::NDR32,
+            },
+            auth_verifier: None,
+        });
+        let level10 = samba_session_level10_invalid_response();
+        let level1 = samba_session_level1_response();
+        let (pipe, writes) = open_scripted_pipe(
+            "srvsvc",
+            vec![
+                successful_write_frame(4, 72),
+                successful_flush_frame(5),
+                rpc_read_frame(bind_ack, 6),
+                successful_write_frame(7, 64),
+                successful_flush_frame(8),
+                rpc_read_frame(
+                    Packet::Response(ResponsePdu {
+                        call_id: 2,
+                        flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+                        alloc_hint: level10.len() as u32,
+                        context_id:
+                            SrvsvcClient::<crate::test_support::ScriptedTransport>::CONTEXT_ID,
+                        cancel_count: 0,
+                        stub_data: level10,
+                        auth_verifier: None,
+                    }),
+                    9,
+                ),
+                successful_write_frame(10, 64),
+                successful_flush_frame(11),
+                rpc_read_frame(
+                    Packet::Response(ResponsePdu {
+                        call_id: 3,
+                        flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+                        alloc_hint: level1.len() as u32,
+                        context_id:
+                            SrvsvcClient::<crate::test_support::ScriptedTransport>::CONTEXT_ID,
+                        cancel_count: 0,
+                        stub_data: level1,
+                        auth_verifier: None,
+                    }),
+                    12,
+                ),
+            ],
+        )
+        .await;
+        let mut client = SrvsvcClient::bind(PipeRpcClient::new(pipe))
+            .await
+            .expect("srvsvc bind should succeed");
+
+        assert_eq!(
+            client
+                .session_enum_level10()
+                .await
+                .expect("Samba level-1 fallback should succeed"),
+            vec![SessionInfo10 {
+                client_name: Some("172.21.0.1".to_owned()),
+                username: Some("smolder".to_owned()),
+                time: 0,
+                idle_time: 0,
+            }]
+        );
+
+        let requests = captured_rpc_packets(&writes);
+        let Packet::Request(level10_request) = &requests[1] else {
+            panic!("second packet should be the level-10 request");
+        };
+        let Packet::Request(level1_request) = &requests[2] else {
+            panic!("third packet should be the level-1 fallback request");
+        };
+        assert_eq!(
+            level10_request.stub_data,
+            encode_session_enum_page_request(10, None)
+        );
+        assert_eq!(
+            level1_request.stub_data,
+            encode_session_enum_page_request(1, None)
+        );
+    }
+
     #[test]
     fn share_get_info_level2_request_encodes_server_null_and_ref_string() {
         assert_eq!(
@@ -1609,6 +1887,7 @@ mod tests {
     #[test]
     fn parse_share_get_info_level2_response_decodes_entry() {
         let mut writer = ResponseWriter::new();
+        writer.write_u32(2);
         let info_ref = writer.next_referent();
         let name_ref = writer.next_referent();
         let remark_ref = writer.next_referent();
@@ -1681,6 +1960,7 @@ mod tests {
     #[test]
     fn parse_server_get_info_level101_response_decodes_entry() {
         let mut writer = ResponseWriter::new();
+        writer.write_u32(101);
         let info_ref = writer.next_referent();
         let name_ref = writer.next_referent();
         let comment_ref = writer.next_referent();
@@ -1712,6 +1992,7 @@ mod tests {
     #[test]
     fn parse_server_get_info_level103_response_decodes_entry() {
         let mut writer = ResponseWriter::new();
+        writer.write_u32(103);
         let info_ref = writer.next_referent();
         let name_ref = writer.next_referent();
         let comment_ref = writer.next_referent();

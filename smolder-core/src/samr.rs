@@ -1092,9 +1092,13 @@ fn parse_query_alias_general_response_with_limits(
             "SamrQueryInformationAlias returned an unexpected information class",
         ));
     }
-    let name = reader.read_rpc_unicode_string("AliasName")?;
+    // NDR encodes every fixed member of the structure before its deferred string pointees.
+    let name_header = reader.read_unicode_string_header("AliasName")?;
     let member_count = reader.read_u32("AliasMemberCount")?;
-    let admin_comment = reader.read_rpc_unicode_string("AliasAdminComment")?;
+    let admin_comment_header = reader.read_unicode_string_header("AliasAdminComment")?;
+    let name = reader.read_deferred_unicode_string(name_header, "AliasName")?;
+    let admin_comment =
+        reader.read_deferred_unicode_string(admin_comment_header, "AliasAdminComment")?;
     let status = reader.read_u32("SamrQueryInformationAliasStatus")?;
     if status != 0 {
         return Err(CoreError::RemoteOperation {
@@ -2452,9 +2456,11 @@ mod tests {
         let buffer_ref = writer.next_referent();
         writer.write_u32(buffer_ref);
         writer.write_u32(ALIAS_GENERAL_INFORMATION_CLASS);
-        writer.write_rpc_unicode_string("Administrators");
+        writer.write_unicode_string_header("Administrators");
         writer.write_u32(3);
-        writer.write_rpc_unicode_string("Builtin administrators");
+        writer.write_unicode_string_header("Builtin administrators");
+        writer.write_deferred_unicode_string("Administrators");
+        writer.write_deferred_unicode_string("Builtin administrators");
         writer.write_u32(0);
 
         assert_eq!(
@@ -2464,6 +2470,27 @@ mod tests {
                 name: "Administrators".to_owned(),
                 member_count: 3,
                 admin_comment: "Builtin administrators".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn query_alias_general_response_decodes_standalone_samba_fixture() {
+        let response = [
+            0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x1c, 0x00, 0x04, 0x00,
+            0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x02, 0x00,
+            0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x41, 0x00,
+            0x64, 0x00, 0x6d, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x69, 0x00, 0x73, 0x00, 0x74, 0x00,
+            0x72, 0x00, 0x61, 0x00, 0x74, 0x00, 0x6f, 0x00, 0x72, 0x00, 0x73, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        assert_eq!(
+            parse_query_alias_general_response(&response).expect("Samba response should decode"),
+            SamrAliasInfo {
+                name: "Administrators".to_owned(),
+                member_count: 1,
+                admin_comment: String::new(),
             }
         );
     }
