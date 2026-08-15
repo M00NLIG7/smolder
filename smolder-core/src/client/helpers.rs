@@ -530,15 +530,6 @@ pub(super) fn validate_negotiate_selection(
     }
 
     let cipher = negotiated_cipher(response)?;
-    if cipher.is_some()
-        && !response
-            .capabilities
-            .contains(GlobalCapabilities::ENCRYPTION)
-    {
-        return Err(CoreError::InvalidResponse(
-            "server selected an encryption cipher without advertising SMB encryption",
-        ));
-    }
     if let Some(cipher) = cipher {
         if response.dialect_revision == Dialect::Smb311 {
             let offered = single_encryption_context(&request.negotiate_contexts, true)?.ok_or(

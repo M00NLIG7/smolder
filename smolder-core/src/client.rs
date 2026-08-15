@@ -1964,6 +1964,45 @@ mod tests {
     }
 
     #[test]
+    fn accepts_smb311_cipher_context_without_legacy_encryption_capability() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::ENCRYPTION,
+            client_guid: [0; 16],
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![
+                preauth_context(b"client"),
+                encryption_context(CipherId::Aes128Gcm),
+            ],
+        };
+        let response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![
+                preauth_context(b"server"),
+                encryption_context(CipherId::Aes128Gcm),
+            ],
+            server_guid: [0; 16],
+            capabilities: GlobalCapabilities::empty(),
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 0,
+            server_start_time: 0,
+            security_buffer: Vec::new(),
+        };
+
+        let selections = super::validate_negotiate_selection(
+            &request,
+            &response,
+            TransportIdentity::unauthenticated(crate::transport::TransportProtocol::Tcp),
+            SecurityPolicy::interoperable(),
+        )
+        .expect("the SMB 3.1.1 encryption context is the authoritative cipher selection");
+        assert_eq!(selections.cipher, Some(CipherId::Aes128Gcm));
+    }
+
+    #[test]
     fn rejects_unoffered_compression_algorithm() {
         let request = NegotiateRequest {
             security_mode: SigningMode::ENABLED,
