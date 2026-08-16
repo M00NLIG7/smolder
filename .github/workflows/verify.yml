@@ -18,6 +18,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
+      - name: Install system GSSAPI/Kerberos development library
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
       - name: Install pinned MSRV toolchain
         run: rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt
 
