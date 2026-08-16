@@ -1,6 +1,6 @@
 [package]
 name = "smolder-smb-core"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["M00NLIG7"]
@@ -31,10 +31,10 @@ required-features = ["quic"]
 
 [features]
 default = []
-kerberos = ["kerberos-api", "kerberos-sspi"]
-kerberos-api = []
-kerberos-sspi = ["kerberos-api", "dep:sspi"]
-kerberos-gssapi = ["kerberos-api", "dep:kenobi-unix"]
+kerberos = ["kerberos-sspi", "kerberos-gssapi"]
+kerberos-sspi = []
+kerberos-gssapi = []
+dangerous-ntlm-diagnostics = []
 quic = [
     "dep:quinn",
     "dep:quinn-proto",
@@ -53,22 +53,19 @@ cmac = "0.7"
 hmac = "0.12"
 md-5 = "0.10"
 md4 = "0.10"
-rand = "0.8"
+rand = "0.8.7"
 lznt1 = "0.1"
-quinn = { version = "0.11.9", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-quinn-proto = { version = "0.11.14", optional = true, default-features = false, features = ["rustls-ring"] }
+quinn = { version = "0.11.11", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+quinn-proto = { version = "0.11.16", optional = true, default-features = false, features = ["rustls-ring"] }
 rust-lzxpress = "0.7"
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "ring"] }
 rustls-native-certs = { version = "0.8.3", optional = true }
 sha2 = "0.10"
-smolder-proto = { path = "../smolder-proto", version = "0.3.0" }
-sspi = { version = "0.19.2", optional = true, default-features = false, features = ["network_client", "ring"] }
+smolder-proto = { path = "../smolder-proto", version = "=0.4.0" }
 thiserror = "2"
+zeroize = "1.8"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = "0.1"
-
-[target.'cfg(unix)'.dependencies]
-kenobi-unix = { version = "0.2.0", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"

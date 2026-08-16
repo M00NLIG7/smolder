@@ -37,6 +37,10 @@ require_env() {
 
 windows_username="$(require_env SMOLDER_WINDOWS_USERNAME)"
 windows_password="$(require_env SMOLDER_WINDOWS_PASSWORD)"
+password_file="$(mktemp "${TMPDIR:-/tmp}/smolder-windows-password.XXXXXX")"
+chmod 600 "${password_file}"
+printf '%s' "${windows_password}" >"${password_file}"
+trap 'rm -f -- "${password_file}"' EXIT
 require_cmd docker
 require_cmd VBoxManage
 require_cmd nc
@@ -62,7 +66,7 @@ for _attempt in $(seq 1 24); do
     target/debug/psexec "${windows_target}" \
       --command "cmd /c hostname" \
       --username "${windows_username}" \
-      --password "${windows_password}" 2>/dev/null | tr -d '\r\n'
+      --password-file "${password_file}" 2>/dev/null | tr -d '\r\n'
   )"; then
     if [[ -n "${guest_hostname}" ]]; then
       break
@@ -78,14 +82,15 @@ fi
 
 blob_basename="$(basename "${host_blob_path}")"
 
-docker compose -f "${compose_file}" exec -T files1 sh -lc \
-  "rm -f /tmp/${blob_basename} && net offlinejoin provision \
-    domain=${ad_domain} \
-    machine_name=${guest_hostname} \
-    reuse \
-    savefile=/tmp/${blob_basename} \
-    -U${ad_admin_user}%${ad_admin_password} \
-    --option=\"netbios name=${guest_hostname}\""
+printf '%s\n' "${ad_admin_password}" | \
+  docker compose -f "${compose_file}" exec -T -e PASSWD_FD=0 files1 sh -lc \
+    "rm -f /tmp/${blob_basename} && net offlinejoin provision \
+      domain=${ad_domain} \
+      machine_name=${guest_hostname} \
+      reuse \
+      savefile=/tmp/${blob_basename} \
+      -U${ad_admin_user} \
+      --option=\"netbios name=${guest_hostname}\""
 
 member_container_id="$(docker compose -f "${compose_file}" ps -q files1)"
 if [[ -z "${member_container_id}" ]]; then
@@ -99,7 +104,7 @@ copy_succeeded=0
 for _attempt in $(seq 1 24); do
   if VBoxManage guestcontrol "${vm_name}" copyto "${host_blob_path}" "${guest_blob_path}" \
     --username "${windows_username}" \
-    --password "${windows_password}" >/dev/null 2>&1; then
+    --passwordfile "${password_file}" >/dev/null 2>&1; then
     copy_succeeded=1
     break
   fi
@@ -114,12 +119,12 @@ fi
 target/debug/psexec "${windows_target}" \
   --command "cmd /c djoin /requestODJ /loadfile ${guest_blob_path} /windowspath C:\\Windows /localos" \
   --username "${windows_username}" \
-  --password "${windows_password}"
+  --password-file "${password_file}"
 
 target/debug/psexec "${windows_target}" \
   --command "shutdown /r /t 0 /f" \
   --username "${windows_username}" \
-  --password "${windows_password}" >/dev/null || true
+  --password-file "${password_file}" >/dev/null || true
 
 until nc -vz "${windows_host}" "${windows_port}" >/dev/null 2>&1; do
   sleep 5
@@ -131,7 +136,7 @@ for _attempt in $(seq 1 24); do
     target/debug/psexec "${windows_target}" \
       --command "cmd /c systeminfo | findstr /B /C:\"Domain\"" \
       --username "${windows_username}" \
-      --password "${windows_password}" 2>/dev/null | tr -d '\r'
+      --password-file "${password_file}" 2>/dev/null | tr -d '\r'
   )"; then
     if [[ -n "${domain_line}" ]]; then
       break
@@ -151,7 +156,7 @@ fi
 if ! target/debug/psexec "${windows_target}" \
   --command "cmd /c net localgroup Administrators \"${windows_domain_admin_member}\" /add" \
   --username "${windows_username}" \
-  --password "${windows_password}" >/dev/null 2>&1; then
+  --password-file "${password_file}" >/dev/null 2>&1; then
   printf 'warning: could not confirm local Administrators membership for %s during join\n' \
     "${windows_domain_admin_member}" >&2
 fi

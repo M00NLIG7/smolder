@@ -1,38 +1,50 @@
+x-samba-fixture: &samba-fixture
+  build:
+    context: .
+  image: smolder-samba-fixture:trixie-4.22.10
+  environment:
+    TZ: UTC
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+    interval: 1s
+    timeout: 5s
+    retries: 90
+    start_period: 1s
+  stop_grace_period: 10s
+
 services:
   samba:
-    image: crazymax/samba:latest
+    <<: *samba-fixture
     container_name: smolder-samba
     environment:
       TZ: UTC
-      SAMBA_WORKGROUP: WORKGROUP
-      SAMBA_LOG_LEVEL: "1"
+      SMOLDER_INCLUDE_ENCRYPTED_SHARE: "1"
     ports:
-      - "1445:445"
+      - "127.0.0.1:1445:445"
     volumes:
-      - ./data:/data
       - ./share:/samba/share
       - ./share-encrypted:/samba/share-encrypted
+
   samba-netbios:
-    image: crazymax/samba:latest
+    <<: *samba-fixture
     container_name: smolder-samba-netbios
     environment:
       TZ: UTC
-      SAMBA_WORKGROUP: WORKGROUP
-      SAMBA_LOG_LEVEL: "1"
+      SMOLDER_DISABLE_NETBIOS: "no"
+      SMOLDER_SMB_PORTS: "139"
     ports:
-      - "1139:139"
+      - "127.0.0.1:1139:139"
     volumes:
-      - ./data-netbios:/data
       - ./share:/samba/share
+
   samba-global-encryption:
-    image: crazymax/samba:latest
+    <<: *samba-fixture
     container_name: smolder-samba-global-encryption
     environment:
       TZ: UTC
-      SAMBA_WORKGROUP: WORKGROUP
-      SAMBA_LOG_LEVEL: "1"
+      SMOLDER_CLIENT_PROTECTION: encrypt
+      SMOLDER_GLOBAL_ENCRYPTION: required
     ports:
-      - "1446:445"
+      - "127.0.0.1:1446:445"
     volumes:
-      - ./data-global-encryption:/data
       - ./share:/samba/share

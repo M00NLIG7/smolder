@@ -1,9 +1,12 @@
 //! NTLM packet-integrity helpers for connection-oriented DCE/RPC.
 
+use std::fmt;
+
 use hmac::{Hmac, Mac};
 use md5::Md5;
 
 use smolder_proto::rpc::{AuthLevel, AuthType, AuthVerifier};
+use zeroize::Zeroize;
 
 use crate::error::CoreError;
 
@@ -58,7 +61,7 @@ impl NtlmSessionSecurity {
 /// This helper derives the NTLM signing and sealing keys from an exported NTLM
 /// session key and emits/verifies the 16-byte verifier used by RPC
 /// `RPC_C_AUTHN_LEVEL_PKT_INTEGRITY` packets.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NtlmRpcPacketIntegrity {
     auth_context_id: u32,
     supports_header_signing: bool,
@@ -68,6 +71,45 @@ pub struct NtlmRpcPacketIntegrity {
     server_signing_key: [u8; 16],
     client_sealing: Option<Rc4State>,
     server_sealing: Option<Rc4State>,
+}
+
+impl fmt::Debug for NtlmRpcPacketIntegrity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NtlmRpcPacketIntegrity")
+            .field("auth_context_id", &self.auth_context_id)
+            .field("supports_header_signing", &self.supports_header_signing)
+            .field("security", &self.security)
+            .field("sequence", &self.sequence)
+            .field("client_signing_key", &"<redacted>")
+            .field("server_signing_key", &"<redacted>")
+            .field(
+                "client_sealing",
+                &self.client_sealing.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "server_sealing",
+                &self.server_sealing.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl Drop for NtlmRpcPacketIntegrity {
+    fn drop(&mut self) {
+        self.client_signing_key.zeroize();
+        self.server_signing_key.zeroize();
+        if let Some(state) = self.client_sealing.as_mut() {
+            state.state.zeroize();
+            state.i.zeroize();
+            state.j.zeroize();
+        }
+        if let Some(state) = self.server_sealing.as_mut() {
+            state.state.zeroize();
+            state.i.zeroize();
+            state.j.zeroize();
+        }
+    }
 }
 
 impl NtlmRpcPacketIntegrity {
@@ -164,6 +206,7 @@ impl NtlmRpcPacketIntegrity {
                 "rpc response auth verifier did not match the derived NTLM packet-integrity signature",
             ));
         }
+        self.sequence = self.sequence.wrapping_add(1);
         Ok(())
     }
 
@@ -390,6 +433,39 @@ mod tests {
 
         assert_eq!(first.auth_value, hex("01000000fca82b3c83a7766700000000"),);
         assert_eq!(second.auth_value, hex("010000009ceba7e2c5c29a5201000000"),);
+    }
+
+    #[test]
+    fn successful_response_verification_advances_the_shared_rpc_sequence() {
+        let mut context = NtlmRpcPacketIntegrity::new(
+            &[0x22; 16],
+            NtlmSessionSecurity::new(true, true, true, false),
+            3,
+        )
+        .expect("packet integrity context");
+        let request_packet =
+            packet_with_placeholder("05000000100000001800000004000000aaaaaaaaaaaaaaaa");
+        context
+            .sign_request_verifier(&request_packet)
+            .expect("request signature should advance sequence");
+
+        let response_packet =
+            packet_with_placeholder("05000002080000001000000004000000bbbbbbbbbbbbbbbb");
+        let verifier = context
+            .clone()
+            .sign_response_verifier(&response_packet)
+            .expect("response signature");
+        context
+            .verify_response(
+                &packet_with_auth(&response_packet, &verifier.auth_value),
+                &verifier,
+            )
+            .expect("response signature should verify");
+
+        let next = context
+            .sign_request_verifier(&request_packet)
+            .expect("next request signature");
+        assert_eq!(&next.auth_value[12..], &2u32.to_le_bytes());
     }
 
     #[test]

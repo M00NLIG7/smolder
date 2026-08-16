@@ -5,9 +5,9 @@ use smolder_proto::rpc::{
 };
 use smolder_proto::smb::netbios::SessionMessage;
 use smolder_proto::smb::smb2::{
-    ChangeNotifyRequest, Command, CreateRequest, Header, HeaderFlags, IoctlRequest, LockRequest,
-    MessageId, NegotiateRequest, ReadRequest, SessionId, SessionSetupRequest, TreeConnectRequest,
-    TreeId, WriteRequest, utf16le, utf16le_string,
+    utf16le, utf16le_string, ChangeNotifyRequest, Command, CreateRequest, Header, HeaderFlags,
+    IoctlRequest, LockRequest, MessageId, NegotiateRequest, NegotiateResponse, ReadRequest,
+    SessionId, SessionSetupRequest, TreeConnectRequest, TreeId, WriteRequest,
 };
 use smolder_proto::smb::transform::{TransformHeader, TransformValue};
 use smolder_proto::smb::ProtocolError;
@@ -120,7 +120,7 @@ fn auth_verifier_strategy() -> impl Strategy<Value = AuthVerifier> {
     (
         auth_type_strategy(),
         auth_level_strategy(),
-        any::<u8>(),
+        Just(0_u8),
         any::<u32>(),
         prop::collection::vec(any::<u8>(), 1..128),
     )
@@ -200,11 +200,11 @@ proptest! {
     fn transform_header_roundtrips_random_packets(
         signature in prop::array::uniform16(any::<u8>()),
         nonce in prop::array::uniform16(any::<u8>()),
-        original_message_size in any::<u32>(),
         flags_or_algorithm in any::<u16>(),
         session_id in any::<u64>(),
         encrypted_message in prop::collection::vec(any::<u8>(), 0..2048),
     ) {
+        let original_message_size = encrypted_message.len() as u32;
         let packet = TransformHeader {
             signature,
             nonce,
@@ -316,6 +316,7 @@ proptest! {
         let _ = TransformHeader::decode(&bytes);
         let _ = Packet::decode(&bytes);
         let _ = NegotiateRequest::decode(&bytes);
+        let _ = NegotiateResponse::decode(&bytes);
         let _ = SessionSetupRequest::decode(&bytes);
         let _ = TreeConnectRequest::decode(&bytes);
         let _ = CreateRequest::decode(&bytes);
@@ -330,5 +331,11 @@ proptest! {
 #[test]
 fn utf16le_rejects_odd_length_buffers() {
     let error = utf16le_string(&[0x41]).expect_err("odd-length UTF-16LE should fail");
-    assert!(matches!(error, ProtocolError::InvalidField { field: "utf16le_string", .. }));
+    assert!(matches!(
+        error,
+        ProtocolError::InvalidField {
+            field: "utf16le_string",
+            ..
+        }
+    ));
 }

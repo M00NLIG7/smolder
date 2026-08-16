@@ -4,7 +4,17 @@ set -euo pipefail
 WORK_DIR="${1:-/opt/smolder-samba-quic}"
 SERVER_NAME="${SMOLDER_SAMBA_QUIC_SERVER_NAME:-files.lab.example}"
 USERNAME="${SMOLDER_SAMBA_QUIC_USERNAME:-smolder}"
-PASSWORD="${SMOLDER_SAMBA_QUIC_PASSWORD:-smolderpass}"
+PASSWORD_INPUT_FILE="${SMOLDER_SAMBA_QUIC_PASSWORD_FILE:-}"
+if [[ -n "${PASSWORD_INPUT_FILE}" ]]; then
+  PASSWORD="$(cat -- "${PASSWORD_INPUT_FILE}")"
+else
+  PASSWORD="${SMOLDER_SAMBA_QUIC_PASSWORD:-smolderpass}"
+fi
+unset SMOLDER_SAMBA_QUIC_PASSWORD
+if [[ -z "${PASSWORD}" ]]; then
+  printf 'Samba QUIC password provider returned an empty value\n' >&2
+  exit 1
+fi
 WORKGROUP="${SMOLDER_SAMBA_QUIC_WORKGROUP:-WORKGROUP}"
 SHARE_NAME="${SMOLDER_SAMBA_QUIC_SHARE_NAME:-share}"
 
@@ -38,6 +48,10 @@ apt-get install -y \
 systemctl enable --now docker
 
 mkdir -p "$CERT_DIR" "$SHARE_DIR"
+COMPOSE_PASSWORD_FILE="${WORK_DIR}/.smb-password"
+umask 077
+printf '%s' "${PASSWORD}" >"${COMPOSE_PASSWORD_FILE}"
+unset PASSWORD
 if [[ ! -f "${CERT_DIR}/ca.pem" || ! -f "${CERT_DIR}/ca-key.pem" || ! -f "${CERT_DIR}/key.pem" || ! -f "${CERT_DIR}/cert.pem" ]]; then
   EXT_FILE="${CERT_DIR}/server-ext.cnf"
   CSR_FILE="${CERT_DIR}/server.csr"
@@ -120,7 +134,7 @@ SMOLDER_SAMBA_QUIC_HOST_QUIC_PORT=443 \
 SERVER_NAME="${SERVER_NAME}" \
 WORKGROUP="${WORKGROUP}" \
 USERNAME="${USERNAME}" \
-PASSWORD="${PASSWORD}" \
+PASSWORD_FILE="${COMPOSE_PASSWORD_FILE}" \
 SHARE_NAME="${SHARE_NAME}" \
 docker compose -f "${WORK_DIR}/compose.yaml" up -d --build
 

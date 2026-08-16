@@ -193,13 +193,17 @@ export SMOLDER_KERBEROS_USERNAME=smolder@LAB.EXAMPLE
 export SMOLDER_KERBEROS_PASSWORD='Passw0rd!'
 export SMOLDER_KERBEROS_SHARE=share
 export SMOLDER_KERBEROS_REALM=LAB.EXAMPLE
-export SMOLDER_KERBEROS_KDC_URL=tcp://dc1.lab.example:1088
+export KRB5_CONFIG="$PWD/.tmp/krb5-smolder.conf"
 ```
+
+The private Kerberos configuration must map `LAB.EXAMPLE` to `dc1.lab.example:1088` before
+Smolder starts. The repository harness creates this file; the library never rewrites
+process-global Kerberos environment or configuration.
 
 Then run:
 
 ```bash
-cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --nocapture
+cargo test -p smolder-smb-core --features kerberos --test kerberos_interop -- --ignored --nocapture
 cargo run -p smolder-smb-core --features kerberos --example kerberos_tree_connect
 ```
 
@@ -231,7 +235,7 @@ If the first live run fails, check these in order:
 
 1. `files1.lab.example` resolves on the host
 2. `dc1.lab.example` resolves on the host
-3. `SMOLDER_KERBEROS_KDC_URL` points at the exposed DC port
+3. the native provider configuration selected before launch points at the exposed DC port
 4. DC and member clocks are within 5 minutes
 5. `_kerberos._tcp.lab.example` and `_ldap._tcp.lab.example` resolve inside the
    member container

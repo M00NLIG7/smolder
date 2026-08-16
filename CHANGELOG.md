@@ -17,12 +17,6 @@ and the versioning/MSRV rules are defined in
 
 ## [Unreleased]
 
-### Added
-
-- Added SMB over NetBIOS session-service support to `smolder-smb-core`,
-  including a facade-based Samba interop lane and a local fixture path on
-  `127.0.0.1:1139`.
-
 ### Release Notes Flow
 
 - Add user-visible changes here as they land.
@@ -36,6 +30,94 @@ and the versioning/MSRV rules are defined in
 - After tagging:
   - recreate an empty `Unreleased` section
   - use the matching version section as the basis for the GitHub release body
+
+## [0.4.0] - 2026-08-15
+
+This release contains `smolder-proto`, `smolder-smb-core`, and `smolder` only.
+The separately versioned `smolder-psexecsvc` package remains at `0.3.0` and is
+not published as part of this release.
+
+### Added
+
+- Added explicit `SecurityPolicy`, `ResourceLimits`, and `OperationTimeouts`
+  controls to `smolder-smb-core`, including `Client::pandora_builder` and the
+  equivalent named-pipe configuration for a strict SMB 3.1.1 boundary.
+- Added SMB over NetBIOS session-service support to `smolder-smb-core`,
+  including a facade-based Samba interop lane and a local fixture path on
+  `127.0.0.1:1139`.
+- Expanded typed RPC coverage with paginated `samr` domain, user, group, alias,
+  and alias-member queries; `srvsvc` server/session queries; and configurable
+  `lsarpc` policy access and name lookup.
+- Added a pinned-MSRV deterministic verification matrix, locked supply-chain
+  policy, and archive-based downstream-consumer checks for all three release
+  packages.
+
+### Changed
+
+- Credentialed core constructors now require SMB signing and reject guest/null
+  fallback by default. Callers that intentionally target a legacy endpoint
+  must choose a less strict policy explicitly; Pandora callers should migrate
+  to the dedicated strict builder.
+- The `kerberos` feature now selects native SSPI on Windows and the bounded
+  native GSSAPI wrapper on Unix. Per-operation custom KDC URLs are rejected;
+  configure the native provider before process startup instead.
+- Whole-file, directory, RPC, authentication, transport, and control-record
+  helpers now enforce finite defaults. Large transfers should use streaming
+  APIs or deliberately reviewed custom limits.
+- Cancelling or dropping an SMB operation after I/O may have begun makes that
+  physical connection non-reusable. Callers must discard the poisoned
+  connection rather than issue another request on an uncertain stream.
+- Share paths containing `.` or `..` components are now rejected instead of
+  normalized across a security boundary.
+- The documented support line moved from `0.3.x` to `0.4.x`; the MSRV remains
+  Rust `1.85`.
+- The disposable Samba gate now uses a digest-pinned, winbind-capable fixture
+  and authenticated health checks, so live tests begin only after Direct TCP,
+  NetBIOS, encrypted SMB, and Builtin SAMR surfaces are ready.
+
+### Security
+
+- Bound negotiation and authentication to immutable client offers, trusted
+  transport identity, and generation-scoped preauthentication/key state;
+  tightened response direction, message/session/tree, credit, signing, and
+  encryption correlation before a connection can be reused.
+- Added bounded decoding and allocation checks across SMB frames, compression,
+  authentication tokens and keys, DCE/RPC fragments, NDR collections/strings,
+  and high-level file/directory helpers.
+- Added NTLM Authenticate MIC handling when requested by the challenge and
+  placed raw NTLM token diagnostics behind both the
+  `dangerous-ntlm-diagnostics` feature and an explicit unsafe runtime opt-in.
+- Hardened malformed SMB/RPC response handling, including compressed expansion,
+  compound offsets, transform metadata, pagination, and coalesced/fragmented
+  RPC correlation, so invalid remote input fails closed.
+
+### Fixed
+
+- Accepted SMB 3.1.1 encryption selection from the negotiated encryption
+  context when a server, including Samba, omits the legacy global encryption
+  capability bit as permitted by the dialect.
+- Ignored the advisory response `CreditCharge` field and deferred signature
+  verification for interim `STATUS_PENDING` responses as required by MS-SMB2,
+  while continuing to validate final-response signatures and actual credit
+  grants; this restores named-pipe RPC interoperability with Samba.
+- Correctly decoded deferred `SamrQueryInformationAlias` strings and `srvsvc`
+  union/container pointers returned by Samba, emitted required enumeration
+  container referents, and used the level-1 session superset when a server
+  rejects level 10; live Builtin alias and encrypted RPC assertions remain
+  enforced.
+- Rejected non-session RFC1002 frames on direct TCP and NetBIOS transports.
+- Prevented partially written, timed-out, cancelled, or mis-correlated SMB/RPC
+  exchanges from silently returning a reusable connection.
+- Removed the separate vendored `kenobi-unix` package boundary in favor of the
+  bounded crate-local native wrapper, while preserving the documented default
+  static-friendly build.
+
+### Validation
+
+- The deterministic, package, supply-chain, Samba, Windows, QUIC, Kerberos, and
+  remote-execution evidence requirements—and the rule that unavailable live
+  fixtures must not be reported as passing—are recorded in
+  [docs/testing/release-0.4.0.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release-0.4.0.md).
 
 ## [0.3.0] - 2026-03-31
 

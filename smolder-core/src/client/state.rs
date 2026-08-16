@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Arc;
 
 use aes::Aes128;
@@ -5,15 +6,48 @@ use cmac::Cmac;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
 use smolder_proto::smb::smb2::{
-    Command, CreateRequest, CreateResponse, DurableHandleFlags, FileId, Header,
-    NegotiateResponse, PreauthIntegrityHashId, SessionId, SessionSetupResponse, TreeConnectResponse,
-    TreeId,
+    CipherId, Command, CreateRequest, CreateResponse, DurableHandleFlags, FileId, Header,
+    NegotiateRequest, NegotiateResponse, PreauthIntegrityHashId, SessionId, SessionSetupResponse,
+    TreeConnectResponse, TreeId,
 };
 use smolder_proto::smb::status::NtStatus;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::compression::CompressionState;
 use crate::crypto::EncryptionState;
 use crate::error::CoreError;
+use crate::transport::TransportIdentity;
+
+/// Redacted, zeroizing storage for exported authentication key material.
+#[doc(hidden)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretBytes(Zeroizing<Vec<u8>>);
+
+impl SecretBytes {
+    pub(super) fn new(bytes: Vec<u8>) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+}
+
+impl fmt::Debug for SecretBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted secret bytes>")
+    }
+}
+
+impl std::ops::Deref for SecretBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_slice()
+    }
+}
+
+impl From<Vec<u8>> for SecretBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::new(bytes)
+    }
+}
 
 /// Connected to a transport but no SMB negotiation has been performed.
 #[derive(Debug, Clone, Copy, Default)]
@@ -22,31 +56,55 @@ pub struct Connected;
 /// Negotiated dialect and server capabilities are known.
 #[derive(Debug, Clone)]
 pub struct Negotiated {
+    /// Immutable client offer sent on this physical connection.
+    pub offer: NegotiateRequest,
     /// The server negotiate response.
     pub response: NegotiateResponse,
+    /// Trusted identity of the physical transport that carried negotiation.
+    pub transport_identity: TransportIdentity,
+    /// Cipher selected from the immutable offer, if any.
+    pub selected_cipher: Option<CipherId>,
+    /// Whether authenticated transport-level security was offered and accepted.
+    pub transport_security_accepted: bool,
+    /// Random identifier unique to this physical connection instance.
+    pub physical_connection_id: [u8; 16],
     /// Signing mode requested by the client during negotiate.
     pub client_signing_mode: smolder_proto::smb::smb2::SigningMode,
-    /// Preauthentication integrity state for SMB 3.1.1, if negotiated.
+    /// Negotiation-only preauthentication transcript baseline.
     pub preauth_integrity: Option<PreauthIntegrityState>,
     /// Receive-side compression state, if negotiated.
     pub compression: Option<Arc<CompressionState>>,
 }
 
 /// The transport has an authenticated SMB session.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Authenticated {
+    /// Immutable client offer for this physical connection.
+    pub offer: NegotiateRequest,
     /// Negotiate details for the connection.
     pub negotiated: NegotiateResponse,
+    /// Trusted identity of the physical transport.
+    pub transport_identity: TransportIdentity,
+    /// Cipher selected from the immutable offer, if any.
+    pub selected_cipher: Option<CipherId>,
+    /// Whether authenticated transport-level security was offered and accepted.
+    pub transport_security_accepted: bool,
+    /// Random identifier unique to this physical connection instance.
+    pub physical_connection_id: [u8; 16],
+    /// Monotonic authentication generation on this physical connection.
+    pub authentication_generation: u64,
     /// Signing mode requested by the client during negotiate.
     pub client_signing_mode: smolder_proto::smb::smb2::SigningMode,
     /// Session setup response.
     pub session: SessionSetupResponse,
     /// Assigned session identifier.
     pub session_id: SessionId,
-    /// Preauthentication integrity state for SMB 3.1.1, if negotiated.
+    /// Negotiation-only preauthentication state used as the next generation baseline.
+    pub negotiate_preauth_integrity: Option<PreauthIntegrityState>,
+    /// Preauthentication transcript for this authentication generation.
     pub preauth_integrity: Option<PreauthIntegrityState>,
     /// Exported session key from the authentication mechanism.
-    pub session_key: Option<Vec<u8>>,
+    pub session_key: Option<SecretBytes>,
     /// Whether the session requires signed responses and requests.
     pub signing_required: bool,
     /// Derived request-signing state for the session, if available.
@@ -60,10 +118,22 @@ pub struct Authenticated {
 }
 
 /// The transport is connected to a tree and can issue file operations.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TreeConnected {
+    /// Immutable client offer for this physical connection.
+    pub offer: NegotiateRequest,
     /// Negotiate details for the connection.
     pub negotiated: NegotiateResponse,
+    /// Trusted identity of the physical transport.
+    pub transport_identity: TransportIdentity,
+    /// Cipher selected from the immutable offer, if any.
+    pub selected_cipher: Option<CipherId>,
+    /// Whether authenticated transport-level security was offered and accepted.
+    pub transport_security_accepted: bool,
+    /// Random identifier unique to this physical connection instance.
+    pub physical_connection_id: [u8; 16],
+    /// Monotonic authentication generation on this physical connection.
+    pub authentication_generation: u64,
     /// Signing mode requested by the client during negotiate.
     pub client_signing_mode: smolder_proto::smb::smb2::SigningMode,
     /// Session setup response.
@@ -74,10 +144,12 @@ pub struct TreeConnected {
     pub session_id: SessionId,
     /// Assigned tree identifier.
     pub tree_id: TreeId,
-    /// Preauthentication integrity state for SMB 3.1.1, if negotiated.
+    /// Negotiation-only preauthentication state used as the next generation baseline.
+    pub negotiate_preauth_integrity: Option<PreauthIntegrityState>,
+    /// Preauthentication transcript for this authentication generation.
     pub preauth_integrity: Option<PreauthIntegrityState>,
     /// Exported session key from the authentication mechanism.
-    pub session_key: Option<Vec<u8>>,
+    pub session_key: Option<SecretBytes>,
     /// Whether the session requires signed responses and requests.
     pub signing_required: bool,
     /// Derived request-signing state for the session, if available.
@@ -88,6 +160,70 @@ pub struct TreeConnected {
     pub encryption: Option<Arc<EncryptionState>>,
     /// Receive-side compression state, if negotiated.
     pub compression: Option<Arc<CompressionState>>,
+}
+
+impl fmt::Debug for Authenticated {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Authenticated")
+            .field("negotiated", &self.negotiated)
+            .field("transport_identity", &self.transport_identity)
+            .field("selected_cipher", &self.selected_cipher)
+            .field(
+                "transport_security_accepted",
+                &self.transport_security_accepted,
+            )
+            .field("physical_connection_id", &self.physical_connection_id)
+            .field("authentication_generation", &self.authentication_generation)
+            .field("session", &self.session)
+            .field("session_id", &self.session_id)
+            .field(
+                "session_key",
+                &self.session_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("signing_required", &self.signing_required)
+            .field("signing", &self.signing.as_ref().map(|_| "<redacted>"))
+            .field("encryption_required", &self.encryption_required)
+            .field(
+                "encryption",
+                &self.encryption.as_ref().map(|_| "<redacted>"),
+            )
+            .field("compression", &self.compression)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for TreeConnected {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TreeConnected")
+            .field("negotiated", &self.negotiated)
+            .field("transport_identity", &self.transport_identity)
+            .field("selected_cipher", &self.selected_cipher)
+            .field(
+                "transport_security_accepted",
+                &self.transport_security_accepted,
+            )
+            .field("physical_connection_id", &self.physical_connection_id)
+            .field("authentication_generation", &self.authentication_generation)
+            .field("session", &self.session)
+            .field("tree", &self.tree)
+            .field("session_id", &self.session_id)
+            .field("tree_id", &self.tree_id)
+            .field(
+                "session_key",
+                &self.session_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("signing_required", &self.signing_required)
+            .field("signing", &self.signing.as_ref().map(|_| "<redacted>"))
+            .field("encryption_required", &self.encryption_required)
+            .field(
+                "encryption",
+                &self.encryption.as_ref().map(|_| "<redacted>"),
+            )
+            .field("compression", &self.compression)
+            .finish_non_exhaustive()
+    }
 }
 
 /// SMB 3.1.1 preauthentication transcript state.
@@ -128,11 +264,27 @@ pub(super) enum SigningAlgorithm {
 }
 
 /// Derived signing state for an authenticated SMB session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct SigningState {
     pub(super) algorithm: SigningAlgorithm,
     pub(super) key: Vec<u8>,
+}
+
+impl fmt::Debug for SigningState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SigningState")
+            .field("algorithm", &self.algorithm)
+            .field("key", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for SigningState {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
 }
 
 impl SigningState {
@@ -227,7 +379,7 @@ impl SigningState {
 }
 
 /// A raw SMB request element within a compound chain.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CompoundRequest {
     /// The SMB2 command to send.
     pub command: Command,
@@ -237,6 +389,21 @@ pub struct CompoundRequest {
     pub related: bool,
     /// Accepted NTSTATUS values for this response element.
     pub accepted_statuses: Vec<u32>,
+}
+
+impl fmt::Debug for CompoundRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompoundRequest")
+            .field("command", &self.command)
+            .field(
+                "body",
+                &format_args!("<redacted {} bytes>", self.body.len()),
+            )
+            .field("related", &self.related)
+            .field("accepted_statuses", &self.accepted_statuses)
+            .finish()
+    }
 }
 
 impl CompoundRequest {
@@ -273,12 +440,25 @@ impl CompoundRequest {
 }
 
 /// A raw SMB response element returned from a compound chain.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CompoundResponse {
     /// The SMB2 response header for this element.
     pub header: Header,
     /// The raw SMB2 response body for this element, including any compound alignment padding.
     pub body: Vec<u8>,
+}
+
+impl fmt::Debug for CompoundResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompoundResponse")
+            .field("header", &self.header)
+            .field(
+                "body",
+                &format_args!("<redacted {} bytes>", self.body.len()),
+            )
+            .finish()
+    }
 }
 
 /// Options used when requesting a durable open.

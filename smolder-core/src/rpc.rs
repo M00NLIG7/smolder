@@ -6,6 +6,7 @@ use smolder_proto::rpc::{
 };
 
 use crate::auth::{NtlmCredentials, NtlmRpcBindHandshake, NtlmRpcPacketIntegrity};
+use crate::client::{Connection, TreeConnected};
 use crate::error::CoreError;
 use crate::pipe::NamedPipe;
 use crate::transport::TokioTcpTransport;
@@ -17,7 +18,11 @@ const RPC_DEFAULT_FRAGMENT_SIZE: u16 = 4_280;
 pub struct PipeRpcClient<T = TokioTcpTransport> {
     pipe: NamedPipe<T>,
     next_call_id: u32,
+    bound_contexts: Vec<(u16, SyntaxId)>,
+    max_outbound_fragment: Option<u16>,
+    max_inbound_fragment: Option<u16>,
     ntlm_packet_integrity: Option<NtlmRpcPacketIntegrity>,
+    poisoned: bool,
 }
 
 impl<T> PipeRpcClient<T> {
@@ -27,7 +32,11 @@ impl<T> PipeRpcClient<T> {
         Self {
             pipe,
             next_call_id: 1,
+            bound_contexts: Vec::new(),
+            max_outbound_fragment: None,
+            max_inbound_fragment: None,
             ntlm_packet_integrity: None,
+            poisoned: false,
         }
     }
 
@@ -37,9 +46,22 @@ impl<T> PipeRpcClient<T> {
         &self.pipe
     }
 
-    /// Consumes the RPC client and returns the underlying named pipe.
+    /// Returns whether cancellation, I/O failure, or protocol mis-correlation made this RPC stream
+    /// unsafe to reuse.
     #[must_use]
-    pub fn into_pipe(self) -> NamedPipe<T> {
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// Consumes the RPC client and returns the underlying named pipe.
+    ///
+    /// If RPC correlation was poisoned, the returned pipe's physical SMB connection is also
+    /// invalidated and must be discarded rather than reused.
+    #[must_use]
+    pub fn into_pipe(mut self) -> NamedPipe<T> {
+        if self.poisoned {
+            self.pipe.invalidate_connection();
+        }
         self.pipe
     }
 
@@ -58,10 +80,38 @@ impl<T> PipeRpcClient<T> {
         self.ntlm_packet_integrity = Some(ntlm_packet_integrity);
     }
 
-    fn next_call_id(&mut self) -> u32 {
+    fn next_call_id(&mut self) -> Result<u32, CoreError> {
         let current = self.next_call_id;
-        self.next_call_id += 1;
-        current
+        self.next_call_id = self
+            .next_call_id
+            .checked_add(1)
+            .ok_or(CoreError::InvalidInput("DCE/RPC call id space exhausted"))?;
+        Ok(current)
+    }
+
+    fn ensure_usable(&self) -> Result<(), CoreError> {
+        if self.poisoned {
+            Err(CoreError::ConnectionPoisoned)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn remember_bound_context(&mut self, context_id: u16, syntax: SyntaxId) {
+        if let Some((_, existing)) = self
+            .bound_contexts
+            .iter_mut()
+            .find(|(bound_id, _)| *bound_id == context_id)
+        {
+            *existing = syntax;
+        } else {
+            self.bound_contexts.push((context_id, syntax));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assume_bound_context_for_test(&mut self, context_id: u16, syntax: SyntaxId) {
+        self.remember_bound_context(context_id, syntax);
     }
 }
 
@@ -69,6 +119,20 @@ impl<T> PipeRpcClient<T>
 where
     T: crate::transport::SmbTransport + Send,
 {
+    /// Closes the named-pipe handle and returns the tree-connected SMB connection.
+    pub async fn close(self) -> Result<Connection<T, TreeConnected>, CoreError> {
+        self.pipe.close().await
+    }
+
+    pub(crate) async fn close_after_error(self, error: CoreError) -> CoreError {
+        if !self.poisoned {
+            let _ = self.pipe.close().await;
+        }
+        // A poisoned RPC stream is dropped here, closing the physical transport rather than
+        // issuing another SMB request on potentially mis-correlated framing.
+        error
+    }
+
     /// Sends a bind PDU and returns the raw bind acknowledgement.
     pub async fn bind(
         &mut self,
@@ -108,8 +172,10 @@ where
         flags: PacketFlags,
         auth_verifier: Option<AuthVerifier>,
     ) -> Result<BindAckPdu, CoreError> {
+        self.ensure_usable()?;
+        let call_id = self.next_call_id()?;
         let bind = Packet::Bind(BindPdu {
-            call_id: self.next_call_id(),
+            call_id,
             flags,
             max_xmit_frag: RPC_DEFAULT_FRAGMENT_SIZE,
             max_recv_frag: RPC_DEFAULT_FRAGMENT_SIZE,
@@ -119,11 +185,53 @@ where
             transfer_syntax: SyntaxId::NDR32,
             auth_verifier,
         });
+        self.poisoned = true;
         let response = self.pipe.call(bind.encode()).await?;
         let packet = Packet::decode(&response)?;
         let Packet::BindAck(bind_ack) = packet else {
             return Err(CoreError::InvalidResponse("expected rpc bind ack"));
         };
+        if bind_ack.call_id != call_id {
+            return Err(CoreError::InvalidResponse(
+                "rpc bind ack call id did not match the bind request",
+            ));
+        }
+        if !bind_ack
+            .flags
+            .contains(PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT)
+        {
+            return Err(CoreError::InvalidResponse(
+                "rpc bind ack was not a complete first/last fragment",
+            ));
+        }
+        if bind_ack.result.result == 0 && bind_ack.result.transfer_syntax != SyntaxId::NDR32 {
+            return Err(CoreError::InvalidResponse(
+                "rpc bind ack selected a transfer syntax that was not offered",
+            ));
+        }
+        if bind_ack.result.result == 0
+            && (bind_ack.result.reason != 0
+                || bind_ack.max_xmit_frag < 16
+                || bind_ack.max_recv_frag < 16)
+        {
+            return Err(CoreError::InvalidResponse(
+                "rpc bind ack returned invalid accepted-context parameters",
+            ));
+        }
+        if bind_ack.result.result == 0 {
+            self.remember_bound_context(context_id, abstract_syntax);
+            let outbound = bind_ack.max_recv_frag.min(RPC_DEFAULT_FRAGMENT_SIZE);
+            let inbound = bind_ack.max_xmit_frag.min(RPC_DEFAULT_FRAGMENT_SIZE);
+            self.max_outbound_fragment = Some(
+                self.max_outbound_fragment
+                    .map_or(outbound, |current| current.min(outbound)),
+            );
+            self.max_inbound_fragment = Some(
+                self.max_inbound_fragment
+                    .map_or(inbound, |current| current.min(inbound)),
+            );
+        }
+        self.poisoned = false;
         Ok(bind_ack)
     }
 
@@ -169,11 +277,22 @@ where
             });
         }
 
+        // The accepted bind has advanced server-side authentication state. Any local token
+        // validation failure or cancellation before AUTH3 completes makes this stream unusable.
+        self.poisoned = true;
         let completed = handshake.complete(&bind_ack)?;
-        self.pipe
-            .write_all(&Packet::RpcAuth3(completed.auth3).encode())
-            .await?;
+        let auth3 = Packet::RpcAuth3(completed.auth3).encode();
+        let maximum_outbound = self.max_outbound_fragment.unwrap_or(u16::MAX);
+        if auth3.len() > usize::from(maximum_outbound) {
+            return Err(CoreError::ResourceLimit {
+                resource: "negotiated DCE/RPC outbound fragment",
+                requested: auth3.len() as u64,
+                maximum: u64::from(maximum_outbound),
+            });
+        }
+        self.pipe.write_all(&auth3).await?;
         self.ntlm_packet_integrity = completed.packet_integrity;
+        self.poisoned = false;
         Ok(bind_ack)
     }
 
@@ -225,16 +344,37 @@ where
         stub_data: Vec<u8>,
         auth_verifier: Option<AuthVerifier>,
     ) -> Result<ResponsePdu, CoreError> {
+        self.ensure_usable()?;
         if self.ntlm_packet_integrity.is_some() && auth_verifier.is_some() {
             return Err(CoreError::InvalidInput(
                 "rpc auth verifier cannot be supplied when NTLM packet integrity is enabled",
             ));
         }
 
+        if !self
+            .bound_contexts
+            .iter()
+            .any(|(bound_id, _)| *bound_id == context_id)
+        {
+            return Err(CoreError::InvalidInput(
+                "DCE/RPC request used a presentation context that was not bound",
+            ));
+        }
+        let limits = self.pipe.resource_limits();
+        if stub_data.len() > limits.max_rpc_stub_size {
+            return Err(CoreError::ResourceLimit {
+                resource: "DCE/RPC request stub",
+                requested: stub_data.len() as u64,
+                maximum: limits.max_rpc_stub_size as u64,
+            });
+        }
+        let alloc_hint = u32::try_from(stub_data.len())
+            .map_err(|_| CoreError::InvalidInput("DCE/RPC request stub exceeded u32"))?;
+        let call_id = self.next_call_id()?;
         let request = RequestPdu {
-            call_id: self.next_call_id(),
+            call_id,
             flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
-            alloc_hint: stub_data.len() as u32,
+            alloc_hint,
             context_id,
             opnum,
             object_uuid,
@@ -245,9 +385,17 @@ where
                     .map(NtlmRpcPacketIntegrity::placeholder_auth_verifier)
             }),
         };
+        let maximum_outbound = self.max_outbound_fragment.unwrap_or(u16::MAX);
         let request_packet =
             if let Some(ntlm_packet_integrity) = self.ntlm_packet_integrity.as_mut() {
                 let placeholder_packet = request.encode();
+                if placeholder_packet.len() > usize::from(maximum_outbound) {
+                    return Err(CoreError::ResourceLimit {
+                        resource: "negotiated DCE/RPC outbound fragment",
+                        requested: placeholder_packet.len() as u64,
+                        maximum: u64::from(maximum_outbound),
+                    });
+                }
                 let signed_verifier =
                     ntlm_packet_integrity.sign_request_verifier(&placeholder_packet)?;
                 RequestPdu {
@@ -258,26 +406,186 @@ where
             } else {
                 request.encode()
             };
-        let response = self.pipe.call(request_packet).await?;
-        let packet = Packet::decode(&response)?;
-        if let Some(ntlm_packet_integrity) = self.ntlm_packet_integrity.as_mut() {
-            let verifier = match &packet {
-                Packet::Response(response) => response.auth_verifier.as_ref(),
-                Packet::Fault(fault) => fault.auth_verifier.as_ref(),
-                _ => None,
-            }
-            .ok_or(CoreError::InvalidResponse(
-                "expected rpc packet-integrity auth verifier on the response",
-            ))?;
-            ntlm_packet_integrity.verify_response(&response, verifier)?;
+        if request_packet.len() > usize::from(maximum_outbound) {
+            return Err(CoreError::ResourceLimit {
+                resource: "negotiated DCE/RPC outbound fragment",
+                requested: request_packet.len() as u64,
+                maximum: u64::from(maximum_outbound),
+            });
         }
-        match packet {
-            Packet::Response(response) => Ok(response),
-            Packet::Fault(fault) => Err(CoreError::RemoteOperation {
-                operation: "rpc_fault",
-                code: fault.status,
-            }),
-            _ => Err(CoreError::InvalidResponse("unexpected rpc packet type")),
+
+        self.poisoned = true;
+        let first_fragment = self.pipe.call(request_packet).await?;
+        self.receive_call_response(call_id, context_id, first_fragment)
+            .await
+    }
+
+    async fn receive_call_response(
+        &mut self,
+        expected_call_id: u32,
+        expected_context_id: u16,
+        first_fragment: Vec<u8>,
+    ) -> Result<ResponsePdu, CoreError> {
+        let limits = self.pipe.resource_limits();
+        let mut raw_fragment = first_fragment;
+        let mut aggregate = Vec::new();
+        let mut first = true;
+        let mut fragment_count = 0usize;
+        let mut initial_alloc_hint = 0u32;
+
+        loop {
+            let maximum_inbound = self.max_inbound_fragment.unwrap_or(u16::MAX);
+            if raw_fragment.len() > usize::from(maximum_inbound) {
+                return Err(CoreError::ResourceLimit {
+                    resource: "negotiated DCE/RPC inbound fragment",
+                    requested: raw_fragment.len() as u64,
+                    maximum: u64::from(maximum_inbound),
+                });
+            }
+            fragment_count = fragment_count
+                .checked_add(1)
+                .ok_or(CoreError::InvalidResponse("rpc fragment count overflowed"))?;
+            if fragment_count > limits.max_rpc_pages {
+                return Err(CoreError::ResourceLimit {
+                    resource: "DCE/RPC response fragments",
+                    requested: fragment_count as u64,
+                    maximum: limits.max_rpc_pages as u64,
+                });
+            }
+
+            let packet = Packet::decode(&raw_fragment)?;
+            match packet {
+                Packet::Response(response) => {
+                    if response.call_id != expected_call_id {
+                        return Err(CoreError::InvalidResponse(
+                            "rpc response call id did not match the request",
+                        ));
+                    }
+                    if response.context_id != expected_context_id {
+                        return Err(CoreError::InvalidResponse(
+                            "rpc response context id did not match the request",
+                        ));
+                    }
+                    if response.cancel_count != 0 {
+                        return Err(CoreError::InvalidResponse(
+                            "rpc response reported an unexpected cancellation count",
+                        ));
+                    }
+                    if first {
+                        if !response.flags.contains(PacketFlags::FIRST_FRAGMENT) {
+                            return Err(CoreError::InvalidResponse(
+                                "rpc response did not start with a FIRST fragment",
+                            ));
+                        }
+                        initial_alloc_hint = response.alloc_hint;
+                    } else if response.flags.contains(PacketFlags::FIRST_FRAGMENT) {
+                        return Err(CoreError::InvalidResponse(
+                            "rpc response repeated the FIRST fragment flag",
+                        ));
+                    }
+                    if usize::try_from(response.alloc_hint).unwrap_or(usize::MAX)
+                        > limits.max_rpc_stub_size
+                    {
+                        return Err(CoreError::ResourceLimit {
+                            resource: "DCE/RPC allocation hint",
+                            requested: u64::from(response.alloc_hint),
+                            maximum: limits.max_rpc_stub_size as u64,
+                        });
+                    }
+
+                    if let Some(ntlm_packet_integrity) = self.ntlm_packet_integrity.as_mut() {
+                        let verifier =
+                            response
+                                .auth_verifier
+                                .as_ref()
+                                .ok_or(CoreError::InvalidResponse(
+                                    "expected rpc packet-integrity auth verifier on the response",
+                                ))?;
+                        ntlm_packet_integrity.verify_response(&raw_fragment, verifier)?;
+                    }
+
+                    let new_len = aggregate
+                        .len()
+                        .checked_add(response.stub_data.len())
+                        .ok_or(CoreError::ResourceLimit {
+                            resource: "DCE/RPC response stub",
+                            requested: u64::MAX,
+                            maximum: limits.max_rpc_stub_size as u64,
+                        })?;
+                    if new_len > limits.max_rpc_stub_size {
+                        return Err(CoreError::ResourceLimit {
+                            resource: "DCE/RPC response stub",
+                            requested: new_len as u64,
+                            maximum: limits.max_rpc_stub_size as u64,
+                        });
+                    }
+                    aggregate
+                        .try_reserve(response.stub_data.len())
+                        .map_err(|_| CoreError::AllocationFailed("DCE/RPC response stub"))?;
+                    aggregate.extend_from_slice(&response.stub_data);
+
+                    if response.flags.contains(PacketFlags::LAST_FRAGMENT) {
+                        if initial_alloc_hint != 0
+                            && aggregate.len()
+                                > usize::try_from(initial_alloc_hint).unwrap_or(usize::MAX)
+                        {
+                            return Err(CoreError::InvalidResponse(
+                                "rpc response exceeded its initial allocation hint",
+                            ));
+                        }
+                        self.poisoned = false;
+                        return Ok(ResponsePdu {
+                            call_id: response.call_id,
+                            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+                            alloc_hint: initial_alloc_hint,
+                            context_id: response.context_id,
+                            cancel_count: response.cancel_count,
+                            stub_data: aggregate,
+                            auth_verifier: response.auth_verifier,
+                        });
+                    }
+                }
+                Packet::Fault(fault) => {
+                    if fault.call_id != expected_call_id {
+                        return Err(CoreError::InvalidResponse(
+                            "rpc fault call id did not match the request",
+                        ));
+                    }
+                    if fault.context_id != expected_context_id {
+                        return Err(CoreError::InvalidResponse(
+                            "rpc fault context id did not match the request",
+                        ));
+                    }
+                    if !first
+                        || !fault
+                            .flags
+                            .contains(PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT)
+                    {
+                        return Err(CoreError::InvalidResponse(
+                            "rpc fault was not one complete terminal fragment",
+                        ));
+                    }
+                    if let Some(ntlm_packet_integrity) = self.ntlm_packet_integrity.as_mut() {
+                        let verifier =
+                            fault
+                                .auth_verifier
+                                .as_ref()
+                                .ok_or(CoreError::InvalidResponse(
+                                    "expected rpc packet-integrity auth verifier on the response",
+                                ))?;
+                        ntlm_packet_integrity.verify_response(&raw_fragment, verifier)?;
+                    }
+                    self.poisoned = false;
+                    return Err(CoreError::RemoteOperation {
+                        operation: "rpc_fault",
+                        code: fault.status,
+                    });
+                }
+                _ => return Err(CoreError::InvalidResponse("unexpected rpc packet type")),
+            }
+
+            first = false;
+            raw_fragment = self.pipe.read_pdu().await?;
         }
     }
 }
@@ -302,7 +610,9 @@ mod tests {
     };
     use smolder_proto::smb::status::NtStatus;
 
-    use crate::auth::{NtlmCredentials, NtlmRpcPacketIntegrity, NtlmSessionSecurity};
+    use crate::auth::{
+        AuthError, AuthProvider, NtlmCredentials, NtlmRpcPacketIntegrity, NtlmSessionSecurity,
+    };
     use crate::client::{Connection, TreeConnected};
     use crate::error::CoreError;
     use crate::pipe::{NamedPipe, PipeAccess};
@@ -336,6 +646,20 @@ mod tests {
         }
     }
 
+    struct PassthroughAuthProvider(Vec<u8>);
+
+    impl AuthProvider for PassthroughAuthProvider {
+        fn initial_token(&mut self, _negotiate: &NegotiateResponse) -> Result<Vec<u8>, AuthError> {
+            Ok(self.0.clone())
+        }
+
+        fn next_token(&mut self, _incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
+            Err(AuthError::InvalidState(
+                "passthrough test provider does not support challenge tokens",
+            ))
+        }
+    }
+
     #[async_trait]
     impl Transport for ScriptedTransport {
         async fn send(&mut self, frame: &[u8]) -> std::io::Result<()> {
@@ -347,9 +671,41 @@ mod tests {
         }
 
         async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
-            self.reads.pop_front().ok_or_else(|| {
+            let frame = self.reads.pop_front().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no scripted response")
-            })
+            })?;
+            let session = SessionMessage::decode(&frame).map_err(std::io::Error::other)?;
+            let header = Header::decode(&session.payload).map_err(std::io::Error::other)?;
+            if header.command != Command::Write {
+                return Ok(frame);
+            }
+            let written = self
+                .writes
+                .lock()
+                .expect("writes lock")
+                .iter()
+                .rev()
+                .find_map(|request_frame| {
+                    let request = SessionMessage::decode(request_frame).ok()?;
+                    let request_header = Header::decode(&request.payload).ok()?;
+                    (request_header.command == Command::Write)
+                        .then(|| WriteRequest::decode(&request.payload[Header::LEN..]).ok())
+                        .flatten()
+                })
+                .ok_or_else(|| std::io::Error::other("scripted write response had no request"))?
+                .data
+                .len();
+            Ok(response_frame(
+                Command::Write,
+                header.status,
+                header.message_id.0,
+                header.session_id.0,
+                header.tree_id.0,
+                WriteResponse {
+                    count: u32::try_from(written).map_err(std::io::Error::other)?,
+                }
+                .encode(),
+            ))
         }
     }
 
@@ -376,6 +732,24 @@ mod tests {
         let pipe = rpc.into_pipe();
 
         assert_eq!(pipe.file_id(), file_id);
+    }
+
+    #[tokio::test]
+    async fn call_rejects_an_unbound_presentation_context() {
+        let pipe = open_pipe(Vec::new()).await;
+        let mut rpc = PipeRpcClient::new(pipe);
+
+        let error = rpc
+            .call(0, 15, Vec::new())
+            .await
+            .expect_err("an RPC call before bind must be rejected");
+        assert!(matches!(
+            error,
+            CoreError::InvalidInput(
+                "DCE/RPC request used a presentation context that was not bound"
+            )
+        ));
+        assert!(!rpc.is_poisoned());
     }
 
     #[tokio::test]
@@ -458,7 +832,7 @@ mod tests {
             auth_verifier: None,
         }))])
         .await;
-        let mut rpc = PipeRpcClient::new(pipe);
+        let mut rpc = bound_rpc(pipe);
 
         let stub = rpc
             .call(0, 15, vec![0xaa, 0xbb])
@@ -466,6 +840,135 @@ mod tests {
             .expect("rpc call should succeed");
 
         assert_eq!(stub, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn rejects_response_with_wrong_call_id_and_poisons_rpc_stream() {
+        let pipe = open_pipe(vec![rpc_response_frame(Packet::Response(ResponsePdu {
+            call_id: 99,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 1,
+            context_id: 0,
+            cancel_count: 0,
+            stub_data: vec![0xaa],
+            auth_verifier: None,
+        }))])
+        .await;
+        let mut rpc = bound_rpc(pipe);
+
+        let error = rpc
+            .call(0, 15, Vec::new())
+            .await
+            .expect_err("wrong-call response must be rejected");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse("rpc response call id did not match the request")
+        ));
+        assert!(matches!(
+            rpc.call(0, 15, Vec::new()).await,
+            Err(CoreError::ConnectionPoisoned)
+        ));
+
+        let mut pipe = rpc.into_pipe();
+        assert!(matches!(
+            pipe.write_all(b"must-not-be-sent").await,
+            Err(CoreError::ConnectionPoisoned)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reassembles_first_and_last_rpc_response_fragments() {
+        let pipe = open_pipe(vec![
+            rpc_response_frame_with_message_id(
+                Packet::Response(ResponsePdu {
+                    call_id: 1,
+                    flags: PacketFlags::FIRST_FRAGMENT,
+                    alloc_hint: 4,
+                    context_id: 0,
+                    cancel_count: 0,
+                    stub_data: vec![1, 2],
+                    auth_verifier: None,
+                }),
+                6,
+            ),
+            rpc_response_frame_with_message_id(
+                Packet::Response(ResponsePdu {
+                    call_id: 1,
+                    flags: PacketFlags::LAST_FRAGMENT,
+                    alloc_hint: 2,
+                    context_id: 0,
+                    cancel_count: 0,
+                    stub_data: vec![3, 4],
+                    auth_verifier: None,
+                }),
+                7,
+            ),
+        ])
+        .await;
+        let mut rpc = bound_rpc(pipe);
+
+        let stub = rpc
+            .call(0, 15, Vec::new())
+            .await
+            .expect("fragmented response should reassemble");
+
+        assert_eq!(stub, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn preserves_coalesced_trailing_rpc_pdus_for_the_next_call() {
+        let first = Packet::Response(ResponsePdu {
+            call_id: 1,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 2,
+            context_id: 0,
+            cancel_count: 0,
+            stub_data: vec![1, 2],
+            auth_verifier: None,
+        })
+        .encode();
+        let second = Packet::Response(ResponsePdu {
+            call_id: 2,
+            flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+            alloc_hint: 2,
+            context_id: 0,
+            cancel_count: 0,
+            stub_data: vec![3, 4],
+            auth_verifier: None,
+        })
+        .encode();
+        let mut coalesced = first;
+        coalesced.extend_from_slice(&second);
+        let pipe = open_pipe(vec![
+            rpc_bytes_response_frame(coalesced, 6),
+            response_frame(
+                Command::Write,
+                NtStatus::SUCCESS.to_u32(),
+                7,
+                11,
+                7,
+                WriteResponse { count: 24 }.encode(),
+            ),
+            response_frame(
+                Command::Flush,
+                NtStatus::SUCCESS.to_u32(),
+                8,
+                11,
+                7,
+                smolder_proto::smb::smb2::FlushResponse.encode(),
+            ),
+        ])
+        .await;
+        let mut rpc = bound_rpc(pipe);
+
+        assert_eq!(
+            rpc.call(0, 15, Vec::new()).await.expect("first call"),
+            vec![1, 2]
+        );
+        assert_eq!(
+            rpc.call(0, 16, Vec::new()).await.expect("second call"),
+            vec![3, 4]
+        );
     }
 
     #[tokio::test]
@@ -486,7 +989,7 @@ mod tests {
             auth_verifier: Some(verifier.clone()),
         }))])
         .await;
-        let mut rpc = PipeRpcClient::new(pipe);
+        let mut rpc = bound_rpc(pipe);
 
         let response = rpc
             .call_with_auth(0, 15, vec![0xaa, 0xbb], Some(verifier.clone()))
@@ -509,7 +1012,7 @@ mod tests {
             auth_verifier: None,
         }))])
         .await;
-        let mut rpc = PipeRpcClient::new(pipe);
+        let mut rpc = bound_rpc(pipe);
 
         let error = rpc
             .call(0, 15, vec![0xaa, 0xbb])
@@ -567,7 +1070,7 @@ mod tests {
             auth_verifier: Some(response_verifier),
         }))])
         .await;
-        let mut rpc = PipeRpcClient::new(pipe).with_ntlm_packet_integrity(ntlm_packet_integrity());
+        let mut rpc = bound_rpc(pipe).with_ntlm_packet_integrity(ntlm_packet_integrity());
 
         let stub = rpc
             .call(0, 15, vec![0xaa, 0xbb])
@@ -589,7 +1092,7 @@ mod tests {
             auth_verifier: None,
         }))])
         .await;
-        let mut rpc = PipeRpcClient::new(pipe).with_ntlm_packet_integrity(ntlm_packet_integrity());
+        let mut rpc = bound_rpc(pipe).with_ntlm_packet_integrity(ntlm_packet_integrity());
 
         let error = rpc
             .call(0, 15, vec![0xaa, 0xbb])
@@ -693,6 +1196,12 @@ mod tests {
             .expect("pipe open should succeed")
     }
 
+    fn bound_rpc(pipe: NamedPipe<ScriptedTransport>) -> PipeRpcClient<ScriptedTransport> {
+        let mut rpc = PipeRpcClient::new(pipe);
+        rpc.remember_bound_context(0, TEST_SYNTAX);
+        rpc
+    }
+
     async fn open_pipe_with_writes(
         reads: Vec<Vec<u8>>,
     ) -> (NamedPipe<ScriptedTransport>, Arc<Mutex<Vec<Vec<u8>>>>) {
@@ -725,8 +1234,12 @@ mod tests {
     }
 
     fn rpc_response_frame_with_message_id(packet: Packet, message_id: u64) -> Vec<u8> {
-        let packet = packet.encode();
+        rpc_bytes_response_frame(packet.encode(), message_id)
+    }
+
+    fn rpc_bytes_response_frame(packet: Vec<u8>, message_id: u64) -> Vec<u8> {
         let mut header = Header::new(Command::Read, MessageId(message_id));
+        header.flags |= smolder_proto::smb::smb2::HeaderFlags::SERVER_TO_REDIR;
         header.status = NtStatus::SUCCESS.to_u32();
         header.session_id = smolder_proto::smb::smb2::SessionId(11);
         header.tree_id = TreeId(7);
@@ -861,7 +1374,9 @@ mod tests {
             .await
             .expect("negotiate should succeed");
         let connection = connection
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider(
+                session_request.security_buffer.clone(),
+            ))
             .await
             .expect("session setup should succeed");
         let connection = connection
@@ -962,6 +1477,7 @@ mod tests {
         body: Vec<u8>,
     ) -> Vec<u8> {
         let mut header = Header::new(command, MessageId(message_id));
+        header.flags |= smolder_proto::smb::smb2::HeaderFlags::SERVER_TO_REDIR;
         header.status = status;
         header.session_id = smolder_proto::smb::smb2::SessionId(session_id);
         header.tree_id = TreeId(tree_id);

@@ -5,6 +5,7 @@ mod common;
 use common::{samba_lock, unique_path_in_dir, QuicNtlmConfig};
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn authenticates_and_connects_tree_over_quic_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = QuicNtlmConfig::from_env("SMOLDER_SAMBA_QUIC") else {
@@ -33,6 +34,7 @@ async fn authenticates_and_connects_tree_over_quic_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn roundtrips_file_io_over_quic_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = QuicNtlmConfig::from_env("SMOLDER_SAMBA_QUIC") else {

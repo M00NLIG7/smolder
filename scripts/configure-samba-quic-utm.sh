@@ -9,7 +9,17 @@ SSH_PORT="${SMOLDER_SAMBA_QUIC_SSH_PORT:-2422}"
 GUEST_USER="${SMOLDER_SAMBA_QUIC_GUEST_USER:-smolder}"
 SERVER_NAME="${SMOLDER_SAMBA_QUIC_SERVER_NAME:-files.lab.example}"
 USERNAME="${SMOLDER_SAMBA_QUIC_USERNAME:-smolder}"
-PASSWORD="${SMOLDER_SAMBA_QUIC_PASSWORD:-smolderpass}"
+PASSWORD_INPUT_FILE="${SMOLDER_SAMBA_QUIC_PASSWORD_FILE:-}"
+if [[ -n "${PASSWORD_INPUT_FILE}" ]]; then
+  if [[ ! -f "${PASSWORD_INPUT_FILE}" || -L "${PASSWORD_INPUT_FILE}" ]]; then
+    printf 'SMOLDER_SAMBA_QUIC_PASSWORD_FILE must identify a regular, non-symlink file\n' >&2
+    exit 1
+  fi
+  PASSWORD="$(<"${PASSWORD_INPUT_FILE}")"
+else
+  PASSWORD="${SMOLDER_SAMBA_QUIC_PASSWORD:-smolderpass}"
+fi
+unset SMOLDER_SAMBA_QUIC_PASSWORD
 SHARE_NAME="${SMOLDER_SAMBA_QUIC_SHARE_NAME:-share}"
 
 SSH_HOST="127.0.0.1"
@@ -78,12 +88,18 @@ push_fixture() {
 }
 
 run_guest_setup() {
-  ssh "${SSH_OPTS[@]}" "${GUEST_USER}@${SSH_HOST}" "
-    export SMOLDER_SAMBA_QUIC_SERVER_NAME='${SERVER_NAME}' &&
-    export SMOLDER_SAMBA_QUIC_USERNAME='${USERNAME}' &&
-    export SMOLDER_SAMBA_QUIC_PASSWORD='${PASSWORD}' &&
-    export SMOLDER_SAMBA_QUIC_SHARE_NAME='${SHARE_NAME}' &&
-    sudo -E /tmp/setup-samba-quic-guest.sh '${REMOTE_WORK_DIR}'
+  printf '%s' "${PASSWORD}" | ssh "${SSH_OPTS[@]}" "${GUEST_USER}@${SSH_HOST}" "
+    set -e
+    password_file=/tmp/smolder-samba-quic-password
+    umask 077
+    cat >\"\${password_file}\"
+    trap 'rm -f -- \"\${password_file}\"' EXIT
+    sudo env \
+      SMOLDER_SAMBA_QUIC_SERVER_NAME='${SERVER_NAME}' \
+      SMOLDER_SAMBA_QUIC_USERNAME='${USERNAME}' \
+      SMOLDER_SAMBA_QUIC_PASSWORD_FILE=\"\${password_file}\" \
+      SMOLDER_SAMBA_QUIC_SHARE_NAME='${SHARE_NAME}' \
+      /tmp/setup-samba-quic-guest.sh '${REMOTE_WORK_DIR}'
   "
 }
 
@@ -119,6 +135,6 @@ printf '    export SMOLDER_SAMBA_QUIC_CONNECT_HOST=127.0.0.1\n'
 printf '    export SMOLDER_SAMBA_QUIC_TLS_SERVER_NAME=%q\n' "$SERVER_NAME"
 printf '    export SMOLDER_SAMBA_QUIC_PORT=2443\n'
 printf '    export SMOLDER_SAMBA_QUIC_USERNAME=%q\n' "$USERNAME"
-printf '    export SMOLDER_SAMBA_QUIC_PASSWORD=%q\n' "$PASSWORD"
+printf '    # Provide SMOLDER_SAMBA_QUIC_PASSWORD through a protected secret provider (value not printed).\n'
 printf '    export SMOLDER_SAMBA_QUIC_SHARE=%q\n' "$SHARE_NAME"
 printf '    scripts/run-samba-quic-interop.sh\n'

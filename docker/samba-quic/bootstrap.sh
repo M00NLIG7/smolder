@@ -4,7 +4,16 @@ set -euo pipefail
 SERVER_NAME="${SERVER_NAME:-files.lab.example}"
 WORKGROUP="${WORKGROUP:-WORKGROUP}"
 USERNAME="${USERNAME:-smolder}"
-PASSWORD="${PASSWORD:-smolderpass}"
+PASSWORD_FILE="${PASSWORD_FILE:-/run/secrets/smb_password}"
+if [[ ! -f "${PASSWORD_FILE}" ]]; then
+  printf 'missing Samba password secret file: %s\n' "${PASSWORD_FILE}" >&2
+  exit 1
+fi
+PASSWORD="$(cat -- "${PASSWORD_FILE}")"
+if [[ -z "${PASSWORD}" ]]; then
+  printf 'Samba password secret file was empty\n' >&2
+  exit 1
+fi
 SHARE_NAME="${SHARE_NAME:-share}"
 SHARE_DIR="${SHARE_DIR:-/srv/share}"
 TLS_DIR="${TLS_DIR:-/var/lib/samba/private/tls}"

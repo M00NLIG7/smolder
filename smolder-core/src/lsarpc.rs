@@ -3,6 +3,7 @@
 use smolder_proto::rpc::{SyntaxId, Uuid};
 
 use crate::error::CoreError;
+use crate::policy::ResourceLimits;
 use crate::rpc::PipeRpcClient;
 use crate::transport::TokioTcpTransport;
 
@@ -33,6 +34,7 @@ const POLICY_LOOKUP_NAMES: u32 = 0x0000_0800;
 const RPC_S_OP_RANGE_ERROR: u32 = 0x1c01_0002;
 const STATUS_SOME_NOT_MAPPED: u32 = 0x0000_0107;
 const STATUS_NONE_MAPPED: u32 = 0xc000_0073;
+const MAX_SID_SUB_AUTHORITIES: usize = 15;
 
 /// Default policy access mask used by the typed LSARPC client.
 pub const DEFAULT_POLICY_ACCESS: u32 = POLICY_VIEW_LOCAL_INFORMATION;
@@ -192,12 +194,6 @@ impl<T> LsarpcClient<T> {
     pub fn desired_access(&self) -> u32 {
         self.desired_access
     }
-
-    /// Consumes the client and returns the underlying RPC transport.
-    #[must_use]
-    pub fn into_rpc(self) -> PipeRpcClient<T> {
-        self.rpc
-    }
 }
 
 impl<T> LsarpcClient<T>
@@ -214,15 +210,24 @@ where
         mut rpc: PipeRpcClient<T>,
         desired_access: u32,
     ) -> Result<Self, CoreError> {
-        rpc.bind_context(Self::CONTEXT_ID, Self::SYNTAX).await?;
-        let response = rpc
+        if let Err(error) = rpc.bind_context(Self::CONTEXT_ID, Self::SYNTAX).await {
+            return Err(rpc.close_after_error(error).await);
+        }
+        let response = match rpc
             .call(
                 Self::CONTEXT_ID,
                 LSAR_OPEN_POLICY2_OPNUM,
                 encode_open_policy2_request(desired_access),
             )
-            .await?;
-        let policy_handle = parse_open_policy2_response(&response)?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return Err(rpc.close_after_error(error).await),
+        };
+        let policy_handle = match parse_open_policy2_response(&response) {
+            Ok(handle) => handle,
+            Err(error) => return Err(rpc.close_after_error(error).await),
+        };
         Ok(Self {
             rpc,
             context_id: Self::CONTEXT_ID,
@@ -236,7 +241,7 @@ where
         let response = self
             .query_policy_information(POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS)
             .await?;
-        parse_primary_domain_info_response(&response)
+        parse_primary_domain_info_response_with_limits(&response, self.rpc.pipe().resource_limits())
     }
 
     /// Queries `PolicyAccountDomainInformation`.
@@ -244,7 +249,7 @@ where
         let response = self
             .query_policy_information(POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS)
             .await?;
-        parse_account_domain_info_response(&response)
+        parse_account_domain_info_response_with_limits(&response, self.rpc.pipe().resource_limits())
     }
 
     /// Queries `PolicyDnsDomainInformation`.
@@ -252,7 +257,7 @@ where
         let response = self
             .query_policy_information(POLICY_DNS_DOMAIN_INFORMATION_CLASS)
             .await?;
-        parse_dns_domain_info_response(&response)
+        parse_dns_domain_info_response_with_limits(&response, self.rpc.pipe().resource_limits())
     }
 
     /// Queries `PolicyLsaServerRoleInformation`.
@@ -260,7 +265,7 @@ where
         let response = self
             .query_policy_information(POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS)
             .await?;
-        parse_server_role_response(&response)
+        parse_server_role_response_with_limits(&response, self.rpc.pipe().resource_limits())
     }
 
     /// Looks up a single security principal name and returns its translated SID information.
@@ -285,20 +290,26 @@ where
             .rpc
             .call(self.context_id, LSAR_LOOKUP_NAMES2_OPNUM, request)
             .await?;
-        parse_lookup_names_response(&response)
+        parse_lookup_names_response_with_limits(&response, self.rpc.pipe().resource_limits())
     }
 
     /// Closes the policy handle and returns the underlying RPC transport.
     pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
-        let response = self
+        let response = match self
             .rpc
             .call(
                 self.context_id,
                 LSAR_CLOSE_OPNUM,
                 encode_close_handle_request(self.policy_handle),
             )
-            .await?;
-        parse_close_handle_response(&response)?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return Err(self.rpc.close_after_error(error).await),
+        };
+        if let Err(error) = parse_close_handle_response(&response) {
+            return Err(self.rpc.close_after_error(error).await);
+        }
         Ok(self.rpc)
     }
 
@@ -436,8 +447,16 @@ fn encode_lookup_names_request(
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn parse_primary_domain_info_response(response: &[u8]) -> Result<LsaDomainInfo, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_primary_domain_info_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_primary_domain_info_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<LsaDomainInfo, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let referent = reader.read_u32("PolicyInformation")?;
     if referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -468,8 +487,16 @@ fn parse_primary_domain_info_response(response: &[u8]) -> Result<LsaDomainInfo, 
     Ok(LsaDomainInfo { name, sid })
 }
 
+#[cfg(test)]
 fn parse_account_domain_info_response(response: &[u8]) -> Result<LsaDomainInfo, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_account_domain_info_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_account_domain_info_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<LsaDomainInfo, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let referent = reader.read_u32("PolicyInformation")?;
     if referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -500,8 +527,16 @@ fn parse_account_domain_info_response(response: &[u8]) -> Result<LsaDomainInfo, 
     Ok(LsaDomainInfo { name, sid })
 }
 
+#[cfg(test)]
 fn parse_dns_domain_info_response(response: &[u8]) -> Result<LsaDnsDomainInfo, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_dns_domain_info_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_dns_domain_info_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<LsaDnsDomainInfo, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let referent = reader.read_u32("PolicyInformation")?;
     if referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -545,8 +580,16 @@ fn parse_dns_domain_info_response(response: &[u8]) -> Result<LsaDnsDomainInfo, C
     })
 }
 
+#[cfg(test)]
 fn parse_server_role_response(response: &[u8]) -> Result<LsaServerRole, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_server_role_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_server_role_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<LsaServerRole, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let referent = reader.read_u32("PolicyInformation")?;
     if referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -573,8 +616,16 @@ fn parse_server_role_response(response: &[u8]) -> Result<LsaServerRole, CoreErro
     })
 }
 
+#[cfg(test)]
 fn parse_lookup_names_response(response: &[u8]) -> Result<Vec<LsaTranslatedSid>, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_lookup_names_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_lookup_names_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<Vec<LsaTranslatedSid>, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let referenced_domains_referent = reader.read_u32("ReferencedDomains")?;
     let referenced_domain_stubs = if referenced_domains_referent == 0 {
         Vec::new()
@@ -600,7 +651,11 @@ fn parse_lookup_names_response(response: &[u8]) -> Result<Vec<LsaTranslatedSid>,
             ));
         }
 
-        let mut translated = Vec::with_capacity(entries);
+        reader.validate_collection(entries, 16, "TranslatedSids")?;
+        let mut translated = Vec::new();
+        translated
+            .try_reserve_exact(entries)
+            .map_err(|_| CoreError::AllocationFailed("TranslatedSids"))?;
         for _ in 0..entries {
             translated.push((
                 LsaSidNameUse::from_raw(reader.read_u32("SidNameUse")?),
@@ -614,18 +669,19 @@ fn parse_lookup_names_response(response: &[u8]) -> Result<Vec<LsaTranslatedSid>,
 
     let _ = reader.read_u32("MappedCount")?;
     let status = reader.read_u32("LsarLookupNamesStatus")?;
-    let translated = translated_entries
-        .into_iter()
-        .map(|(sid_name_use, relative_id, domain_index, flags)| {
-            build_translated_sid(
-                sid_name_use,
-                relative_id,
-                domain_index,
-                flags,
-                &referenced_domains,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut translated = Vec::new();
+    translated
+        .try_reserve_exact(translated_entries.len())
+        .map_err(|_| CoreError::AllocationFailed("translated SIDs"))?;
+    for (sid_name_use, relative_id, domain_index, flags) in translated_entries {
+        translated.push(build_translated_sid(
+            sid_name_use,
+            relative_id,
+            domain_index,
+            flags,
+            &referenced_domains,
+        )?);
+    }
     match status {
         0 | STATUS_SOME_NOT_MAPPED => Ok(translated),
         STATUS_NONE_MAPPED => Ok(Vec::new()),
@@ -658,31 +714,37 @@ fn parse_referenced_domain_headers(
         ));
     }
 
-    (0..entries)
-        .map(|_| {
-            let name_header = reader.read_unicode_string_header("ReferencedDomainName")?;
-            let sid_referent = reader.read_u32("ReferencedDomainSid")?;
-            Ok((name_header, sid_referent))
-        })
-        .collect()
+    reader.validate_collection(entries, 12, "ReferencedDomains")?;
+    let mut domains = Vec::new();
+    domains
+        .try_reserve_exact(entries)
+        .map_err(|_| CoreError::AllocationFailed("ReferencedDomains"))?;
+    for _ in 0..entries {
+        let name_header = reader.read_unicode_string_header("ReferencedDomainName")?;
+        let sid_referent = reader.read_u32("ReferencedDomainSid")?;
+        domains.push((name_header, sid_referent));
+    }
+    Ok(domains)
 }
 
 fn parse_referenced_domains(
     reader: &mut NdrReader<'_>,
     domains: Vec<(UnicodeStringHeader, u32)>,
 ) -> Result<Vec<LsaDomainInfo>, CoreError> {
-    domains
-        .into_iter()
-        .map(|(name_header, sid_referent)| {
-            let name = reader.read_deferred_unicode_string(name_header, "ReferencedDomainName")?;
-            let sid = if sid_referent == 0 {
-                None
-            } else {
-                Some(reader.read_sid("ReferencedDomainSid")?)
-            };
-            Ok(LsaDomainInfo { name, sid })
-        })
-        .collect()
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(domains.len())
+        .map_err(|_| CoreError::AllocationFailed("referenced domains"))?;
+    for (name_header, sid_referent) in domains {
+        let name = reader.read_deferred_unicode_string(name_header, "ReferencedDomainName")?;
+        let sid = if sid_referent == 0 {
+            None
+        } else {
+            Some(reader.read_sid("ReferencedDomainSid")?)
+        };
+        decoded.push(LsaDomainInfo { name, sid });
+    }
+    Ok(decoded)
 }
 
 fn build_translated_sid(
@@ -763,11 +825,18 @@ struct UnicodeStringHeader {
 struct NdrReader<'a> {
     bytes: &'a [u8],
     offset: usize,
+    max_entries: usize,
+    max_string_units: usize,
 }
 
 impl<'a> NdrReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
+    fn with_limits(bytes: &'a [u8], limits: ResourceLimits) -> Self {
+        Self {
+            bytes,
+            offset: 0,
+            max_entries: limits.max_ndr_entries,
+            max_string_units: limits.max_ndr_string_units,
+        }
     }
 
     fn remaining(&self) -> usize {
@@ -780,6 +849,45 @@ impl<'a> NdrReader<'a> {
             return Err(CoreError::InvalidResponse(field));
         }
         self.offset += padding;
+        Ok(())
+    }
+
+    fn validate_collection(
+        &self,
+        count: usize,
+        minimum_wire_size: usize,
+        field: &'static str,
+    ) -> Result<(), CoreError> {
+        if count > self.max_entries {
+            return Err(CoreError::ResourceLimit {
+                resource: field,
+                requested: count as u64,
+                maximum: self.max_entries as u64,
+            });
+        }
+        let minimum = count
+            .checked_mul(minimum_wire_size)
+            .ok_or(CoreError::InvalidResponse(field))?;
+        if minimum > self.remaining() {
+            return Err(CoreError::InvalidResponse(field));
+        }
+        Ok(())
+    }
+
+    fn validate_string_units(&self, count: usize, field: &'static str) -> Result<(), CoreError> {
+        if count > self.max_string_units {
+            return Err(CoreError::ResourceLimit {
+                resource: field,
+                requested: count as u64,
+                maximum: self.max_string_units as u64,
+            });
+        }
+        let wire_size = count
+            .checked_mul(2)
+            .ok_or(CoreError::InvalidResponse(field))?;
+        if wire_size > self.remaining() {
+            return Err(CoreError::InvalidResponse(field));
+        }
         Ok(())
     }
 
@@ -865,7 +973,10 @@ impl<'a> NdrReader<'a> {
         }
         self.align(4, field)?;
         let max_count = self.read_u32(field)? as usize;
-        if max_count * 2 < header.length || header.maximum_length < header.length {
+        let max_bytes = max_count
+            .checked_mul(2)
+            .ok_or(CoreError::InvalidResponse(field))?;
+        if max_bytes < header.length || header.maximum_length < header.length {
             return Err(CoreError::InvalidResponse(field));
         }
         let expected_units = header.length / 2;
@@ -887,13 +998,20 @@ impl<'a> NdrReader<'a> {
             }
         }
 
-        let mut code_units = Vec::with_capacity(units_to_read);
+        self.validate_string_units(units_to_read, field)?;
+        let mut code_units = Vec::new();
+        code_units
+            .try_reserve_exact(units_to_read)
+            .map_err(|_| CoreError::AllocationFailed(field))?;
         for _ in 0..units_to_read {
             code_units.push(self.read_u16(field)?);
         }
         self.align(4, field)?;
-        String::from_utf16(&code_units[..expected_units])
-            .map_err(|_| CoreError::InvalidResponse("failed to decode lsarpc UTF-16 string"))
+        crate::bounded::utf16_string(
+            &code_units[..expected_units],
+            field,
+            "failed to decode lsarpc UTF-16 string",
+        )
     }
 
     fn read_guid(&mut self, field: &'static str) -> Result<LsaGuid, CoreError> {
@@ -947,11 +1065,18 @@ impl<'a> NdrReader<'a> {
         }
         let revision = self.bytes[self.offset];
         let sub_authority_count = self.bytes[self.offset + 1] as usize;
+        if sub_authority_count > MAX_SID_SUB_AUTHORITIES {
+            return Err(CoreError::InvalidResponse(field));
+        }
         let mut identifier_authority = [0_u8; 6];
         identifier_authority.copy_from_slice(&self.bytes[self.offset + 2..self.offset + 8]);
         self.offset += 8;
+        self.validate_collection(sub_authority_count, 4, field)?;
 
-        let mut sub_authorities = Vec::with_capacity(sub_authority_count);
+        let mut sub_authorities = Vec::new();
+        sub_authorities
+            .try_reserve_exact(sub_authority_count)
+            .map_err(|_| CoreError::AllocationFailed(field))?;
         for _ in 0..sub_authority_count {
             sub_authorities.push(self.read_u32(field)?);
         }
@@ -967,18 +1092,19 @@ impl<'a> NdrReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_POLICY_ACCESS, LOOKUP_POLICY_ACCESS, LsaDnsDomainInfo, LsaDomainInfo, LsaGuid,
-        LsaServerRole, LsaSid, LsaSidNameUse, LsaTranslatedSid,
+        encode_close_handle_request, encode_lookup_names_request, encode_open_policy2_request,
+        encode_query_policy_request, parse_account_domain_info_response,
+        parse_close_handle_response, parse_dns_domain_info_response, parse_lookup_names_response,
+        parse_lookup_names_response_with_limits, parse_open_policy2_response,
+        parse_primary_domain_info_response, parse_server_role_response,
+        should_retry_legacy_policy_query, LsaDnsDomainInfo, LsaDomainInfo, LsaGuid, LsaServerRole,
+        LsaSid, LsaSidNameUse, LsaTranslatedSid, DEFAULT_POLICY_ACCESS, LOOKUP_POLICY_ACCESS,
         POLICY_ACCOUNT_DOMAIN_INFORMATION_CLASS, POLICY_DNS_DOMAIN_INFORMATION_CLASS,
         POLICY_LSA_SERVER_ROLE_INFORMATION_CLASS, POLICY_PRIMARY_DOMAIN_INFORMATION_CLASS,
-        RPC_S_OP_RANGE_ERROR, STATUS_NONE_MAPPED, encode_close_handle_request,
-        encode_lookup_names_request, encode_open_policy2_request, encode_query_policy_request,
-        parse_account_domain_info_response, parse_close_handle_response,
-        parse_dns_domain_info_response, parse_lookup_names_response, parse_open_policy2_response,
-        parse_primary_domain_info_response, parse_server_role_response,
-        should_retry_legacy_policy_query,
+        RPC_S_OP_RANGE_ERROR, STATUS_NONE_MAPPED,
     };
     use crate::error::CoreError;
+    use crate::policy::ResourceLimits;
 
     struct ResponseWriter {
         head: Vec<u8>,
@@ -1146,9 +1272,7 @@ mod tests {
         let handle = parse_open_policy2_response(&response).expect("handle should decode");
         assert_eq!(
             handle,
-            [
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
-            ]
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
     }
 
@@ -1370,6 +1494,37 @@ mod tests {
     }
 
     #[test]
+    fn lookup_names_rejects_huge_referenced_domain_count_before_allocation() {
+        let response = [
+            1u32.to_le_bytes(),
+            u32::MAX.to_le_bytes(),
+            1u32.to_le_bytes(),
+            u32::MAX.to_le_bytes(),
+            u32::MAX.to_le_bytes(),
+        ]
+        .concat();
+
+        let error = parse_lookup_names_response(&response)
+            .expect_err("tiny LSA domain response with huge count must be rejected");
+        assert!(matches!(error, CoreError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn lookup_names_rejects_huge_translated_sid_count_before_allocation() {
+        let response = [
+            0u32.to_le_bytes(),
+            u32::MAX.to_le_bytes(),
+            1u32.to_le_bytes(),
+            u32::MAX.to_le_bytes(),
+        ]
+        .concat();
+
+        let error = parse_lookup_names_response(&response)
+            .expect_err("tiny LSA response with huge count must be rejected");
+        assert!(matches!(error, CoreError::ResourceLimit { .. }));
+    }
+
+    #[test]
     fn parse_lookup_names_response_decodes_referenced_domain_and_sid() {
         let domain_sid = LsaSid {
             revision: 1,
@@ -1415,6 +1570,40 @@ mod tests {
                 }),
             }]
         );
+
+        let entry_error = parse_lookup_names_response_with_limits(
+            &response,
+            ResourceLimits {
+                max_ndr_entries: 0,
+                ..ResourceLimits::default()
+            },
+        )
+        .expect_err("configured LSARPC entry maximum should be enforced");
+        assert!(matches!(
+            entry_error,
+            CoreError::ResourceLimit {
+                resource: "ReferencedDomains",
+                requested: 1,
+                maximum: 0,
+            }
+        ));
+
+        let string_error = parse_lookup_names_response_with_limits(
+            &response,
+            ResourceLimits {
+                max_ndr_string_units: 2,
+                ..ResourceLimits::default()
+            },
+        )
+        .expect_err("configured LSARPC string maximum should be enforced");
+        assert!(matches!(
+            string_error,
+            CoreError::ResourceLimit {
+                resource: "ReferencedDomainName",
+                maximum: 2,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1427,11 +1616,9 @@ mod tests {
             STATUS_NONE_MAPPED.to_le_bytes().as_slice(),
         ]
         .concat();
-        assert!(
-            parse_lookup_names_response(&response)
-                .expect("none-mapped should still decode")
-                .is_empty()
-        );
+        assert!(parse_lookup_names_response(&response)
+            .expect("none-mapped should still decode")
+            .is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use smolder_core::client::{Connection, TreeConnected};
 use smolder_core::error::CoreError;
-use smolder_core::pipe::{SmbSessionConfig, connect_tree};
+use smolder_core::pipe::{connect_tree, SmbSessionConfig};
 use smolder_core::transport::TokioTcpTransport;
 use smolder_proto::smb::smb2::{
     CloseRequest, CreateDisposition, CreateOptions, CreateRequest, DispositionInformation,
@@ -9,14 +9,15 @@ use smolder_proto::smb::smb2::{
 };
 
 use super::{
-    DELETE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
-    READ_CONTROL, SYNCHRONIZE, is_end_of_file, is_not_found, normalize_share_path,
+    is_end_of_file, is_not_found, normalize_share_path, DELETE, FILE_READ_ATTRIBUTES,
+    FILE_READ_DATA, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, READ_CONTROL, SYNCHRONIZE,
 };
 
 pub(super) struct AdminShare {
     connection: Connection<TokioTcpTransport, TreeConnected>,
     max_read_size: u32,
     max_write_size: u32,
+    max_whole_file_size: u64,
 }
 
 impl AdminShare {
@@ -34,10 +35,12 @@ impl AdminShare {
             .max_write_size
             .min(u32::from(u16::MAX))
             .max(1);
+        let max_whole_file_size = connection.resource_limits().max_whole_file_size;
         Ok(Self {
             connection,
             max_read_size,
             max_write_size,
+            max_whole_file_size,
         })
     }
 
@@ -70,7 +73,30 @@ impl AdminShare {
                 if response.data.is_empty() {
                     break;
                 }
-                offset += response.data.len() as u64;
+                let new_len = output.len().checked_add(response.data.len()).ok_or(
+                    CoreError::ResourceLimit {
+                        resource: "remote-exec whole-file read",
+                        requested: u64::MAX,
+                        maximum: self.max_whole_file_size,
+                    },
+                )?;
+                if new_len as u64 > self.max_whole_file_size {
+                    return Err(CoreError::ResourceLimit {
+                        resource: "remote-exec whole-file read",
+                        requested: new_len as u64,
+                        maximum: self.max_whole_file_size,
+                    });
+                }
+                output
+                    .try_reserve(response.data.len())
+                    .map_err(|_| CoreError::AllocationFailed("remote-exec whole-file read"))?;
+                offset = offset.checked_add(response.data.len() as u64).ok_or(
+                    CoreError::ResourceLimit {
+                        resource: "remote-exec whole-file read",
+                        requested: u64::MAX,
+                        maximum: self.max_whole_file_size,
+                    },
+                )?;
                 let reached_end = response.data.len() < self.max_read_size as usize;
                 output.extend_from_slice(&response.data);
                 if reached_end {
@@ -94,18 +120,28 @@ impl AdminShare {
     }
 
     pub(super) async fn write_all(&mut self, path: &str, data: &[u8]) -> Result<(), CoreError> {
+        if data.len() as u64 > self.max_whole_file_size {
+            return Err(CoreError::ResourceLimit {
+                resource: "remote-exec whole-file write",
+                requested: data.len() as u64,
+                maximum: self.max_whole_file_size,
+            });
+        }
         let file_id = self
             .create_file(path, FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES)
             .await?;
         let mut offset = 0_u64;
         let write_result = async {
             while (offset as usize) < data.len() {
-                let chunk_end = ((offset as usize) + self.max_write_size as usize).min(data.len());
-                let request = WriteRequest::for_file(
-                    file_id,
-                    offset,
-                    data[offset as usize..chunk_end].to_vec(),
-                );
+                let chunk_end = (offset as usize)
+                    .saturating_add(self.max_write_size as usize)
+                    .min(data.len());
+                let mut chunk = Vec::new();
+                chunk
+                    .try_reserve_exact(chunk_end - offset as usize)
+                    .map_err(|_| CoreError::AllocationFailed("remote-exec write buffer"))?;
+                chunk.extend_from_slice(&data[offset as usize..chunk_end]);
+                let request = WriteRequest::for_file(file_id, offset, chunk);
                 let response = self.connection.write(&request).await?;
                 if response.count == 0 {
                     return Err(CoreError::InvalidResponse(

@@ -63,7 +63,7 @@ are not implemented as a completely separate code path from the reusable core.
 
 ## Modern Transport Coverage
 
-The current `0.3.x` line supports:
+The current `0.4.x` line supports:
 
 - Direct TCP
 - NetBIOS session service
@@ -90,22 +90,25 @@ expert-oriented.
 
 Smolder is not trying to be correct only in unit tests.
 
-The current matrix includes live validation against:
+The current matrix defines explicit live-validation lanes against:
 
 - Windows / Tiny11
 - local Samba fixtures
 - Samba AD Kerberos
 - Samba QUIC through the UTM-backed Linux fixture
 
-Interop commands and release gates are documented in
+These lanes use ignored tests and count as validated only when their configured fixture gate runs
+and passes. Interop commands and release gates are documented in
 [docs/testing/interop.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/interop.md).
 
 ## Static-Friendly Default Direction
 
 The default build keeps native Unix Kerberos linkage out of the common path.
 
-Feature-gated Kerberos support is available, but `kerberos-gssapi` remains an
-explicit opt-in rather than a silent dependency in the default build.
+Feature-gated Kerberos support is available, but the default build selects no
+backend. On Unix, both the target-selecting `kerberos` umbrella and the
+backend-specific `kerberos-gssapi` feature explicitly opt into native GSS
+linkage.
 
 ## Good Fit
 

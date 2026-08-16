@@ -59,10 +59,11 @@ export SMOLDER_SAMBA_PORT=445
 Then run:
 
 ```bash
-cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --ignored --nocapture
 ```
 
-If `SMOLDER_SAMBA_HOST` is unset, the test exits early and reports that it was skipped.
+Live tests carry `#[ignore]`, so ordinary test runs report them as ignored rather than claiming
+fixture coverage. The explicit command above requires the target environment to be configured.
 
 To run the authenticated tree-connect path, also set:
 
@@ -82,19 +83,25 @@ For local development, either:
 - point to an existing Samba instance
 - run a disposable Samba container or VM configured to listen on port `445`
 
-The repo now includes a pinned Docker Compose target at [docker/samba/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/compose.yaml) with config in [docker/samba/data/config.yml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/data/config.yml). It exposes Samba on `127.0.0.1:1445`.
-The same fixture now also exposes NetBIOS session service on `127.0.0.1:1139`.
+The repo includes a fixture image built from the digest-pinned Debian base in
+[docker/samba/Dockerfile](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/Dockerfile)
+and the pinned Samba package version in that file. The Compose topology in
+[docker/samba/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/compose.yaml)
+exposes Direct TCP only on `127.0.0.1:1445`, NetBIOS session service only on
+`127.0.0.1:1139`, and globally encrypted SMB only on `127.0.0.1:1446`.
 
-Bring it up with:
+Bring all three services up with:
 
 ```bash
 scripts/prepare-samba-fixture.sh
-docker compose -f docker/samba/compose.yaml up -d samba samba-netbios
+scripts/start-samba-fixture.sh
 ```
 
-The prep step matters on Linux hosts and GitHub Actions runners: it makes the
-bind-mounted share directories writable by the Samba container user so live
-`CREATE` tests do not fail with `STATUS_ACCESS_DENIED (0xc0000022)`.
+The prep step makes the bind-mounted share directories writable on Linux and
+hosted runners. The startup step builds the image once, provisions winbind and
+the Builtin `Administrators` alias, and waits for authenticated SMB and SAMR
+health probes on every transport. It fails rather than starting live tests
+against a merely running or partially initialized container.
 
 Then point the tests at it:
 
@@ -105,7 +112,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --ignored --nocapture
 ```
 
 Run the NetBIOS facade gate with:
@@ -117,7 +124,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-smb-core --test samba_netbios -- --nocapture
+cargo test -p smolder-smb-core --test samba_netbios -- --ignored --nocapture
 ```
 
 Run the high-level API gates with the same environment:
@@ -129,7 +136,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-smb-core --test samba_high_level -- --nocapture
+cargo test -p smolder --test samba_high_level -- --ignored --nocapture
 ```
 
 Run the CLI smoke tests:
@@ -141,7 +148,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder --test cli_smoke -- --nocapture --test-threads=1
+cargo test -p smolder --test cli_smoke -- --ignored --nocapture --test-threads=1
 ```
 
 You can also drive the CLI manually:
@@ -157,7 +164,7 @@ cargo run -p smolder -- \
 Shut it down with:
 
 ```bash
-docker compose -f docker/samba/compose.yaml down -v
+docker compose -f docker/samba/compose.yaml down
 ```
 
 ## Current Limits

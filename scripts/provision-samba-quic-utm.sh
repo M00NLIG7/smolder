@@ -22,7 +22,17 @@ QUIC_PORT="${SMOLDER_SAMBA_QUIC_QUIC_PORT:-2443}"
 
 GUEST_HOSTNAME="${SMOLDER_SAMBA_QUIC_GUEST_HOSTNAME:-smolder-samba-quic}"
 GUEST_USER="${SMOLDER_SAMBA_QUIC_GUEST_USER:-smolder}"
-GUEST_PASSWORD="${SMOLDER_SAMBA_QUIC_GUEST_PASSWORD:-smolderpass}"
+GUEST_PASSWORD_FILE="${SMOLDER_SAMBA_QUIC_GUEST_PASSWORD_FILE:-}"
+if [[ -n "${GUEST_PASSWORD_FILE}" ]]; then
+  if [[ ! -f "${GUEST_PASSWORD_FILE}" || -L "${GUEST_PASSWORD_FILE}" ]]; then
+    printf 'SMOLDER_SAMBA_QUIC_GUEST_PASSWORD_FILE must identify a regular, non-symlink file\n' >&2
+    exit 1
+  fi
+  GUEST_PASSWORD="$(<"${GUEST_PASSWORD_FILE}")"
+else
+  GUEST_PASSWORD="${SMOLDER_SAMBA_QUIC_GUEST_PASSWORD:-smolderpass}"
+fi
+unset SMOLDER_SAMBA_QUIC_GUEST_PASSWORD
 
 REPLACE_VM="${SMOLDER_SAMBA_QUIC_REPLACE_VM:-0}"
 START_VM="${SMOLDER_SAMBA_QUIC_START_VM:-1}"
@@ -66,8 +76,9 @@ ensure_ssh_key() {
 }
 
 write_cloud_init_seed() {
-  local public_key
+  local public_key password_hash
   public_key="$(tr -d '\n' < "${SSH_KEY_PATH}.pub")"
+  password_hash="$(printf '%s' "${GUEST_PASSWORD}" | openssl passwd -6 -stdin)"
 
   rm -rf "$SEED_DIR"
   mkdir -p "$SEED_DIR"
@@ -89,7 +100,7 @@ users:
     groups: [adm, sudo]
     shell: /bin/bash
     lock_passwd: false
-    plain_text_passwd: ${GUEST_PASSWORD}
+    passwd: '${password_hash}'
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - ${public_key}
@@ -243,6 +254,7 @@ require_tool osascript
 require_tool hdiutil
 require_tool nc
 require_tool ssh-keygen
+require_tool openssl
 require_tool /usr/libexec/PlistBuddy
 require_tool docker
 

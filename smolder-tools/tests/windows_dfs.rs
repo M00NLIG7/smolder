@@ -1,14 +1,16 @@
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use smolder_core::dfs::UncPath;
 use smolder_tools::prelude::SmbClient;
 
 mod common;
 use common::{
-    ntlm_credentials, optional_env, optional_u16_env, required_env, unique_name, windows_lock,
+    ntlm_credentials, optional_env, optional_u16_env, required_env, required_secret, unique_name,
+    windows_lock,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WindowsDfsConfig {
     port: u16,
     username: String,
@@ -23,7 +25,7 @@ impl WindowsDfsConfig {
         Some(Self {
             port: optional_u16_env("SMOLDER_WINDOWS_PORT", 445),
             username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
+            password: required_secret("SMOLDER_WINDOWS_PASSWORD")?,
             dfs_root: required_env("SMOLDER_WINDOWS_DFS_ROOT")?,
             domain: optional_env("SMOLDER_WINDOWS_DOMAIN"),
             workstation: optional_env("SMOLDER_WINDOWS_WORKSTATION"),
@@ -80,8 +82,11 @@ fn smb_url_from_dfs_root(config: &WindowsDfsConfig, root: &UncPath, leaf: &str) 
 }
 
 fn configure_auth(command: &mut Command, config: &WindowsDfsConfig) {
-    command.arg("--username").arg(&config.username);
-    command.arg("--password").arg(&config.password);
+    command
+        .arg("--username")
+        .arg(&config.username)
+        .arg("--password-stdin")
+        .stdin(Stdio::piped());
     if let Some(domain) = &config.domain {
         command.arg("--domain").arg(domain);
     }
@@ -101,15 +106,14 @@ fn connected_builder() -> Option<(
         );
         return None;
     };
-    let Some(root) = config.dfs_root_path() else {
-        return None;
-    };
+    let root = config.dfs_root_path()?;
 
     let builder = config.builder(&root);
     Some((config, root, builder))
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn share_path_auto_reads_and_writes_through_live_windows_dfs_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((config, _root, builder)) = connected_builder() else {
@@ -146,6 +150,7 @@ async fn share_path_auto_reads_and_writes_through_live_windows_dfs_when_configur
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn cli_mv_renames_through_live_windows_dfs_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((config, root, builder)) = connected_builder() else {
@@ -174,7 +179,14 @@ async fn cli_mv_renames_through_live_windows_dfs_when_configured() {
         .arg(smb_url_from_dfs_root(&config, &root, &destination_leaf));
     configure_auth(&mut command, &config);
 
-    let output = command.output().expect("CLI should run for Windows DFS mv");
+    let mut child = command.spawn().expect("CLI should run for Windows DFS mv");
+    child
+        .stdin
+        .take()
+        .expect("password stdin should be piped")
+        .write_all(config.password.as_bytes())
+        .expect("password should be written to protected stdin");
+    let output = child.wait_with_output().expect("CLI should complete");
     assert!(
         output.status.success(),
         "mv stderr: {}",

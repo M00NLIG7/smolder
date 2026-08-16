@@ -19,8 +19,9 @@ Use it when you need to validate:
 
 This is not the same as the current local Samba compose stack in
 [docker/samba/compose.yaml](https://github.com/M00NLIG7/smolder/blob/main/docker/samba/compose.yaml).
-That stack currently uses `crazymax/samba:latest`, which is Samba `4.21.4` on
-this host and does not provide the new Samba 4.23 QUIC server path.
+That stack uses the digest-pinned Debian fixture and pinned Samba `4.22.10`
+packages in `docker/samba/Dockerfile`; it does not provide the newer Samba 4.23
+QUIC server path.
 
 Samba’s official documentation says server-side QUIC support requires:
 
@@ -159,7 +160,7 @@ scripts/run-samba-quic-interop.sh
 That runs:
 
 ```bash
-cargo test -p smolder-smb-core --features quic --test samba_quic -- --nocapture
+cargo test -p smolder-smb-core --features quic --test samba_quic -- --ignored --nocapture
 ```
 
 ## Harness Coverage

@@ -4,6 +4,7 @@ use common::{unique_path_in_dir, SambaShareConfig};
 use smolder_core::prelude::{Client, TransportTarget};
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn authenticates_and_roundtrips_file_io_over_netbios_when_configured() {
     let Some(config) = SambaShareConfig::from_env_with_port_var("SMOLDER_SAMBA_NETBIOS_PORT", 1139)
     else {

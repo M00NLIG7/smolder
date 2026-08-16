@@ -35,6 +35,7 @@ use smolder_proto::smb::smb2::{
 
 pub use self::open_options::{Lease, LeaseRequest, OpenOptions};
 pub use self::remote_file::RemoteFile;
+use self::remote_file::RemoteFileParts;
 use self::share_helpers::{
     connect_original_share_path, connect_share_path_with_resolver, directory_entry_from_query,
     metadata_from_info, normalize_share_name, normalize_share_path,
@@ -139,7 +140,7 @@ impl Default for SmbClientBuilder {
             port: DEFAULT_PORT,
             auth: None,
             require_encryption: false,
-            signing_mode: SigningMode::ENABLED,
+            signing_mode: SigningMode::ENABLED | SigningMode::REQUIRED,
             capabilities: GlobalCapabilities::LARGE_MTU
                 | GlobalCapabilities::LEASING
                 | GlobalCapabilities::ENCRYPTION,
@@ -151,7 +152,7 @@ impl Default for SmbClientBuilder {
 }
 
 impl SmbClientBuilder {
-    /// Creates a new builder with SMB2 defaults suitable for Samba interop.
+    /// Creates a new credentialed builder that requires SMB signing by default.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -598,11 +599,11 @@ where
     }
 
     /// Opens a remote file on the connected share.
-    pub async fn open<'a>(
-        &'a mut self,
+    pub async fn open(
+        &mut self,
         path: impl AsRef<str>,
         options: OpenOptions,
-    ) -> Result<RemoteFile<'a, T>, CoreError> {
+    ) -> Result<RemoteFile<'_, T>, CoreError> {
         if options.requests_lease() {
             self.ensure_lease_support()?;
         }
@@ -624,11 +625,17 @@ where
             self.connection_mut().create(&request).await?
         };
         let resilient = if let Some(timeout) = options.resilient_timeout() {
-            Some(
-                self.connection_mut()
-                    .request_resiliency(response.file_id, timeout)
-                    .await?,
-            )
+            match self
+                .connection_mut()
+                .request_resiliency(response.file_id, timeout)
+                .await
+            {
+                Ok(resilient) => Some(resilient),
+                Err(error) => {
+                    let _ = self.close_file_id(response.file_id).await;
+                    return Err(error);
+                }
+            }
         } else {
             None
         };
@@ -638,71 +645,116 @@ where
             }
             (handle, _) => handle,
         };
-        let lease = response
-            .lease_v2()
-            .map_err(CoreError::from)?
-            .map(Lease::from);
+        let lease = match response.lease_v2() {
+            Ok(lease) => lease.map(Lease::from),
+            Err(error) => {
+                let _ = self.close_file_id(response.file_id).await;
+                return Err(CoreError::from(error));
+            }
+        };
         let max_read_size = self.max_read_size();
         let max_write_size = self.max_write_size();
         let connection = self.take_connection();
 
         Ok(RemoteFile::new(
             self,
-            connection,
-            response.file_id,
-            lease,
-            durable,
-            resilient,
-            response.end_of_file,
-            max_read_size,
-            max_write_size,
+            RemoteFileParts {
+                connection,
+                file_id: response.file_id,
+                lease,
+                durable,
+                resilient,
+                end_of_file: response.end_of_file,
+                max_read_size,
+                max_write_size,
+            },
         ))
     }
 
     /// Reopens a previously captured durable handle on the current tree connection.
-    pub async fn reopen_durable<'a>(
-        &'a mut self,
+    pub async fn reopen_durable(
+        &mut self,
         handle: &DurableHandle,
-    ) -> Result<RemoteFile<'a, T>, CoreError> {
+    ) -> Result<RemoteFile<'_, T>, CoreError> {
         let (reopened, resilient) = self
             .connection_mut()
             .reconnect_durable_with_resiliency(handle)
             .await?;
         let response = reopened.create_response().clone();
-        let lease = response
-            .lease_v2()
-            .map_err(CoreError::from)?
-            .map(Lease::from);
+        let lease = match response.lease_v2() {
+            Ok(lease) => lease.map(Lease::from),
+            Err(error) => {
+                let _ = self.close_file_id(response.file_id).await;
+                return Err(CoreError::from(error));
+            }
+        };
         let max_read_size = self.max_read_size();
         let max_write_size = self.max_write_size();
         let connection = self.take_connection();
 
         Ok(RemoteFile::new(
             self,
-            connection,
-            response.file_id,
-            lease,
-            Some(reopened),
-            resilient,
-            response.end_of_file,
-            max_read_size,
-            max_write_size,
+            RemoteFileParts {
+                connection,
+                file_id: response.file_id,
+                lease,
+                durable: Some(reopened),
+                resilient,
+                end_of_file: response.end_of_file,
+                max_read_size,
+                max_write_size,
+            },
         ))
     }
 
     /// Reads the full contents of a remote file into memory.
     pub async fn read(&mut self, path: impl AsRef<str>) -> Result<Vec<u8>, CoreError> {
-        let buffer_size = self.max_read_size() as usize;
+        let maximum = self.connection().resource_limits().max_whole_file_size;
+        let mut buffer = BytesMut::new();
         let mut file = self.open(path, OpenOptions::new().read(true)).await?;
         let mut result = Vec::new();
-        let mut buffer = BytesMut::with_capacity(buffer_size);
 
         let operation = async {
+            let reported_size = file.len();
+            if reported_size > maximum {
+                return Err(CoreError::ResourceLimit {
+                    resource: "whole-file read",
+                    requested: reported_size,
+                    maximum,
+                });
+            }
+            let capacity =
+                usize::try_from(reported_size).map_err(|_| CoreError::ResourceLimit {
+                    resource: "whole-file read",
+                    requested: reported_size,
+                    maximum,
+                })?;
+            result
+                .try_reserve_exact(capacity)
+                .map_err(|_| CoreError::AllocationFailed("whole-file read"))?;
             loop {
                 let read = file.read_chunk(&mut buffer).await?;
                 if read == 0 {
                     break;
                 }
+                let new_len = result
+                    .len()
+                    .checked_add(read)
+                    .ok_or(CoreError::ResourceLimit {
+                        resource: "whole-file read",
+                        requested: u64::MAX,
+                        maximum,
+                    })?;
+                if new_len as u64 > maximum {
+                    return Err(CoreError::ResourceLimit {
+                        resource: "whole-file read",
+                        requested: new_len as u64,
+                        maximum,
+                    });
+                }
+                result
+                    .try_reserve(read)
+                    .map_err(|_| CoreError::AllocationFailed("whole-file read"))?;
                 result.extend_from_slice(buffer.as_ref());
             }
             Ok::<(), CoreError>(())
@@ -731,9 +783,8 @@ where
     where
         W: AsyncWrite + Unpin + Send,
     {
-        let buffer_size = self.max_read_size() as usize;
+        let mut buffer = BytesMut::new();
         let mut file = self.open(path, OpenOptions::new().read(true)).await?;
-        let mut buffer = BytesMut::with_capacity(buffer_size);
         let mut written = 0_u64;
 
         let operation = async {
@@ -746,7 +797,13 @@ where
                     .write_all(buffer.as_ref())
                     .await
                     .map_err(CoreError::LocalIo)?;
-                written += read as u64;
+                written = written
+                    .checked_add(read as u64)
+                    .ok_or(CoreError::ResourceLimit {
+                        resource: "streamed file length",
+                        requested: u64::MAX,
+                        maximum: u64::MAX,
+                    })?;
             }
             writer.flush().await.map_err(CoreError::LocalIo)?;
             Ok::<(), CoreError>(())
@@ -779,7 +836,18 @@ where
     }
 
     /// Writes the provided bytes to a remote file, creating or truncating it.
+    ///
+    /// This whole-file convenience helper is capped by the configured whole-file resource limit;
+    /// use [`Share::open`] and chunked [`RemoteFile::write_all`] calls for larger streams.
     pub async fn write(&mut self, path: impl AsRef<str>, data: &[u8]) -> Result<(), CoreError> {
+        let maximum = self.connection().resource_limits().max_whole_file_size;
+        if data.len() as u64 > maximum {
+            return Err(CoreError::ResourceLimit {
+                resource: "whole-file write",
+                requested: data.len() as u64,
+                maximum,
+            });
+        }
         let mut file = self
             .open(
                 path,
@@ -822,13 +890,17 @@ where
     {
         let mut local_file = File::open(local).await.map_err(CoreError::LocalIo)?;
         let buffer_size = self.max_write_size() as usize;
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(buffer_size)
+            .map_err(|_| CoreError::AllocationFailed("streaming write buffer"))?;
+        buffer.resize(buffer_size, 0);
         let mut remote_file = self
             .open(
                 remote,
                 OpenOptions::new().write(true).create(true).truncate(true),
             )
             .await?;
-        let mut buffer = vec![0; buffer_size];
         let mut written = 0_u64;
 
         let operation = async {
@@ -841,7 +913,13 @@ where
                     break;
                 }
                 remote_file.write_all(&buffer[..read]).await?;
-                written += read as u64;
+                written = written
+                    .checked_add(read as u64)
+                    .ok_or(CoreError::ResourceLimit {
+                        resource: "streamed file length",
+                        requested: u64::MAX,
+                        maximum: u64::MAX,
+                    })?;
             }
             remote_file.flush().await?;
             Ok::<(), CoreError>(())
@@ -878,11 +956,12 @@ where
             )
             .await?;
         let file_id = opened.file_id;
+        let limits = self.connection().resource_limits();
         let mut first = true;
         let mut entries = Vec::new();
 
         let operation = async {
-            loop {
+            for _ in 0..limits.max_directory_pages {
                 let mut request = QueryDirectoryRequest::for_pattern(file_id, "*", query_size);
                 if !first {
                     request.flags = QueryDirectoryFlags::empty();
@@ -890,17 +969,44 @@ where
                 let response = self.connection_mut().query_directory(&request).await?;
                 let decoded = response.directory_entries()?;
                 if decoded.is_empty() {
-                    break;
+                    return Ok::<(), CoreError>(());
                 }
-                entries.extend(
-                    decoded
-                        .into_iter()
-                        .filter(|entry| entry.file_name != "." && entry.file_name != "..")
-                        .map(directory_entry_from_query),
-                );
+                let mut batch = Vec::new();
+                batch
+                    .try_reserve_exact(decoded.len())
+                    .map_err(|_| CoreError::AllocationFailed("SMB directory entry page"))?;
+                for entry in decoded {
+                    if entry.file_name != "." && entry.file_name != ".." {
+                        batch.push(directory_entry_from_query(entry));
+                    }
+                }
+                let new_len =
+                    entries
+                        .len()
+                        .checked_add(batch.len())
+                        .ok_or(CoreError::ResourceLimit {
+                            resource: "SMB directory entries",
+                            requested: u64::MAX,
+                            maximum: limits.max_directory_entries as u64,
+                        })?;
+                if new_len > limits.max_directory_entries {
+                    return Err(CoreError::ResourceLimit {
+                        resource: "SMB directory entries",
+                        requested: new_len as u64,
+                        maximum: limits.max_directory_entries as u64,
+                    });
+                }
+                entries
+                    .try_reserve(batch.len())
+                    .map_err(|_| CoreError::AllocationFailed("SMB directory entries"))?;
+                entries.extend(batch);
                 first = false;
             }
-            Ok::<(), CoreError>(())
+            Err(CoreError::ResourceLimit {
+                resource: "SMB directory pages",
+                requested: limits.max_directory_pages.saturating_add(1) as u64,
+                maximum: limits.max_directory_pages as u64,
+            })
         }
         .await;
 
@@ -950,6 +1056,7 @@ where
         from: impl AsRef<str>,
         to: impl AsRef<str>,
     ) -> Result<(), CoreError> {
+        let target = normalize_share_path_with_options(to.as_ref(), false)?;
         let opened = self
             .create_handle(
                 from.as_ref(),
@@ -960,7 +1067,6 @@ where
             )
             .await?;
         let file_id = opened.file_id;
-        let target = normalize_share_path_with_options(to.as_ref(), false)?;
 
         let operation = async {
             let request = SetInfoRequest::for_file_info(
@@ -1079,17 +1185,30 @@ where
 
     fn max_read_size(&self) -> u32 {
         let negotiated = self.connection().state().negotiated.max_read_size;
-        negotiated.min(self.transfer_chunk_size).max(1)
+        negotiated
+            .min(self.transfer_chunk_size)
+            .min(self.policy_transport_size())
+            .max(1)
     }
 
     fn max_write_size(&self) -> u32 {
         let negotiated = self.connection().state().negotiated.max_write_size;
-        negotiated.min(self.transfer_chunk_size).max(1)
+        negotiated
+            .min(self.transfer_chunk_size)
+            .min(self.policy_transport_size())
+            .max(1)
     }
 
     fn max_query_size(&self) -> u32 {
         let negotiated = self.connection().state().negotiated.max_transact_size;
-        negotiated.min(self.transfer_chunk_size).max(1)
+        negotiated
+            .min(self.transfer_chunk_size)
+            .min(self.policy_transport_size())
+            .max(1)
+    }
+
+    fn policy_transport_size(&self) -> u32 {
+        u32::try_from(self.connection().resource_limits().max_transport_message).unwrap_or(u32::MAX)
     }
 
     fn ensure_lease_support(&self) -> Result<(), CoreError> {
@@ -1142,8 +1261,10 @@ fn default_negotiate_contexts(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
+    use std::future::Future as _;
     use std::io::SeekFrom;
     use std::sync::{Arc, Mutex};
+    use std::task::Poll;
 
     use async_trait::async_trait;
     use smolder_core::dfs::{DfsReferral, UncPath};
@@ -1154,26 +1275,29 @@ mod tests {
         DfsReferralRequest, Dialect, DirectoryInformationEntry, DurableHandleFlags,
         DurableHandleResponseV2, FileAttributes, FileBasicInformation, FileId, FileInfoClass,
         FileStandardInformation, FlushRequest, FlushResponse, GlobalCapabilities, Header,
-        IoctlRequest, IoctlResponse, LeaseState, LeaseV2, MessageId, NegotiateRequest,
+        HeaderFlags, IoctlRequest, IoctlResponse, LeaseState, LeaseV2, MessageId, NegotiateRequest,
         NegotiateResponse, NetworkResiliencyRequest, OplockLevel, QueryDirectoryFlags,
         QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
         ReadRequest, ReadResponse, ReadResponseFlags, RequestedOplockLevel, SessionFlags,
-        SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest,
-        SetInfoResponse, ShareFlags, ShareType, SigningMode, TreeCapabilities, TreeConnectRequest,
-        TreeConnectResponse, TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
+        SessionSetupResponse, SetInfoRequest, SetInfoResponse, ShareFlags, ShareType, SigningMode,
+        TreeCapabilities, TreeConnectRequest, TreeConnectResponse, TreeDisconnectResponse, TreeId,
+        WriteRequest, WriteResponse,
     };
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
     use crate::fs::{LeaseRequest, OpenOptions, Share, SmbClient};
+    use smolder_core::auth::{AuthError, AuthProvider};
     use smolder_core::client::{Connection, DurableOpenOptions, ResilientHandle};
     use smolder_core::error::CoreError;
+    use smolder_core::policy::ResourceLimits;
     use smolder_core::transport::Transport;
 
     #[derive(Debug)]
     struct ScriptedTransport {
         reads: VecDeque<Vec<u8>>,
         writes: Vec<Vec<u8>>,
+        pending_when_empty: bool,
     }
 
     impl ScriptedTransport {
@@ -1181,6 +1305,15 @@ mod tests {
             Self {
                 reads: reads.into(),
                 writes: Vec::new(),
+                pending_when_empty: false,
+            }
+        }
+
+        fn pending_when_empty(reads: Vec<Vec<u8>>) -> Self {
+            Self {
+                reads: reads.into(),
+                writes: Vec::new(),
+                pending_when_empty: true,
             }
         }
     }
@@ -1191,6 +1324,7 @@ mod tests {
         assert!(builder
             .capabilities
             .contains(GlobalCapabilities::ENCRYPTION));
+        assert!(builder.signing_mode.contains(SigningMode::REQUIRED));
 
         let contexts = super::default_negotiate_contexts(&builder.dialects, builder.capabilities);
         assert_eq!(contexts.len(), 2);
@@ -1260,9 +1394,16 @@ mod tests {
         }
 
         async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
-            self.reads.pop_front().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no scripted response")
-            })
+            if let Some(frame) = self.reads.pop_front() {
+                return Ok(frame);
+            }
+            if self.pending_when_empty {
+                return std::future::pending().await;
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "no scripted response",
+            ))
         }
     }
 
@@ -1288,6 +1429,7 @@ mod tests {
     ) -> Vec<u8> {
         let mut header = Header::new(command, MessageId(message_id));
         header.status = status;
+        header.flags = HeaderFlags::SERVER_TO_REDIR;
         header.credit_request_response = credits;
         header.session_id = smolder_proto::smb::smb2::SessionId(session_id);
         header.tree_id = TreeId(tree_id);
@@ -2231,6 +2373,81 @@ mod tests {
         let read_two = outbound_read(&writes[5]);
         assert_eq!(read_two.offset, 3);
         assert_eq!(read_two.length, 4);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_cancelled_async_file_read_restores_a_poisoned_connection() {
+        let create_response = CreateResponse {
+            oplock_level: OplockLevel::None,
+            file_attributes: FileAttributes::ARCHIVE,
+            allocation_size: 1,
+            end_of_file: 1,
+            file_id: FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            create_contexts: Vec::new(),
+        };
+        let mut share = build_share_pending(vec![response_frame(
+            Command::Create,
+            NtStatus::SUCCESS.to_u32(),
+            3,
+            11,
+            7,
+            create_response.encode(),
+        )])
+        .await;
+        let mut file = share
+            .open("notes.txt", OpenOptions::new().read(true))
+            .await
+            .expect("open should succeed");
+
+        let mut byte = [0_u8; 1];
+        let mut read = Box::pin(AsyncReadExt::read(&mut file, &mut byte));
+        std::future::poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(read);
+        drop(file);
+
+        assert!(share
+            .connection
+            .as_ref()
+            .expect("cancelled file I/O must return the connection to its share")
+            .is_poisoned());
+        let error = share
+            .stat("notes.txt")
+            .await
+            .expect_err("a connection with cancelled I/O must not be reused");
+        assert!(matches!(error, CoreError::ConnectionPoisoned));
+    }
+
+    #[tokio::test]
+    async fn whole_file_write_rejects_the_policy_limit_before_opening_a_handle() {
+        let mut share = build_share_with_limits(
+            Vec::new(),
+            ResourceLimits {
+                max_whole_file_size: 3,
+                ..ResourceLimits::default()
+            },
+        )
+        .await;
+
+        let error = share
+            .write("too-large.txt", b"four")
+            .await
+            .expect_err("whole-file write should honor its resource limit");
+        assert!(matches!(
+            error,
+            CoreError::ResourceLimit {
+                resource: "whole-file write",
+                requested: 4,
+                maximum: 3,
+            }
+        ));
+        assert_eq!(transport_writes(share).len(), 3);
     }
 
     #[tokio::test]
@@ -3503,6 +3720,32 @@ mod tests {
         tree_response: TreeConnectResponse,
         reads: Vec<Vec<u8>>,
     ) -> SmbClient<ScriptedTransport> {
+        build_client_with_tree_response_and_pending(server, tree_response, reads, false).await
+    }
+
+    async fn build_client_with_tree_response_and_pending(
+        server: &str,
+        tree_response: TreeConnectResponse,
+        reads: Vec<Vec<u8>>,
+        pending_when_empty: bool,
+    ) -> SmbClient<ScriptedTransport> {
+        build_client_with_tree_response_pending_and_limits(
+            server,
+            tree_response,
+            reads,
+            pending_when_empty,
+            ResourceLimits::default(),
+        )
+        .await
+    }
+
+    async fn build_client_with_tree_response_pending_and_limits(
+        server: &str,
+        tree_response: TreeConnectResponse,
+        reads: Vec<Vec<u8>>,
+        pending_when_empty: bool,
+        limits: ResourceLimits,
+    ) -> SmbClient<ScriptedTransport> {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb302,
@@ -3549,8 +3792,12 @@ mod tests {
         ];
         scripted_reads.extend(reads);
 
-        let transport = ScriptedTransport::new(scripted_reads);
-        let connection = Connection::new(transport);
+        let transport = if pending_when_empty {
+            ScriptedTransport::pending_when_empty(scripted_reads)
+        } else {
+            ScriptedTransport::new(scripted_reads)
+        };
+        let connection = Connection::new(transport).with_resource_limits(limits);
         let negotiate_request = NegotiateRequest {
             security_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU,
@@ -3558,27 +3805,71 @@ mod tests {
             dialects: vec![Dialect::Smb210, Dialect::Smb302],
             negotiate_contexts: Vec::new(),
         };
-        let session_request = SessionSetupRequest {
-            flags: 0,
-            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
-            capabilities: 0,
-            channel: 0,
-            security_buffer: vec![0x60, 0x48],
-            previous_session_id: 0,
-        };
+        struct PassthroughAuthProvider(Vec<u8>);
+
+        impl AuthProvider for PassthroughAuthProvider {
+            fn initial_token(
+                &mut self,
+                _negotiate: &NegotiateResponse,
+            ) -> Result<Vec<u8>, AuthError> {
+                Ok(std::mem::take(&mut self.0))
+            }
+
+            fn next_token(&mut self, _incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
+                Err(AuthError::InvalidState(
+                    "scripted authentication unexpectedly requested another token",
+                ))
+            }
+        }
+
         let connection = connection
             .negotiate(&negotiate_request)
             .await
             .expect("negotiate should succeed");
         let connection = connection
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider(vec![0x60, 0x48]))
             .await
             .expect("session setup should succeed");
         SmbClient::from_connection(server, connection).with_transfer_chunk_size(4)
     }
 
     async fn build_share(reads: Vec<Vec<u8>>) -> Share<ScriptedTransport> {
-        let client = build_client("server", reads).await;
+        build_share_with_limits(reads, ResourceLimits::default()).await
+    }
+
+    async fn build_share_with_limits(
+        reads: Vec<Vec<u8>>,
+        limits: ResourceLimits,
+    ) -> Share<ScriptedTransport> {
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let client = build_client_with_tree_response_pending_and_limits(
+            "server",
+            tree_response,
+            reads,
+            false,
+            limits,
+        )
+        .await;
+        client
+            .share("share")
+            .await
+            .expect("tree connect should succeed")
+    }
+
+    async fn build_share_pending(reads: Vec<Vec<u8>>) -> Share<ScriptedTransport> {
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let client =
+            build_client_with_tree_response_and_pending("server", tree_response, reads, true).await;
         client
             .share("share")
             .await

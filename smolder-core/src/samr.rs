@@ -3,6 +3,7 @@
 use smolder_proto::rpc::{SyntaxId, Uuid};
 
 use crate::error::CoreError;
+use crate::policy::ResourceLimits;
 use crate::rpc::PipeRpcClient;
 use crate::transport::TokioTcpTransport;
 
@@ -41,6 +42,8 @@ const ALIAS_READ_AND_LIST_MEMBERS: u32 = ALIAS_READ_INFORMATION | ALIAS_LIST_MEM
 const ALIAS_GENERAL_INFORMATION_CLASS: u32 = 1;
 const USER_READ_GENERAL: u32 = 0x0000_0001;
 const USER_ACCOUNT_NAME_INFORMATION_CLASS: u32 = 7;
+const MAX_SID_SUB_AUTHORITIES: usize = 15;
+const STATUS_MORE_ENTRIES: u32 = 0x0000_0105;
 
 /// Default SAM server access mask used by the typed client.
 pub const DEFAULT_SERVER_ACCESS: u32 =
@@ -211,12 +214,6 @@ impl<T> SamrClient<T> {
     pub fn revision(&self) -> SamrServerRevision {
         self.revision
     }
-
-    /// Consumes the typed client and returns the underlying RPC transport without closing the server handle.
-    #[must_use]
-    pub fn into_rpc(self) -> PipeRpcClient<T> {
-        self.rpc
-    }
 }
 
 impl<T> SamrDomainClient<T> {
@@ -306,7 +303,10 @@ where
                 encode_get_members_in_alias_request(self.alias_handle),
             )
             .await?;
-        parse_get_members_in_alias_response(&response)
+        parse_get_members_in_alias_response_with_limits(
+            &response,
+            self.domain.rpc.pipe().resource_limits(),
+        )
     }
 
     /// Returns the members of the currently-open alias as SIDs.
@@ -321,7 +321,9 @@ where
 {
     /// Performs the default `samr` bind and `SamrConnect5`.
     pub async fn bind(mut rpc: PipeRpcClient<T>) -> Result<Self, CoreError> {
-        rpc.bind_context(Self::CONTEXT_ID, Self::SYNTAX).await?;
+        if let Err(error) = rpc.bind_context(Self::CONTEXT_ID, Self::SYNTAX).await {
+            return Err(rpc.close_after_error(error).await);
+        }
         let response = match rpc
             .call(
                 Self::CONTEXT_ID,
@@ -330,18 +332,25 @@ where
             )
             .await
         {
-            Ok(response) => response,
+            Ok(response) => Ok(response),
             Err(error) if should_fallback_to_connect2(&error) => {
                 rpc.call(
                     Self::CONTEXT_ID,
                     SAMR_CONNECT2_OPNUM,
                     encode_connect2_request(DEFAULT_SERVER_ACCESS),
                 )
-                .await?
+                .await
             }
-            Err(error) => return Err(error),
+            Err(error) => Err(error),
         };
-        let (server_handle, revision) = parse_connect_response(&response)?;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => return Err(rpc.close_after_error(error).await),
+        };
+        let (server_handle, revision) = match parse_connect_response(&response) {
+            Ok(result) => result,
+            Err(error) => return Err(rpc.close_after_error(error).await),
+        };
         Ok(Self {
             rpc,
             context_id: Self::CONTEXT_ID,
@@ -350,17 +359,44 @@ where
         })
     }
 
-    /// Calls `SamrEnumerateDomainsInSamServer` with a fresh enumeration context.
+    /// Calls `SamrEnumerateDomainsInSamServer` until the server reaches a terminal page.
     pub async fn enumerate_domains(&mut self) -> Result<Vec<SamrDomain>, CoreError> {
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_ENUMERATE_DOMAINS_OPNUM,
-                encode_enumerate_domains_request(self.server_handle, 0, u32::MAX),
-            )
-            .await?;
-        parse_enumerate_domains_response(&response)
+        let limits = self.rpc.pipe().resource_limits();
+        let mut aggregate = Vec::new();
+        let mut context = 0u32;
+        for _ in 0..limits.max_rpc_pages {
+            let response = self
+                .rpc
+                .call(
+                    self.context_id,
+                    SAMR_ENUMERATE_DOMAINS_OPNUM,
+                    encode_enumerate_domains_request(self.server_handle, context, u32::MAX),
+                )
+                .await?;
+            let page = parse_rid_enumeration_page_with_limits(
+                &response,
+                "SamrEnumerateDomainsInSamServer",
+                limits,
+            )?;
+            append_bounded_rid_entries(&mut aggregate, page.entries, limits.max_ndr_entries)?;
+            if page.status == 0 {
+                return map_rid_entries(aggregate, "SAMR domain results", |entry| SamrDomain {
+                    relative_id: entry.relative_id,
+                    name: entry.name,
+                });
+            }
+            if page.enumeration_context == context {
+                return Err(CoreError::InvalidResponse(
+                    "SAMR domain enumeration did not advance its context",
+                ));
+            }
+            context = page.enumeration_context;
+        }
+        Err(CoreError::ResourceLimit {
+            resource: "SAMR enumeration pages",
+            requested: limits.max_rpc_pages.saturating_add(1) as u64,
+            maximum: limits.max_rpc_pages as u64,
+        })
     }
 
     /// Looks up the SID for a hosted SAM domain by exact name.
@@ -373,7 +409,7 @@ where
                 encode_lookup_domain_request(self.server_handle, domain_name)?,
             )
             .await?;
-        parse_lookup_domain_response(&response)
+        parse_lookup_domain_response_with_limits(&response, self.rpc.pipe().resource_limits())
     }
 
     /// Opens a domain handle by name and consumes the server-scoped client.
@@ -381,16 +417,50 @@ where
         mut self,
         domain_name: &str,
     ) -> Result<SamrDomainClient<T>, CoreError> {
-        let domain_sid = self.lookup_domain_sid(domain_name).await?;
-        let response = self
+        let domain_sid = match self.lookup_domain_sid(domain_name).await {
+            Ok(sid) => sid,
+            Err(error) => {
+                return Err(cleanup_samr_error(
+                    self.rpc,
+                    self.context_id,
+                    &[self.server_handle],
+                    error,
+                )
+                .await)
+            }
+        };
+        let response = match self
             .rpc
             .call(
                 self.context_id,
                 SAMR_OPEN_DOMAIN_OPNUM,
                 encode_open_domain_request(self.server_handle, DEFAULT_DOMAIN_ACCESS, &domain_sid),
             )
-            .await?;
-        let domain_handle = parse_open_domain_response(&response)?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(cleanup_samr_error(
+                    self.rpc,
+                    self.context_id,
+                    &[self.server_handle],
+                    error,
+                )
+                .await)
+            }
+        };
+        let domain_handle = match parse_open_domain_response(&response) {
+            Ok(handle) => handle,
+            Err(error) => {
+                return Err(cleanup_samr_error(
+                    self.rpc,
+                    self.context_id,
+                    &[self.server_handle],
+                    error,
+                )
+                .await)
+            }
+        };
         Ok(SamrDomainClient {
             rpc: self.rpc,
             context_id: self.context_id,
@@ -402,9 +472,8 @@ where
     }
 
     /// Closes the server handle and returns the underlying RPC transport.
-    pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
-        close_handle(&mut self.rpc, self.context_id, self.server_handle).await?;
-        Ok(self.rpc)
+    pub async fn close(self) -> Result<PipeRpcClient<T>, CoreError> {
+        close_samr_handles(self.rpc, self.context_id, &[self.server_handle]).await
     }
 }
 
@@ -412,56 +481,97 @@ impl<T> SamrDomainClient<T>
 where
     T: crate::transport::SmbTransport + Send,
 {
-    /// Enumerates groups in the currently-open domain.
+    /// Enumerates all groups in the currently-open domain.
     pub async fn enumerate_groups(&mut self) -> Result<Vec<SamrGroup>, CoreError> {
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_ENUMERATE_GROUPS_OPNUM,
-                encode_enumeration_request(self.domain_handle, 0, u32::MAX),
-            )
+        let entries = self
+            .enumerate_domain_rids(SAMR_ENUMERATE_GROUPS_OPNUM, None)
             .await?;
-        parse_enumerate_groups_response(&response)
+        map_rid_entries(entries, "SAMR group results", |entry| SamrGroup {
+            relative_id: entry.relative_id,
+            name: entry.name,
+        })
     }
 
-    /// Enumerates users in the currently-open domain.
+    /// Enumerates all users in the currently-open domain.
     pub async fn enumerate_users(
         &mut self,
         user_account_control: u32,
     ) -> Result<Vec<SamrUser>, CoreError> {
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_ENUMERATE_USERS_OPNUM,
-                encode_enumerate_users_request(
-                    self.domain_handle,
-                    0,
-                    user_account_control,
-                    u32::MAX,
-                ),
-            )
+        let entries = self
+            .enumerate_domain_rids(SAMR_ENUMERATE_USERS_OPNUM, Some(user_account_control))
             .await?;
-        parse_enumerate_users_response(&response)
+        map_rid_entries(entries, "SAMR user results", |entry| SamrUser {
+            relative_id: entry.relative_id,
+            name: entry.name,
+        })
     }
 
-    /// Enumerates aliases in the currently-open domain.
+    /// Enumerates all aliases in the currently-open domain.
     pub async fn enumerate_aliases(&mut self) -> Result<Vec<SamrAlias>, CoreError> {
-        let response = self
-            .rpc
-            .call(
-                self.context_id,
-                SAMR_ENUMERATE_ALIASES_OPNUM,
-                encode_enumeration_request(self.domain_handle, 0, u32::MAX),
-            )
+        let entries = self
+            .enumerate_domain_rids(SAMR_ENUMERATE_ALIASES_OPNUM, None)
             .await?;
-        parse_enumerate_aliases_response(&response)
+        map_rid_entries(entries, "SAMR alias results", |entry| SamrAlias {
+            relative_id: entry.relative_id,
+            name: entry.name,
+        })
+    }
+
+    async fn enumerate_domain_rids(
+        &mut self,
+        opnum: u16,
+        user_account_control: Option<u32>,
+    ) -> Result<Vec<RidEnumeration>, CoreError> {
+        let limits = self.rpc.pipe().resource_limits();
+        let mut aggregate = Vec::new();
+        let mut context = 0u32;
+        let operation = match opnum {
+            SAMR_ENUMERATE_GROUPS_OPNUM => "SamrEnumerateGroupsInDomain",
+            SAMR_ENUMERATE_USERS_OPNUM => "SamrEnumerateUsersInDomain",
+            SAMR_ENUMERATE_ALIASES_OPNUM => "SamrEnumerateAliasesInDomain",
+            _ => {
+                return Err(CoreError::InvalidInput(
+                    "unsupported SAMR enumeration opnum",
+                ))
+            }
+        };
+
+        for _ in 0..limits.max_rpc_pages {
+            let request = if opnum == SAMR_ENUMERATE_USERS_OPNUM {
+                encode_enumerate_users_request(
+                    self.domain_handle,
+                    context,
+                    user_account_control.ok_or(CoreError::InvalidInput(
+                        "SAMR user enumeration requires an account-control filter",
+                    ))?,
+                    u32::MAX,
+                )
+            } else {
+                encode_enumeration_request(self.domain_handle, context, u32::MAX)
+            };
+            let response = self.rpc.call(self.context_id, opnum, request).await?;
+            let page = parse_rid_enumeration_page_with_limits(&response, operation, limits)?;
+            append_bounded_rid_entries(&mut aggregate, page.entries, limits.max_ndr_entries)?;
+            if page.status == 0 {
+                return Ok(aggregate);
+            }
+            if page.enumeration_context == context {
+                return Err(CoreError::InvalidResponse(
+                    "SAMR enumeration did not advance its context",
+                ));
+            }
+            context = page.enumeration_context;
+        }
+        Err(CoreError::ResourceLimit {
+            resource: "SAMR enumeration pages",
+            requested: limits.max_rpc_pages.saturating_add(1) as u64,
+            maximum: limits.max_rpc_pages as u64,
+        })
     }
 
     /// Opens an alias handle by RID and consumes the domain-scoped client.
     pub async fn open_alias(mut self, relative_id: u32) -> Result<SamrAliasClient<T>, CoreError> {
-        let response = self
+        let response = match self
             .rpc
             .call(
                 self.context_id,
@@ -472,8 +582,31 @@ where
                     relative_id,
                 ),
             )
-            .await?;
-        let alias_handle = parse_open_handle_response(&response, "SamrOpenAlias")?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(cleanup_samr_error(
+                    self.rpc,
+                    self.context_id,
+                    &[self.domain_handle, self.server_handle],
+                    error,
+                )
+                .await)
+            }
+        };
+        let alias_handle = match parse_open_handle_response(&response, "SamrOpenAlias") {
+            Ok(handle) => handle,
+            Err(error) => {
+                return Err(cleanup_samr_error(
+                    self.rpc,
+                    self.context_id,
+                    &[self.domain_handle, self.server_handle],
+                    error,
+                )
+                .await)
+            }
+        };
         Ok(SamrAliasClient {
             domain: SamrDomainState {
                 rpc: self.rpc,
@@ -490,15 +623,38 @@ where
 
     /// Opens a user handle by RID and consumes the domain-scoped client.
     pub async fn open_user(mut self, relative_id: u32) -> Result<SamrUserClient<T>, CoreError> {
-        let response = self
+        let response = match self
             .rpc
             .call(
                 self.context_id,
                 SAMR_OPEN_USER_OPNUM,
                 encode_open_relative_id_request(self.domain_handle, USER_READ_GENERAL, relative_id),
             )
-            .await?;
-        let user_handle = parse_open_handle_response(&response, "SamrOpenUser")?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(cleanup_samr_error(
+                    self.rpc,
+                    self.context_id,
+                    &[self.domain_handle, self.server_handle],
+                    error,
+                )
+                .await)
+            }
+        };
+        let user_handle = match parse_open_handle_response(&response, "SamrOpenUser") {
+            Ok(handle) => handle,
+            Err(error) => {
+                return Err(cleanup_samr_error(
+                    self.rpc,
+                    self.context_id,
+                    &[self.domain_handle, self.server_handle],
+                    error,
+                )
+                .await)
+            }
+        };
         Ok(SamrUserClient {
             domain: SamrDomainState {
                 rpc: self.rpc,
@@ -514,10 +670,13 @@ where
     }
 
     /// Closes the domain handle, then the server handle, and returns the underlying RPC transport.
-    pub async fn close(mut self) -> Result<PipeRpcClient<T>, CoreError> {
-        close_handle(&mut self.rpc, self.context_id, self.domain_handle).await?;
-        close_handle(&mut self.rpc, self.context_id, self.server_handle).await?;
-        Ok(self.rpc)
+    pub async fn close(self) -> Result<PipeRpcClient<T>, CoreError> {
+        close_samr_handles(
+            self.rpc,
+            self.context_id,
+            &[self.domain_handle, self.server_handle],
+        )
+        .await
     }
 }
 
@@ -536,17 +695,33 @@ where
                 encode_query_user_request(self.user_handle, USER_ACCOUNT_NAME_INFORMATION_CLASS),
             )
             .await?;
-        parse_query_account_name_response(&response)
+        parse_query_account_name_response_with_limits(
+            &response,
+            self.domain.rpc.pipe().resource_limits(),
+        )
     }
 
     /// Closes the user handle and returns the domain-scoped client.
     pub async fn close(mut self) -> Result<SamrDomainClient<T>, CoreError> {
-        close_handle(
+        if let Err(error) = close_handle(
             &mut self.domain.rpc,
             self.domain.context_id,
             self.user_handle,
         )
-        .await?;
+        .await
+        {
+            return Err(cleanup_samr_error(
+                self.domain.rpc,
+                self.domain.context_id,
+                &[
+                    self.user_handle,
+                    self.domain.domain_handle,
+                    self.domain.server_handle,
+                ],
+                error,
+            )
+            .await);
+        }
         Ok(self.domain.into_domain_client())
     }
 }
@@ -566,17 +741,33 @@ where
                 encode_query_alias_request(self.alias_handle, ALIAS_GENERAL_INFORMATION_CLASS),
             )
             .await?;
-        parse_query_alias_general_response(&response)
+        parse_query_alias_general_response_with_limits(
+            &response,
+            self.domain.rpc.pipe().resource_limits(),
+        )
     }
 
     /// Closes the alias handle and returns the domain-scoped client.
     pub async fn close(mut self) -> Result<SamrDomainClient<T>, CoreError> {
-        close_handle(
+        if let Err(error) = close_handle(
             &mut self.domain.rpc,
             self.domain.context_id,
             self.alias_handle,
         )
-        .await?;
+        .await
+        {
+            return Err(cleanup_samr_error(
+                self.domain.rpc,
+                self.domain.context_id,
+                &[
+                    self.alias_handle,
+                    self.domain.domain_handle,
+                    self.domain.server_handle,
+                ],
+                error,
+            )
+            .await);
+        }
         Ok(self.domain.into_domain_client())
     }
 }
@@ -711,8 +902,16 @@ fn encode_lookup_domain_request(
     Ok(writer.into_bytes())
 }
 
+#[cfg(test)]
 fn parse_lookup_domain_response(response: &[u8]) -> Result<SamrSid, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_lookup_domain_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_lookup_domain_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<SamrSid, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let sid_referent = reader.read_u32("DomainSidReferent")?;
     if sid_referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -838,8 +1037,16 @@ fn encode_get_members_in_alias_request(alias_handle: [u8; 20]) -> Vec<u8> {
     alias_handle.to_vec()
 }
 
+#[cfg(test)]
 fn parse_query_account_name_response(response: &[u8]) -> Result<SamrUserInfo, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_query_account_name_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_query_account_name_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<SamrUserInfo, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let buffer_referent = reader.read_u32("UserInformationReferent")?;
     if buffer_referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -863,8 +1070,16 @@ fn parse_query_account_name_response(response: &[u8]) -> Result<SamrUserInfo, Co
     Ok(SamrUserInfo { account_name })
 }
 
+#[cfg(test)]
 fn parse_query_alias_general_response(response: &[u8]) -> Result<SamrAliasInfo, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_query_alias_general_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_query_alias_general_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<SamrAliasInfo, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let buffer_referent = reader.read_u32("AliasInformationReferent")?;
     if buffer_referent == 0 {
         return Err(CoreError::InvalidResponse(
@@ -877,9 +1092,13 @@ fn parse_query_alias_general_response(response: &[u8]) -> Result<SamrAliasInfo, 
             "SamrQueryInformationAlias returned an unexpected information class",
         ));
     }
-    let name = reader.read_rpc_unicode_string("AliasName")?;
+    // NDR encodes every fixed member of the structure before its deferred string pointees.
+    let name_header = reader.read_unicode_string_header("AliasName")?;
     let member_count = reader.read_u32("AliasMemberCount")?;
-    let admin_comment = reader.read_rpc_unicode_string("AliasAdminComment")?;
+    let admin_comment_header = reader.read_unicode_string_header("AliasAdminComment")?;
+    let name = reader.read_deferred_unicode_string(name_header, "AliasName")?;
+    let admin_comment =
+        reader.read_deferred_unicode_string(admin_comment_header, "AliasAdminComment")?;
     let status = reader.read_u32("SamrQueryInformationAliasStatus")?;
     if status != 0 {
         return Err(CoreError::RemoteOperation {
@@ -894,8 +1113,16 @@ fn parse_query_alias_general_response(response: &[u8]) -> Result<SamrAliasInfo, 
     })
 }
 
+#[cfg(test)]
 fn parse_get_members_in_alias_response(response: &[u8]) -> Result<Vec<SamrSid>, CoreError> {
-    let mut reader = NdrReader::new(response);
+    parse_get_members_in_alias_response_with_limits(response, ResourceLimits::default())
+}
+
+fn parse_get_members_in_alias_response_with_limits(
+    response: &[u8],
+    limits: ResourceLimits,
+) -> Result<Vec<SamrSid>, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
     let member_count = reader.read_u32("AliasMemberCount")? as usize;
     let members_referent = reader.read_u32("AliasMembersReferent")?;
     if members_referent == 0 {
@@ -914,12 +1141,19 @@ fn parse_get_members_in_alias_response(response: &[u8]) -> Result<Vec<SamrSid>, 
         ));
     }
 
-    let mut member_headers = Vec::with_capacity(member_count);
+    reader.validate_collection(member_count, 4, "AliasMembers")?;
+    let mut member_headers = Vec::new();
+    member_headers
+        .try_reserve_exact(member_count)
+        .map_err(|_| CoreError::AllocationFailed("AliasMembers"))?;
     for _ in 0..member_count {
         member_headers.push(reader.read_u32("AliasMemberSidReferent")?);
     }
 
-    let mut members = Vec::with_capacity(member_count);
+    let mut members = Vec::new();
+    members
+        .try_reserve_exact(member_count)
+        .map_err(|_| CoreError::AllocationFailed("AliasMembers"))?;
     for sid_referent in member_headers {
         if sid_referent == 0 {
             return Err(CoreError::InvalidResponse(
@@ -940,45 +1174,48 @@ fn parse_get_members_in_alias_response(response: &[u8]) -> Result<Vec<SamrSid>, 
     Ok(members)
 }
 
+#[cfg(test)]
 fn parse_enumerate_users_response(response: &[u8]) -> Result<Vec<SamrUser>, CoreError> {
     let entries = parse_rid_enumeration_response(response, "SamrEnumerateUsersInDomain")?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| SamrUser {
-            relative_id: entry.relative_id,
-            name: entry.name,
-        })
-        .collect())
+    map_rid_entries(entries, "SAMR user results", |entry| SamrUser {
+        relative_id: entry.relative_id,
+        name: entry.name,
+    })
 }
 
+#[cfg(test)]
 fn parse_enumerate_groups_response(response: &[u8]) -> Result<Vec<SamrGroup>, CoreError> {
     let entries = parse_rid_enumeration_response(response, "SamrEnumerateGroupsInDomain")?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| SamrGroup {
-            relative_id: entry.relative_id,
-            name: entry.name,
-        })
-        .collect())
+    map_rid_entries(entries, "SAMR group results", |entry| SamrGroup {
+        relative_id: entry.relative_id,
+        name: entry.name,
+    })
 }
 
+#[cfg(test)]
 fn parse_enumerate_aliases_response(response: &[u8]) -> Result<Vec<SamrAlias>, CoreError> {
     let entries = parse_rid_enumeration_response(response, "SamrEnumerateAliasesInDomain")?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| SamrAlias {
-            relative_id: entry.relative_id,
-            name: entry.name,
-        })
-        .collect())
+    map_rid_entries(entries, "SAMR alias results", |entry| SamrAlias {
+        relative_id: entry.relative_id,
+        name: entry.name,
+    })
 }
 
-fn parse_rid_enumeration_response(
+#[cfg(test)]
+fn parse_rid_enumeration_page(
     response: &[u8],
     operation: &'static str,
-) -> Result<Vec<RidEnumeration>, CoreError> {
-    let mut reader = NdrReader::new(response);
-    let _enumeration_context = reader.read_u32("EnumerationContext")?;
+) -> Result<RidEnumerationPage, CoreError> {
+    parse_rid_enumeration_page_with_limits(response, operation, ResourceLimits::default())
+}
+
+fn parse_rid_enumeration_page_with_limits(
+    response: &[u8],
+    operation: &'static str,
+    limits: ResourceLimits,
+) -> Result<RidEnumerationPage, CoreError> {
+    let mut reader = NdrReader::with_limits(response, limits);
+    let enumeration_context = reader.read_u32("EnumerationContext")?;
     let buffer_referent = reader.read_u32("BufferReferent")?;
     let mut entries = Vec::new();
 
@@ -997,8 +1234,15 @@ fn parse_rid_enumeration_response(
                     "SamrEnumerateUsersInDomain returned fewer array slots than entries",
                 ));
             }
-            let mut raw_entries = Vec::with_capacity(entries_read);
-            let mut headers = Vec::with_capacity(entries_read);
+            reader.validate_collection(entries_read, 12, "SAMR enumeration entries")?;
+            let mut raw_entries = Vec::new();
+            raw_entries
+                .try_reserve_exact(entries_read)
+                .map_err(|_| CoreError::AllocationFailed("SAMR enumeration entries"))?;
+            let mut headers = Vec::new();
+            headers
+                .try_reserve_exact(entries_read)
+                .map_err(|_| CoreError::AllocationFailed("SAMR enumeration headers"))?;
             for _ in 0..entries_read {
                 raw_entries.push(RidEnumeration {
                     relative_id: reader.read_u32("RelativeId")?,
@@ -1021,24 +1265,84 @@ fn parse_rid_enumeration_response(
     }
 
     let status = reader.read_u32("SamrEnumerateStatus")?;
-    if status != 0 && status != 0x0000_0105 {
+    if status != 0 && status != STATUS_MORE_ENTRIES {
         return Err(CoreError::RemoteOperation {
             operation,
             code: status,
         });
     }
-    Ok(entries)
+    Ok(RidEnumerationPage {
+        entries,
+        enumeration_context,
+        status,
+    })
 }
 
+#[cfg(test)]
+fn parse_rid_enumeration_response(
+    response: &[u8],
+    operation: &'static str,
+) -> Result<Vec<RidEnumeration>, CoreError> {
+    let page = parse_rid_enumeration_page(response, operation)?;
+    if page.status == 0 {
+        Ok(page.entries)
+    } else {
+        Err(CoreError::RemoteOperation {
+            operation,
+            code: page.status,
+        })
+    }
+}
+
+fn map_rid_entries<T>(
+    entries: Vec<RidEnumeration>,
+    resource: &'static str,
+    mut map: impl FnMut(RidEnumeration) -> T,
+) -> Result<Vec<T>, CoreError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(entries.len())
+        .map_err(|_| CoreError::AllocationFailed(resource))?;
+    for entry in entries {
+        output.push(map(entry));
+    }
+    Ok(output)
+}
+
+fn append_bounded_rid_entries(
+    aggregate: &mut Vec<RidEnumeration>,
+    page: Vec<RidEnumeration>,
+    maximum: usize,
+) -> Result<(), CoreError> {
+    let new_len = aggregate
+        .len()
+        .checked_add(page.len())
+        .ok_or(CoreError::ResourceLimit {
+            resource: "SAMR enumeration entries",
+            requested: u64::MAX,
+            maximum: maximum as u64,
+        })?;
+    if new_len > maximum {
+        return Err(CoreError::ResourceLimit {
+            resource: "SAMR enumeration entries",
+            requested: new_len as u64,
+            maximum: maximum as u64,
+        });
+    }
+    aggregate
+        .try_reserve(page.len())
+        .map_err(|_| CoreError::AllocationFailed("SAMR enumeration entries"))?;
+    aggregate.extend(page);
+    Ok(())
+}
+
+#[cfg(test)]
 fn parse_enumerate_domains_response(response: &[u8]) -> Result<Vec<SamrDomain>, CoreError> {
     let entries = parse_rid_enumeration_response(response, "SamrEnumerateDomainsInSamServer")?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| SamrDomain {
-            relative_id: entry.relative_id,
-            name: entry.name,
-        })
-        .collect())
+    map_rid_entries(entries, "SAMR domain results", |entry| SamrDomain {
+        relative_id: entry.relative_id,
+        name: entry.name,
+    })
 }
 
 fn encode_close_handle_request(handle: [u8; 20]) -> Vec<u8> {
@@ -1079,10 +1383,56 @@ where
     parse_close_handle_response(&response)
 }
 
+async fn close_samr_handles<T>(
+    mut rpc: PipeRpcClient<T>,
+    context_id: u16,
+    handles: &[[u8; 20]],
+) -> Result<PipeRpcClient<T>, CoreError>
+where
+    T: crate::transport::SmbTransport + Send,
+{
+    let mut first_error = None;
+    for handle in handles {
+        if let Err(error) = close_handle(&mut rpc, context_id, *handle).await {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+            if rpc.is_poisoned() {
+                break;
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(rpc.close_after_error(error).await);
+    }
+    Ok(rpc)
+}
+
+async fn cleanup_samr_error<T>(
+    rpc: PipeRpcClient<T>,
+    context_id: u16,
+    handles: &[[u8; 20]],
+    primary_error: CoreError,
+) -> CoreError
+where
+    T: crate::transport::SmbTransport + Send,
+{
+    match close_samr_handles(rpc, context_id, handles).await {
+        Ok(rpc) => rpc.close_after_error(primary_error).await,
+        Err(_) => primary_error,
+    }
+}
+
 #[derive(Debug)]
 struct RidEnumeration {
     relative_id: u32,
     name: String,
+}
+
+struct RidEnumerationPage {
+    entries: Vec<RidEnumeration>,
+    enumeration_context: u32,
+    status: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -1095,11 +1445,18 @@ struct UnicodeStringHeader {
 struct NdrReader<'a> {
     bytes: &'a [u8],
     offset: usize,
+    max_entries: usize,
+    max_string_units: usize,
 }
 
 impl<'a> NdrReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
+    fn with_limits(bytes: &'a [u8], limits: ResourceLimits) -> Self {
+        Self {
+            bytes,
+            offset: 0,
+            max_entries: limits.max_ndr_entries,
+            max_string_units: limits.max_ndr_string_units,
+        }
     }
 
     fn remaining(&self) -> usize {
@@ -1142,6 +1499,45 @@ impl<'a> NdrReader<'a> {
         Ok(value)
     }
 
+    fn validate_collection(
+        &self,
+        count: usize,
+        minimum_wire_size: usize,
+        field: &'static str,
+    ) -> Result<(), CoreError> {
+        if count > self.max_entries {
+            return Err(CoreError::ResourceLimit {
+                resource: field,
+                requested: count as u64,
+                maximum: self.max_entries as u64,
+            });
+        }
+        let minimum = count
+            .checked_mul(minimum_wire_size)
+            .ok_or(CoreError::InvalidResponse(field))?;
+        if minimum > self.remaining() {
+            return Err(CoreError::InvalidResponse(field));
+        }
+        Ok(())
+    }
+
+    fn validate_string_units(&self, count: usize, field: &'static str) -> Result<(), CoreError> {
+        if count > self.max_string_units {
+            return Err(CoreError::ResourceLimit {
+                resource: field,
+                requested: count as u64,
+                maximum: self.max_string_units as u64,
+            });
+        }
+        let wire_size = count
+            .checked_mul(2)
+            .ok_or(CoreError::InvalidResponse(field))?;
+        if wire_size > self.remaining() {
+            return Err(CoreError::InvalidResponse(field));
+        }
+        Ok(())
+    }
+
     fn read_unicode_string_header(
         &mut self,
         field: &'static str,
@@ -1168,21 +1564,31 @@ impl<'a> NdrReader<'a> {
         let max_count = self.read_u32(field)? as usize;
         let offset = self.read_u32(field)? as usize;
         let actual_count = self.read_u32(field)? as usize;
+        let actual_bytes = actual_count
+            .checked_mul(2)
+            .ok_or(CoreError::InvalidResponse(field))?;
         if offset != 0
             || actual_count > max_count
-            || actual_count * 2 < header.length
+            || actual_bytes < header.length
             || header.maximum_length < header.length
         {
             return Err(CoreError::InvalidResponse(field));
         }
-        let mut code_units = Vec::with_capacity(actual_count);
+        self.validate_string_units(actual_count, field)?;
+        let mut code_units = Vec::new();
+        code_units
+            .try_reserve_exact(actual_count)
+            .map_err(|_| CoreError::AllocationFailed(field))?;
         for _ in 0..actual_count {
             code_units.push(self.read_u16(field)?);
         }
         self.align(4, field)?;
         let actual_units = header.length / 2;
-        String::from_utf16(&code_units[..actual_units])
-            .map_err(|_| CoreError::InvalidResponse("failed to decode samr UTF-16 string"))
+        crate::bounded::utf16_string(
+            &code_units[..actual_units],
+            field,
+            "failed to decode samr UTF-16 string",
+        )
     }
 
     fn read_rpc_unicode_string(&mut self, field: &'static str) -> Result<String, CoreError> {
@@ -1196,21 +1602,31 @@ impl<'a> NdrReader<'a> {
         let max_count = self.read_u32(field)? as usize;
         let offset = self.read_u32(field)? as usize;
         let actual_count = self.read_u32(field)? as usize;
+        let actual_bytes = actual_count
+            .checked_mul(2)
+            .ok_or(CoreError::InvalidResponse(field))?;
         if offset != 0
             || actual_count > max_count
-            || actual_count * 2 < length
+            || actual_bytes < length
             || maximum_length < length
         {
             return Err(CoreError::InvalidResponse(field));
         }
-        let mut code_units = Vec::with_capacity(actual_count);
+        self.validate_string_units(actual_count, field)?;
+        let mut code_units = Vec::new();
+        code_units
+            .try_reserve_exact(actual_count)
+            .map_err(|_| CoreError::AllocationFailed(field))?;
         for _ in 0..actual_count {
             code_units.push(self.read_u16(field)?);
         }
         self.align(4, field)?;
         let actual_units = length / 2;
-        String::from_utf16(&code_units[..actual_units])
-            .map_err(|_| CoreError::InvalidResponse("failed to decode samr UTF-16 string"))
+        crate::bounded::utf16_string(
+            &code_units[..actual_units],
+            field,
+            "failed to decode samr UTF-16 string",
+        )
     }
 
     fn read_sid(&mut self, field: &'static str) -> Result<SamrSid, CoreError> {
@@ -1219,11 +1635,18 @@ impl<'a> NdrReader<'a> {
         }
         let revision = self.bytes[self.offset];
         let sub_authority_count = self.bytes[self.offset + 1] as usize;
+        if sub_authority_count > MAX_SID_SUB_AUTHORITIES {
+            return Err(CoreError::InvalidResponse(field));
+        }
         let mut identifier_authority = [0_u8; 6];
         identifier_authority.copy_from_slice(&self.bytes[self.offset + 2..self.offset + 8]);
         self.offset += 8;
+        self.validate_collection(sub_authority_count, 4, field)?;
 
-        let mut sub_authorities = Vec::with_capacity(sub_authority_count);
+        let mut sub_authorities = Vec::new();
+        sub_authorities
+            .try_reserve_exact(sub_authority_count)
+            .map_err(|_| CoreError::AllocationFailed(field))?;
         for _ in 0..sub_authority_count {
             sub_authorities.push(self.read_u32(field)?);
         }
@@ -1303,10 +1726,9 @@ impl NdrWriter {
 
 #[cfg(test)]
 mod tests {
+    use smolder_proto::rpc::{Packet, PacketFlags, ResponsePdu};
+
     use super::{
-        ALIAS_GENERAL_INFORMATION_CLASS, ALIAS_READ_AND_LIST_MEMBERS, DEFAULT_DOMAIN_ACCESS,
-        DEFAULT_SERVER_ACCESS, SamrAlias, SamrAliasInfo, SamrDomain, SamrGroup, SamrServerRevision,
-        SamrSid, SamrUser, SamrUserInfo, USER_ACCOUNT_NAME_INFORMATION_CLASS, USER_READ_GENERAL,
         encode_close_handle_request, encode_connect2_request, encode_connect5_request,
         encode_enumerate_users_request, encode_enumeration_request, encode_lookup_domain_request,
         encode_open_domain_request, encode_open_relative_id_request, encode_query_alias_request,
@@ -1316,8 +1738,19 @@ mod tests {
         parse_enumerate_users_response, parse_get_members_in_alias_response,
         parse_lookup_domain_response, parse_open_domain_response, parse_open_handle_response,
         parse_query_account_name_response, parse_query_alias_general_response,
+        parse_rid_enumeration_page_with_limits, SamrAlias, SamrAliasInfo, SamrClient, SamrDomain,
+        SamrGroup, SamrServerRevision, SamrSid, SamrUser, SamrUserInfo,
+        ALIAS_GENERAL_INFORMATION_CLASS, ALIAS_READ_AND_LIST_MEMBERS, DEFAULT_DOMAIN_ACCESS,
+        DEFAULT_SERVER_ACCESS, STATUS_MORE_ENTRIES, USER_ACCOUNT_NAME_INFORMATION_CLASS,
+        USER_READ_GENERAL,
     };
     use crate::error::CoreError;
+    use crate::policy::ResourceLimits;
+    use crate::rpc::PipeRpcClient;
+    use crate::test_support::{
+        captured_rpc_packets, open_scripted_pipe, rpc_read_frame, successful_flush_frame,
+        successful_write_frame, ScriptedTransport,
+    };
 
     struct ResponseWriter {
         bytes: Vec<u8>,
@@ -1494,6 +1927,164 @@ mod tests {
     }
 
     #[test]
+    fn samr_enumeration_rejects_huge_count_before_allocation() {
+        let response = [
+            0u32.to_le_bytes(),
+            1u32.to_le_bytes(),
+            u32::MAX.to_le_bytes(),
+            1u32.to_le_bytes(),
+            u32::MAX.to_le_bytes(),
+        ]
+        .concat();
+
+        let error = parse_enumerate_users_response(&response)
+            .expect_err("tiny response with huge count must be rejected");
+        assert!(matches!(error, CoreError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn samr_alias_members_reject_huge_count_before_allocation() {
+        let response = [
+            u32::MAX.to_le_bytes(),
+            1u32.to_le_bytes(),
+            u32::MAX.to_le_bytes(),
+        ]
+        .concat();
+
+        let error = parse_get_members_in_alias_response(&response)
+            .expect_err("tiny alias response with huge count must be rejected");
+        assert!(matches!(error, CoreError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn direct_samr_parser_does_not_return_partial_more_entries() {
+        let response = rid_page(7, 500, "Administrator", STATUS_MORE_ENTRIES);
+        let error = parse_enumerate_users_response(&response)
+            .expect_err("one-page helper must surface STATUS_MORE_ENTRIES");
+        assert!(matches!(
+            error,
+            CoreError::RemoteOperation {
+                operation: "SamrEnumerateUsersInDomain",
+                code: STATUS_MORE_ENTRIES
+            }
+        ));
+    }
+
+    #[test]
+    fn samr_ndr_parser_enforces_configured_entry_and_string_limits() {
+        let response = rid_page(1, 500, "Administrator", 0);
+        let entry_error = parse_rid_enumeration_page_with_limits(
+            &response,
+            "SamrEnumerateUsersInDomain",
+            ResourceLimits {
+                max_ndr_entries: 0,
+                ..ResourceLimits::default()
+            },
+        )
+        .err()
+        .expect("configured SAMR entry maximum should be enforced");
+        assert!(matches!(
+            entry_error,
+            CoreError::ResourceLimit {
+                resource: "SAMR enumeration entries",
+                requested: 1,
+                maximum: 0,
+            }
+        ));
+
+        let string_error = parse_rid_enumeration_page_with_limits(
+            &response,
+            "SamrEnumerateUsersInDomain",
+            ResourceLimits {
+                max_ndr_string_units: 2,
+                ..ResourceLimits::default()
+            },
+        )
+        .err()
+        .expect("configured SAMR string maximum should be enforced");
+        assert!(matches!(
+            string_error,
+            CoreError::ResourceLimit {
+                resource: "Name",
+                maximum: 2,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn samr_domain_enumeration_paginates_until_completion() {
+        let first = rid_page(7, 0, "Builtin", STATUS_MORE_ENTRIES);
+        let second = rid_page(8, 0, "EXAMPLE", 0);
+        let (pipe, writes) = open_scripted_pipe(
+            "lsarpc",
+            vec![
+                successful_write_frame(4, 52),
+                successful_flush_frame(5),
+                rpc_read_frame(
+                    Packet::Response(ResponsePdu {
+                        call_id: 1,
+                        flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+                        alloc_hint: first.len() as u32,
+                        context_id: 0,
+                        cancel_count: 0,
+                        stub_data: first,
+                        auth_verifier: None,
+                    }),
+                    6,
+                ),
+                successful_write_frame(7, 52),
+                successful_flush_frame(8),
+                rpc_read_frame(
+                    Packet::Response(ResponsePdu {
+                        call_id: 2,
+                        flags: PacketFlags::FIRST_FRAGMENT | PacketFlags::LAST_FRAGMENT,
+                        alloc_hint: second.len() as u32,
+                        context_id: 0,
+                        cancel_count: 0,
+                        stub_data: second,
+                        auth_verifier: None,
+                    }),
+                    9,
+                ),
+            ],
+        )
+        .await;
+        let mut rpc = PipeRpcClient::new(pipe);
+        rpc.assume_bound_context_for_test(0, SamrClient::<ScriptedTransport>::SYNTAX);
+        let mut client = SamrClient {
+            rpc,
+            context_id: 0,
+            server_handle: [0x42; 20],
+            revision: SamrServerRevision {
+                revision: 2,
+                supported_features: 0,
+            },
+        };
+
+        let domains = client
+            .enumerate_domains()
+            .await
+            .expect("SAMR should return all pages");
+        assert_eq!(
+            domains
+                .iter()
+                .map(|domain| domain.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Builtin", "EXAMPLE"]
+        );
+
+        let requests = captured_rpc_packets(&writes);
+        let Packet::Request(second_request) = &requests[1] else {
+            panic!("second captured RPC packet should be an enumeration request");
+        };
+        assert_eq!(
+            second_request.stub_data,
+            encode_enumeration_request([0x42; 20], 7, u32::MAX)
+        );
+    }
+
+    #[test]
     fn enumerate_groups_response_decodes_entries() {
         let mut writer = ResponseWriter::new();
         writer.write_u32(0);
@@ -1525,6 +2116,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn rid_page(context: u32, rid: u32, name: &str, status: u32) -> Vec<u8> {
+        let mut writer = ResponseWriter::new();
+        writer.write_u32(context);
+        let buffer_ref = writer.next_referent();
+        writer.write_u32(buffer_ref);
+        writer.write_u32(1);
+        let array_ref = writer.next_referent();
+        writer.write_u32(array_ref);
+        writer.write_u32(1);
+        writer.write_u32(rid);
+        writer.write_unicode_string_header(name);
+        writer.write_deferred_unicode_string(name);
+        writer.write_u32(1);
+        writer.write_u32(status);
+        writer.into_bytes()
     }
 
     #[test]
@@ -1806,9 +2414,7 @@ mod tests {
             encode_query_user_request([0x22; 20], USER_ACCOUNT_NAME_INFORMATION_CLASS),
             [
                 [0x22; 20].to_vec(),
-                (USER_ACCOUNT_NAME_INFORMATION_CLASS as u32)
-                    .to_le_bytes()
-                    .to_vec(),
+                USER_ACCOUNT_NAME_INFORMATION_CLASS.to_le_bytes().to_vec(),
             ]
             .concat()
         );
@@ -1850,9 +2456,11 @@ mod tests {
         let buffer_ref = writer.next_referent();
         writer.write_u32(buffer_ref);
         writer.write_u32(ALIAS_GENERAL_INFORMATION_CLASS);
-        writer.write_rpc_unicode_string("Administrators");
+        writer.write_unicode_string_header("Administrators");
         writer.write_u32(3);
-        writer.write_rpc_unicode_string("Builtin administrators");
+        writer.write_unicode_string_header("Builtin administrators");
+        writer.write_deferred_unicode_string("Administrators");
+        writer.write_deferred_unicode_string("Builtin administrators");
         writer.write_u32(0);
 
         assert_eq!(
@@ -1862,6 +2470,27 @@ mod tests {
                 name: "Administrators".to_owned(),
                 member_count: 3,
                 admin_comment: "Builtin administrators".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn query_alias_general_response_decodes_standalone_samba_fixture() {
+        let response = [
+            0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x1c, 0x00, 0x04, 0x00,
+            0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x02, 0x00,
+            0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x41, 0x00,
+            0x64, 0x00, 0x6d, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x69, 0x00, 0x73, 0x00, 0x74, 0x00,
+            0x72, 0x00, 0x61, 0x00, 0x74, 0x00, 0x6f, 0x00, 0x72, 0x00, 0x73, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        assert_eq!(
+            parse_query_alias_general_response(&response).expect("Samba response should decode"),
+            SamrAliasInfo {
+                name: "Administrators".to_owned(),
+                member_count: 1,
+                admin_comment: String::new(),
             }
         );
     }

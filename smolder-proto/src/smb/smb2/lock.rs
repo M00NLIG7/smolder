@@ -127,7 +127,23 @@ impl LockRequest {
             persistent: get_u64(&mut input, "file_id_persistent")?,
             volatile: get_u64(&mut input, "file_id_volatile")?,
         };
-        let mut locks = Vec::with_capacity(lock_count);
+        let required =
+            lock_count
+                .checked_mul(LockElement::LEN)
+                .ok_or(ProtocolError::SizeLimitExceeded {
+                    field: "lock_elements",
+                })?;
+        if input.len() < required {
+            return Err(ProtocolError::UnexpectedEof {
+                field: "lock_element",
+            });
+        }
+        let mut locks = Vec::new();
+        locks
+            .try_reserve_exact(lock_count)
+            .map_err(|_| ProtocolError::SizeLimitExceeded {
+                field: "lock_elements",
+            })?;
         for _ in 0..lock_count {
             locks.push(LockElement::decode(&mut input)?);
         }

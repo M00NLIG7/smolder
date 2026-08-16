@@ -1,12 +1,14 @@
 # Smolder MSRV and Versioning Policy
 
 This document defines the current MSRV and semver rules for the published
-workspace crates:
+workspace crates. The `0.4.x` release line consists of:
 
 - `smolder-proto`
 - `smolder-smb-core`
 - `smolder`
-- `smolder-psexecsvc`
+
+`smolder-psexecsvc` is versioned separately and remains at `0.3.0`; it is not
+part of the public `0.4.0` crate set.
 
 It is the release-discipline companion to
 [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
@@ -22,13 +24,13 @@ This is now pinned in each published crate manifest through `rust-version =
 
 Why `1.85`:
 
-- the workspace currently vendors `kenobi-unix`, which uses Rust 2024 edition
-  support
-- the workspace has been verified with:
-  - `cargo +1.85.0 check -p smolder-proto`
-  - `cargo +1.85.0 check -p smolder-smb-core`
-  - `cargo +1.85.0 check -p smolder`
-  - `cargo +1.85.0 check -p smolder-psexecsvc`
+- it is the reviewed floor for the workspace's crate-local protocol, Kerberos,
+  and transport implementations and their locked dependency graph
+- the workspace is continuously verified with:
+  - `cargo +1.85.0 check --workspace --all-targets --all-features --locked`
+  - `cargo +1.85.0 clippy --workspace --all-targets --all-features --locked -- -D warnings`
+  - deterministic debug, release, property, documentation, exact-archive
+    consumer, and cross-target gates in `.github/workflows/verify.yml`
 
 The MSRV is a release promise for the published crates, not a best-effort guess.
 
@@ -42,10 +44,10 @@ The MSRV is a release promise for the published crates, not a best-effort guess.
 - If a dependency forces a higher floor, document the reason in the changelog
   and this policy file.
 
-For `0.3.x`, the intent is to keep the MSRV stable unless there is a clear
+For `0.4.x`, the intent is to keep the MSRV stable unless there is a clear
 release-quality reason to move it.
 
-## Semver Rules for `0.3.x`
+## Semver Rules for `0.4.x`
 
 The project is still pre-`1.0`, but published crates should no longer behave as
 if every release is unconstrained.
@@ -81,7 +83,7 @@ Use minor releases for:
 
 ### What counts as breaking here
 
-For the published `0.3.x` line, treat these as breaking even before `1.0`:
+For the published `0.4.x` line, treat these as breaking even before `1.0`:
 
 - removing or renaming documented public entry points
 - changing the meaning of stable feature flags
@@ -92,9 +94,9 @@ For the published `0.3.x` line, treat these as breaking even before `1.0`:
 
 ## Feature-Flag Policy
 
-- `kerberos` is the stable documented feature surface.
-- `kerberos-gssapi` is an additive backend path and explicit native-linking
-  exception.
+- `kerberos` is the stable target-selecting feature surface.
+- `kerberos-sspi` is Windows-only; `kerberos-gssapi` is the explicit Unix
+  native-linking exception.
 - backend expansion should preserve the top-level auth API unless there is a
   strong reason to do otherwise.
 

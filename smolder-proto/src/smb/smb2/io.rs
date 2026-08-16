@@ -4,7 +4,10 @@ use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
 
 use super::create::FileId;
-use super::{check_fixed_structure_size, get_u16, get_u32, get_u64, slice_from_offset, HEADER_LEN};
+use super::{
+    check_fixed_structure_size, copy_bytes, get_u16, get_u32, get_u64, slice_from_offset,
+    HEADER_LEN,
+};
 use crate::smb::ProtocolError;
 
 bitflags! {
@@ -197,13 +200,15 @@ impl ReadRequest {
         let read_channel_info = if read_channel_info_offset == 0 || read_channel_info_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(
-                body,
-                read_channel_info_offset,
-                read_channel_info_length,
+            copy_bytes(
+                slice_from_offset(
+                    body,
+                    read_channel_info_offset,
+                    read_channel_info_length,
+                    "read_channel_info",
+                )?,
                 "read_channel_info",
             )?
-            .to_vec()
         };
 
         Ok(Self {
@@ -263,7 +268,10 @@ impl ReadResponse {
         let data = if data_offset == 0 || data_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(body, data_offset, data_length, "data")?.to_vec()
+            copy_bytes(
+                slice_from_offset(body, data_offset, data_length, "data")?,
+                "data",
+            )?
         };
 
         Ok(Self {
@@ -358,19 +366,24 @@ impl WriteRequest {
         let data = if data_offset == 0 || length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(body, data_offset, length, "data")?.to_vec()
+            copy_bytes(
+                slice_from_offset(body, data_offset, length, "data")?,
+                "data",
+            )?
         };
         let write_channel_info = if write_channel_info_offset == 0 || write_channel_info_length == 0
         {
             Vec::new()
         } else {
-            slice_from_offset(
-                body,
-                write_channel_info_offset,
-                write_channel_info_length,
+            copy_bytes(
+                slice_from_offset(
+                    body,
+                    write_channel_info_offset,
+                    write_channel_info_length,
+                    "write_channel_info",
+                )?,
                 "write_channel_info",
             )?
-            .to_vec()
         };
 
         Ok(Self {

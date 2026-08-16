@@ -1,6 +1,6 @@
 [package]
 name = "smolder"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["M00NLIG7"]
@@ -38,10 +38,11 @@ kerberos = ["smolder-core/kerberos"]
 [dependencies]
 bytes = "1"
 crossterm = "0.28"
-rand = "0.8"
-smolder-core = { package = "smolder-smb-core", path = "../smolder-core", version = "0.3.0" }
-smolder-proto = { path = "../smolder-proto", version = "0.3.0" }
+rand = "0.8.7"
+smolder-core = { package = "smolder-smb-core", path = "../smolder-core", version = "=0.4.0" }
+smolder-proto = { path = "../smolder-proto", version = "=0.4.0" }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt", "sync", "time"] }
+zeroize = "1.8"
 
 [dev-dependencies]
 async-trait = "0.1"

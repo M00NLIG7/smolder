@@ -59,4 +59,20 @@ pub enum CoreError {
     /// The requested operation exceeded its timeout budget.
     #[error("operation timed out: {0}")]
     Timeout(&'static str),
+    /// A remote-controlled size or count exceeded an explicit local policy limit.
+    #[error("resource limit exceeded for {resource}: requested {requested}, maximum {maximum}")]
+    ResourceLimit {
+        /// Name of the bounded resource.
+        resource: &'static str,
+        /// Remote-controlled requested size or count.
+        requested: u64,
+        /// Local maximum for the resource.
+        maximum: u64,
+    },
+    /// A bounded allocation failed without aborting the process.
+    #[error("allocation failed for {0}")]
+    AllocationFailed(&'static str),
+    /// The request future was cancelled or failed after transport I/O could have started.
+    #[error("SMB connection is poisoned and must not be reused")]
+    ConnectionPoisoned,
 }

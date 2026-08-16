@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,35 @@ pub fn required_env(name: &str) -> Option<String> {
 
 pub fn optional_env(name: &str) -> Option<String> {
     required_env(name)
+}
+
+pub fn required_secret(name: &str) -> Option<String> {
+    let file_name = format!("{name}_FILE");
+    let Some(path) = required_env(&file_name) else {
+        return required_env(name);
+    };
+    let path = Path::new(&path);
+    let metadata = std::fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("failed to inspect {file_name}: {error}"));
+    assert!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "{file_name} must identify a regular, non-symlink file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            metadata.permissions().mode() & 0o077,
+            0,
+            "{file_name} must not grant group or other permissions"
+        );
+    }
+    let secret = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {file_name}: {error}"));
+    let secret = secret.trim_end_matches(['\r', '\n']).to_owned();
+    assert!(!secret.is_empty(), "{file_name} was empty");
+    assert!(!secret.contains('\0'), "{file_name} contained a NUL byte");
+    Some(secret)
 }
 
 pub fn optional_u16_env(name: &str, default: u16) -> u16 {
@@ -40,7 +70,7 @@ pub fn ntlm_credentials(
     credentials
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WindowsNtlmConfig {
     pub host: String,
     pub port: u16,
@@ -56,7 +86,7 @@ impl WindowsNtlmConfig {
             host: required_env("SMOLDER_WINDOWS_HOST")?,
             port: optional_u16_env("SMOLDER_WINDOWS_PORT", 445),
             username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
+            password: required_secret("SMOLDER_WINDOWS_PASSWORD")?,
             domain: optional_env("SMOLDER_WINDOWS_DOMAIN"),
             workstation: optional_env("SMOLDER_WINDOWS_WORKSTATION"),
         })
@@ -83,7 +113,7 @@ impl WindowsNtlmConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SambaShareConfig {
     pub host: String,
     pub port: u16,
@@ -110,7 +140,7 @@ impl SambaShareConfig {
             host: required_env("SMOLDER_SAMBA_HOST")?,
             port: optional_u16_env(port_var, default_port),
             username: required_env("SMOLDER_SAMBA_USERNAME")?,
-            password: required_env("SMOLDER_SAMBA_PASSWORD")?,
+            password: required_secret("SMOLDER_SAMBA_PASSWORD")?,
             share: required_env("SMOLDER_SAMBA_SHARE")?,
             domain: optional_env("SMOLDER_SAMBA_DOMAIN"),
             workstation: optional_env("SMOLDER_SAMBA_WORKSTATION"),
@@ -127,7 +157,7 @@ impl SambaShareConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WindowsShareConfig {
     pub host: String,
     pub port: u16,
@@ -145,7 +175,7 @@ impl WindowsShareConfig {
             host: required_env("SMOLDER_WINDOWS_HOST")?,
             port: optional_u16_env("SMOLDER_WINDOWS_PORT", 445),
             username: required_env("SMOLDER_WINDOWS_USERNAME")?,
-            password: required_env("SMOLDER_WINDOWS_PASSWORD")?,
+            password: required_secret("SMOLDER_WINDOWS_PASSWORD")?,
             share: optional_env("SMOLDER_WINDOWS_SHARE").unwrap_or_else(|| "ADMIN$".to_owned()),
             test_dir: optional_env("SMOLDER_WINDOWS_TEST_DIR").unwrap_or_else(|| "Temp".to_owned()),
             domain: optional_env("SMOLDER_WINDOWS_DOMAIN"),
@@ -170,7 +200,7 @@ impl WindowsShareConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QuicNtlmConfig {
     pub server: String,
     pub connect_host: String,
@@ -194,7 +224,7 @@ impl QuicNtlmConfig {
                 .unwrap_or_else(|| server.clone()),
             port: optional_u16_env(&prefixed_key(prefix, "PORT"), 443),
             username: required_env(&prefixed_key(prefix, "USERNAME"))?,
-            password: required_env(&prefixed_key(prefix, "PASSWORD"))?,
+            password: required_secret(&prefixed_key(prefix, "PASSWORD"))?,
             share: required_env(&prefixed_key(prefix, "SHARE"))?,
             test_dir: optional_env(&prefixed_key(prefix, "TEST_DIR")).unwrap_or_default(),
             domain: optional_env(&prefixed_key(prefix, "DOMAIN")),
@@ -223,7 +253,7 @@ impl QuicNtlmConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SambaNtlmConfig {
     pub host: String,
     pub port: u16,
@@ -241,7 +271,7 @@ impl SambaNtlmConfig {
             port: optional_u16_env("SMOLDER_SAMBA_PORT", 445),
             username: optional_env("SMOLDER_SAMBA_USERNAME")
                 .unwrap_or_else(|| "smolder".to_owned()),
-            password: optional_env("SMOLDER_SAMBA_PASSWORD")
+            password: required_secret("SMOLDER_SAMBA_PASSWORD")
                 .unwrap_or_else(|| "smolderpass".to_owned()),
             domain: optional_env("SMOLDER_SAMBA_DOMAIN").or_else(|| Some("WORKGROUP".to_owned())),
             workstation: optional_env("SMOLDER_SAMBA_WORKSTATION"),

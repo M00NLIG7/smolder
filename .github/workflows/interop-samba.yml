@@ -9,7 +9,7 @@ on:
 
 jobs:
   samba-interop:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       SMOLDER_SAMBA_HOST: 127.0.0.1
@@ -21,25 +21,20 @@ jobs:
       SMOLDER_SAMBA_RPC_PORT: 1446
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
 
       - name: Prepare Samba fixture directories
         run: scripts/prepare-samba-fixture.sh
 
-      - name: Start Samba fixtures
-        run: |
-          docker compose -f docker/samba/compose.yaml up -d samba samba-netbios
-          docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
-
-      - name: Show Samba fixture status
-        run: docker compose -f docker/samba/compose.yaml ps
+      - name: Build and start ready Samba fixtures
+        run: scripts/start-samba-fixture.sh
 
       - name: Run Samba core and tools matrix
         run: scripts/run-interop.sh --samba --core --tools
 
       - name: Stop Samba fixtures
         if: always()
-        run: docker compose -f docker/samba/compose.yaml down -v
+        run: docker compose -f docker/samba/compose.yaml down

@@ -1,7 +1,7 @@
 # smolder-core Public API Notes
 
 This document captures the intended public surface of `smolder-smb-core` as of
-the current `0.3.x` line.
+the current `0.4.x` line.
 
 The broader release/support contract for the workspace lives in
 [support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
@@ -33,7 +33,7 @@ For most users, the supported starting surface is:
 These are the APIs new examples, docs, and downstream integrations should
 prefer.
 
-For the `0.3.x` line, the preferred split is:
+For the `0.4.x` line, the preferred split is:
 
 - use `facade::Client` when you want an embedded SMB client that gets you to an
   authenticated session or tree connection quickly
@@ -47,7 +47,7 @@ For the `0.3.x` line, the preferred split is:
   API while selecting Direct TCP, NetBIOS session service, or QUIC
 - use `srvsvc::SrvsvcClient`, `lsarpc::LsarpcClient`, and `samr::SamrClient`
   when you want typed RPC over `IPC$` without working at the raw PDU level;
-  the stable `0.3.x` examples cover `srvsvc` host/session queries, `lsarpc`
+  the stable `0.4.x` examples cover `srvsvc` host/session queries, `lsarpc`
   policy and name lookup, and `samr` alias/user enumeration
 
 ## Public But Expert-Oriented
@@ -73,7 +73,7 @@ machinery rather than primary API concepts.
 
 ## Compatibility Direction
 
-The current direction for `0.3.x` is:
+The current direction for `0.4.x` is:
 
 - prefer additive changes over signature churn
 - keep `prelude` curated rather than exhaustive
@@ -82,12 +82,12 @@ The current direction for `0.3.x` is:
 
 For Kerberos specifically:
 
-- `kerberos` is the umbrella feature consumers should enable
-- `kerberos-sspi` remains the default password-backed backend
-- `kerberos-gssapi` adds Unix ticket-cache and keytab backends without
-  changing the top-level `KerberosCredentials` / `KerberosAuthenticator` API
-- `kerberos-gssapi` is independent of `kerberos-sspi`, so Unix GSS/Kerberos
-  libraries are only pulled in when that backend is requested explicitly
+- `kerberos` is the target-selecting umbrella feature consumers should enable
+- `kerberos-sspi` is Windows-only and calls the native SSPI Kerberos package
+- `kerberos-gssapi` is Unix-only and uses Smolder's bounded internal GSS wrapper;
+  non-macOS builds support ticket-cache and client-keytab credentials
+- the default feature set enables neither backend, so Unix native GSS linkage is
+  always explicit
 - backend-specific capability expansion should happen behind the stable
   `KerberosCredentials` / `KerberosAuthenticator` surface rather than by
   replacing those top-level types

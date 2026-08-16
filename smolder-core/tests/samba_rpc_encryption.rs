@@ -2,15 +2,14 @@ mod common;
 
 use common::{samba_lock, SambaNtlmConfig};
 use smolder_core::error::CoreError;
-use smolder_core::prelude::{
-    connect_tree, PipeAccess, PipeRpcClient, SrvsvcClient,
-};
+use smolder_core::prelude::{connect_tree, PipeAccess, PipeRpcClient, SrvsvcClient};
 use smolder_proto::smb::smb2::{SessionId, TreeId};
 
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_LEVEL: u32 = 124;
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaNtlmConfig::from_env_with_defaults() else {
@@ -74,11 +73,6 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
             assert_eq!(ipc_info.name, "IPC$");
             assert_eq!(ipc_info.share_type, ipc.share_type);
         }
-        Err(CoreError::InvalidResponse("shi1_remark")) => {
-            eprintln!(
-                "skipping encrypted Samba share enumeration assertion: fixture returned an unsupported shi1_remark layout"
-            );
-        }
         Err(error) => panic!("NetrShareEnum level 1 should succeed over encrypted IPC$: {error:?}"),
     }
 
@@ -91,11 +85,6 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
             assert!(
                 server_info.version_major > 0,
                 "server major version should be populated"
-            );
-        }
-        Err(CoreError::InvalidResponse("sv101_comment")) => {
-            eprintln!(
-                "skipping encrypted Samba server info assertion: fixture returned an unsupported sv101_comment layout"
             );
         }
         Err(error) => {
@@ -126,12 +115,6 @@ async fn calls_netr_remote_tod_over_encrypted_ipc_when_configured() {
         }) => {
             eprintln!(
                 "skipping encrypted Samba server info 103 assertion: fixture returned ERROR_INVALID_LEVEL"
-            );
-        }
-        Err(CoreError::InvalidResponse("sv103_comment"))
-        | Err(CoreError::InvalidResponse("sv103_userpath")) => {
-            eprintln!(
-                "skipping encrypted Samba server info 103 assertion: fixture returned an unsupported sv103 layout"
             );
         }
         Err(error) => {

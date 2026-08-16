@@ -75,7 +75,7 @@ Release notes and published change summaries live in
 
 ## Can I Use This In A Real Project?
 
-Yes, if your usage fits the documented `0.3.x` support surface.
+Yes, if your usage fits the documented `0.4.x` support surface.
 
 The practical promise is:
 
@@ -117,7 +117,11 @@ Implemented now:
 - Live interop coverage against both Tiny11/Windows and local Samba fixtures,
   with a repeatable harness and release gates
 
-Validated now:
+Explicit live-gate coverage (not exercised by ordinary test runs):
+
+The following lanes are represented by ignored live tests and fixture workflows. They count as
+validated for a release only when the corresponding explicitly configured workflow runs green;
+a normal test run reports them as ignored.
 
 - Windows: negotiate, auth, tree connect, file I/O, durable reconnect,
   encrypted share I/O, named pipes, RPC, DFS, Kerberos core auth, Kerberos file
@@ -136,26 +140,27 @@ Current priorities:
 - additional embedders-first polish after the new NetBIOS transport lane
 - SMB1 remains deferred behind the modern SMB2/3 library and tooling work
 
-- Kerberos in `smolder-core` is implemented behind the `kerberos` feature. The
-  current slice covers mechanism-aware SPNEGO, a
-  password-backed Kerberos authenticator that exports the SMB session key,
-  plus a Unix ticket-cache and keytab backend behind `kerberos-gssapi`, and
-  live Samba AD plus Windows domain-member interop in both core and
-  Kerberos-enabled tools workflows, including `smbexec` and `psexec`.
+- Kerberos in `smolder-core` is implemented behind the `kerberos` umbrella
+  feature. It selects the native SSPI backend on Windows and the internal,
+  bounded GSSAPI wrapper on Unix. Both password-backed paths export the SMB
+  session key; Unix additionally supports ticket-cache credentials and
+  non-macOS client keytabs. Live Samba AD plus Windows domain-member interop
+  exists in both core and Kerberos-enabled tools workflows, including
+  `smbexec` and `psexec`.
   The Samba AD fixture and Windows member flow are documented in
   [docs/testing/samba-ad-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-ad-kerberos.md)
   and
   [docs/testing/windows-kerberos.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/windows-kerberos.md).
   The standalone Samba RPC fixture is documented in
   [docs/testing/samba-rpc.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-rpc.md).
-  The default build remains static-friendlier because `kerberos-gssapi`
-  no longer drags in Unix GSS/Kerberos libraries unless it is explicitly
-  enabled.
+  The default build remains static-friendly because it enables no Kerberos
+  backend. On Unix, either `kerberos` or `kerberos-gssapi` intentionally links
+  the platform GSS/Kerberos library; Windows `kerberos` uses the OS SSPI ABI.
 
 - `smolder-core` is in an API-stability and docs phase. The current
   public-surface notes are in
   [docs/reference/smolder-core-api.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/smolder-core-api.md).
-  The formal `0.3.x` support contract is in
+  The formal `0.4.x` support contract is in
   [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
   MSRV and semver rules are in
   [docs/reference/versioning-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/versioning-policy.md).
@@ -231,7 +236,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder --test windows_encryption -- --nocapture
+cargo test -p smolder --test windows_encryption -- --ignored --nocapture
 ```
 
 For encrypted `IPC$` / named-pipe / RPC coverage on Tiny11, enable SMB server
@@ -248,11 +253,19 @@ Then run the core encrypted `IPC$` test:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test windows_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test windows_rpc_encryption -- --ignored --nocapture
 ```
 
-The local Samba fixture now includes an encrypted share named `SMOLDERENC` on
-port `1445`. Run the core encryption interop test with:
+Build the local Samba fixtures and wait for their authenticated SMB/SAMR
+health probes before running live tests:
+
+```bash
+scripts/prepare-samba-fixture.sh
+scripts/start-samba-fixture.sh
+```
+
+The fixture includes an encrypted share named `SMOLDERENC` on port `1445`.
+Run the core encryption interop test with:
 
 ```bash
 SMOLDER_SAMBA_HOST=127.0.0.1 \
@@ -260,7 +273,7 @@ SMOLDER_SAMBA_PORT=1445 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-smb-core --test samba_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_encryption -- --ignored --nocapture
 ```
 
 For encrypted `IPC$` / named-pipe RPC coverage, the local Samba compose stack
@@ -272,7 +285,7 @@ SMOLDER_SAMBA_HOST=127.0.0.1 \
 SMOLDER_SAMBA_PORT=1446 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
-cargo test -p smolder-smb-core --test samba_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_rpc_encryption -- --ignored --nocapture
 ```
 
 ## Live Interop Matrix
@@ -298,7 +311,7 @@ On Apple Silicon, the local UTM-backed Linux path is documented in
 [docs/testing/samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 For merge/release policy, required gate selection, and failure triage, use
 [docs/testing/release.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/release.md).
-For the formal `0.3.x` support scope and guarantees behind those gates, use
+For the formal `0.4.x` support scope and guarantees behind those gates, use
 [docs/reference/support-policy.md](https://github.com/M00NLIG7/smolder/blob/main/docs/reference/support-policy.md).
 
 ## Security Notice

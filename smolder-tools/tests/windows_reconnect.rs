@@ -2,7 +2,7 @@ use smolder_tools::prelude::{DurableOpenOptions, OpenOptions, ResilientHandle};
 use tokio::io::AsyncReadExt;
 
 mod common;
-use common::{WindowsConfig, unique_windows_path};
+use common::{unique_windows_path, WindowsConfig};
 
 fn reconnect_plan() -> Option<(WindowsConfig, smolder_tools::prelude::ShareReconnectPlan)> {
     let Some(config) = WindowsConfig::from_env() else {
@@ -15,6 +15,7 @@ fn reconnect_plan() -> Option<(WindowsConfig, smolder_tools::prelude::ShareRecon
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn reconnect_plan_reopens_durable_handle_on_windows_when_configured() {
     let Some((config, plan)) = reconnect_plan() else {
         return;

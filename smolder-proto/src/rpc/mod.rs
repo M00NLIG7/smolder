@@ -1,7 +1,9 @@
 //! Minimal connection-oriented DCE/RPC primitives used by remote exec flows.
 
+use std::fmt;
+
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut};
 
 use crate::smb::ProtocolError;
 
@@ -161,7 +163,7 @@ impl TryFrom<u8> for AuthLevel {
 }
 
 /// Connection-oriented DCE/RPC authentication verifier appended to a PDU.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthVerifier {
     /// Authentication service identifier.
     pub auth_type: AuthType,
@@ -173,6 +175,19 @@ pub struct AuthVerifier {
     pub auth_context_id: u32,
     /// Authentication token or signature bytes.
     pub auth_value: Vec<u8>,
+}
+
+impl fmt::Debug for AuthVerifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthVerifier")
+            .field("auth_type", &self.auth_type)
+            .field("auth_level", &self.auth_level)
+            .field("auth_reserved", &self.auth_reserved)
+            .field("auth_context_id", &self.auth_context_id)
+            .field("auth_value", &"<redacted authentication token>")
+            .finish()
+    }
 }
 
 impl AuthVerifier {
@@ -546,8 +561,14 @@ impl BindAckPdu {
             "secondary_address_padding",
         )?;
         let num_results = get_u8(&mut body, "num_results")?;
-        let _reserved = get_u8(&mut body, "reserved")?;
-        let _reserved2 = get_u16(&mut body, "reserved2")?;
+        let reserved = get_u8(&mut body, "reserved")?;
+        let reserved2 = get_u16(&mut body, "reserved2")?;
+        if reserved != 0 || reserved2 != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "bind_ack_reserved",
+                reason: "bind acknowledgement reserved fields must be zero",
+            });
+        }
         if num_results != 1 {
             return Err(ProtocolError::InvalidField {
                 field: "num_results",
@@ -557,6 +578,12 @@ impl BindAckPdu {
         let result = get_u16(&mut body, "result")?;
         let reason = get_u16(&mut body, "reason")?;
         let transfer_syntax = SyntaxId::decode(&mut body, "transfer_syntax")?;
+        if !body.is_empty() {
+            return Err(ProtocolError::InvalidField {
+                field: "bind_ack",
+                reason: "bind acknowledgement carried unexpected trailing bytes",
+            });
+        }
         Ok(Self {
             call_id: header.call_id,
             flags: header.flags,
@@ -725,7 +752,7 @@ impl RequestPdu {
             context_id,
             opnum,
             object_uuid,
-            stub_data: body.to_vec(),
+            stub_data: copy_bytes(body, "request_stub_data")?,
             auth_verifier,
         })
     }
@@ -788,14 +815,20 @@ impl ResponsePdu {
         let alloc_hint = get_u32(&mut body, "alloc_hint")?;
         let context_id = get_u16(&mut body, "context_id")?;
         let cancel_count = get_u8(&mut body, "cancel_count")?;
-        let _reserved = get_u8(&mut body, "reserved")?;
+        let reserved = get_u8(&mut body, "reserved")?;
+        if reserved != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "response reserved byte must be zero",
+            });
+        }
         Ok(Self {
             call_id: header.call_id,
             flags: header.flags,
             alloc_hint,
             context_id,
             cancel_count,
-            stub_data: body.to_vec(),
+            stub_data: copy_bytes(body, "response_stub_data")?,
             auth_verifier,
         })
     }
@@ -858,8 +891,14 @@ impl FaultPdu {
         let (mut body, auth_verifier) = split_auth_verifier(body, header.auth_length)?;
         let alloc_hint = get_u32(&mut body, "alloc_hint")?;
         let context_id = get_u16(&mut body, "context_id")?;
-        let _cancel_count = get_u8(&mut body, "cancel_count")?;
-        let _reserved = get_u8(&mut body, "reserved")?;
+        let cancel_count = get_u8(&mut body, "cancel_count")?;
+        let reserved = get_u8(&mut body, "reserved")?;
+        if cancel_count != 0 || reserved != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "fault_control",
+                reason: "fault cancel/reserved bytes must be zero",
+            });
+        }
         let status = get_u32(&mut body, "status")?;
         Ok(Self {
             call_id: header.call_id,
@@ -867,7 +906,7 @@ impl FaultPdu {
             alloc_hint,
             context_id,
             status,
-            stub_data: body.to_vec(),
+            stub_data: copy_bytes(body, "fault_stub_data")?,
             auth_verifier,
         })
     }
@@ -934,10 +973,10 @@ fn append_auth_verifier(body: &mut Vec<u8>, auth_verifier: Option<&AuthVerifier>
     auth_verifier.auth_value.len() as u16
 }
 
-fn split_auth_verifier<'a>(
-    body: &'a [u8],
+fn split_auth_verifier(
+    body: &[u8],
     auth_length: u16,
-) -> Result<(&'a [u8], Option<AuthVerifier>), ProtocolError> {
+) -> Result<(&[u8], Option<AuthVerifier>), ProtocolError> {
     if auth_length == 0 {
         return Ok((body, None));
     }
@@ -962,6 +1001,12 @@ fn split_auth_verifier<'a>(
     let auth_level = AuthLevel::try_from(get_u8(&mut sec_trailer, "auth_level")?)?;
     let auth_pad_length = usize::from(get_u8(&mut sec_trailer, "auth_pad_length")?);
     let auth_reserved = get_u8(&mut sec_trailer, "auth_reserved")?;
+    if auth_reserved != 0 {
+        return Err(ProtocolError::InvalidField {
+            field: "auth_reserved",
+            reason: "authentication verifier reserved byte must be zero",
+        });
+    }
     let auth_context_id = get_u32(&mut sec_trailer, "auth_context_id")?;
 
     if sec_trailer_offset < auth_pad_length {
@@ -972,6 +1017,15 @@ fn split_auth_verifier<'a>(
     }
 
     let body_len = sec_trailer_offset - auth_pad_length;
+    if body[body_len..sec_trailer_offset]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(ProtocolError::InvalidField {
+            field: "auth_padding",
+            reason: "authentication padding must be zero",
+        });
+    }
     if padding_len_to_alignment(body_len, 4) != auth_pad_length {
         return Err(ProtocolError::InvalidField {
             field: "auth_pad_length",
@@ -986,7 +1040,7 @@ fn split_auth_verifier<'a>(
             auth_level,
             auth_reserved,
             auth_context_id,
-            auth_value: body[sec_trailer_offset + SEC_TRAILER_LEN..].to_vec(),
+            auth_value: copy_bytes(&body[sec_trailer_offset + SEC_TRAILER_LEN..], "auth_value")?,
         }),
     ))
 }
@@ -1024,14 +1078,21 @@ fn get_array<const N: usize>(
     Ok(value)
 }
 
+fn copy_bytes(input: &[u8], field: &'static str) -> Result<Vec<u8>, ProtocolError> {
+    let mut remaining = input;
+    get_vec(&mut remaining, input.len(), field)
+}
+
 fn get_vec(input: &mut &[u8], len: usize, field: &'static str) -> Result<Vec<u8>, ProtocolError> {
     if input.remaining() < len {
         return Err(ProtocolError::UnexpectedEof { field });
     }
-    let mut out = BytesMut::with_capacity(len);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| ProtocolError::SizeLimitExceeded { field })?;
     out.extend_from_slice(&input[..len]);
     input.advance(len);
-    Ok(out.to_vec())
+    Ok(out)
 }
 
 fn padding_len(length: usize) -> usize {
@@ -1114,6 +1175,21 @@ mod tests {
         let encoded = packet.encode();
         let decoded = BindPdu::decode(&encoded).expect("bind with auth should decode");
         assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn auth_verifier_debug_redacts_token_bytes() {
+        const SECRET: &str = "AUDIT-SUPER-SECRET";
+        let verifier = AuthVerifier::new(
+            AuthType::WinNt,
+            AuthLevel::PacketIntegrity,
+            7,
+            SECRET.as_bytes().to_vec(),
+        );
+
+        let debug = format!("{verifier:?}");
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("<redacted authentication token>"));
     }
 
     #[test]

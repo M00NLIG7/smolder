@@ -162,6 +162,7 @@ fn peer_encryption_state(state: &EncryptionState) -> EncryptionState {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn writes_compressed_payloads_to_windows_when_negotiated() {
     let _guard = windows_lock().lock().await;
     let Some((config, writes, mut connection)) = authenticated_tree_connection().await else {

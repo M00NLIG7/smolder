@@ -11,7 +11,7 @@ For a tiny standalone binary crate instead of an example target, use
 It focuses on examples that are:
 
 - compile-checked in the workspace
-- aligned with the current `0.3.x` support policy
+- aligned with the current `0.4.x` support policy
 - backed by real interop where possible
 
 The support contract for these examples lives in
@@ -276,8 +276,12 @@ Optional:
 export SMOLDER_KERBEROS_SHARE=share
 export SMOLDER_KERBEROS_TARGET_HOST=files1.lab.example
 export SMOLDER_KERBEROS_REALM=LAB.EXAMPLE
-export SMOLDER_KERBEROS_KDC_URL=tcp://dc1.lab.example:88
 ```
+
+KDC discovery is owned by the native Kerberos provider. On Unix, configure it before starting
+Smolder (for example, point `KRB5_CONFIG` at a private configuration file); on Windows, use the
+machine's SSPI/domain configuration. Smolder intentionally does not mutate process-global
+Kerberos settings.
 
 Run it:
 
@@ -340,22 +344,24 @@ cross build -p smolder-psexecsvc --target aarch64-pc-windows-gnullvm --release -
 The standalone CLI flow for the same interactive path is:
 
 ```bash
-target/debug/smolder psexec smb://127.0.0.1:1445 \
-  --interactive \
-  --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \
-  --username "$SMOLDER_WINDOWS_USERNAME" \
-  --password "$SMOLDER_WINDOWS_PASSWORD"
+printf '%s' "$SMOLDER_WINDOWS_PASSWORD" | \
+  target/debug/smolder psexec smb://127.0.0.1:1445 \
+    --interactive \
+    --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \
+    --username "$SMOLDER_WINDOWS_USERNAME" \
+    --password-stdin
 ```
 
 To start `powershell.exe` directly instead of the default `cmd.exe` shell:
 
 ```bash
-target/debug/smolder psexec smb://127.0.0.1:1445 \
-  --interactive \
-  --command powershell.exe \
-  --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \
-  --username "$SMOLDER_WINDOWS_USERNAME" \
-  --password "$SMOLDER_WINDOWS_PASSWORD"
+printf '%s' "$SMOLDER_WINDOWS_PASSWORD" | \
+  target/debug/smolder psexec smb://127.0.0.1:1445 \
+    --interactive \
+    --command powershell.exe \
+    --service-binary target/aarch64-pc-windows-gnullvm/release/smolder-psexecsvc.exe \
+    --username "$SMOLDER_WINDOWS_USERNAME" \
+    --password-stdin
 ```
 
 ## Scope Notes

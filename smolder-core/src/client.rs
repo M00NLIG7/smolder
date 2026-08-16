@@ -6,24 +6,26 @@
 //! state types exposed by this module are internal session machinery and are
 //! not the intended starting point for new integrations.
 
+use std::fmt;
+
+use rand::random;
 use smolder_proto::smb::smb2::{
-    ChangeNotifyRequest, ChangeNotifyResponse, CloseRequest, CloseResponse, Command,
-    CreateRequest, CreateResponse, EchoRequest, EchoResponse, FileId, FlushRequest,
-    FlushResponse, Header, HeaderFlags, IoctlRequest, IoctlResponse, LockRequest, LockResponse,
-    LogoffRequest, LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse,
-    NetworkInterfaceInfoResponse, QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest,
-    QueryInfoResponse, ReadRequest, ReadResponse, ResumeKeyResponse, SessionId,
-    SessionSetupRequest, SessionSetupResponse, SessionSetupSecurityMode, SetInfoRequest,
-    SetInfoResponse,
-    TreeConnectRequest, TreeConnectResponse, TreeDisconnectRequest, TreeDisconnectResponse,
-    TreeId, WriteRequest, WriteResponse,
+    ChangeNotifyRequest, ChangeNotifyResponse, CloseRequest, CloseResponse, Command, CreateRequest,
+    CreateResponse, EchoRequest, EchoResponse, FileId, FlushRequest, FlushResponse, Header,
+    HeaderFlags, IoctlRequest, IoctlResponse, LockRequest, LockResponse, LogoffRequest,
+    LogoffResponse, MessageId, NegotiateRequest, NegotiateResponse, NetworkInterfaceInfoResponse,
+    QueryDirectoryRequest, QueryDirectoryResponse, QueryInfoRequest, QueryInfoResponse,
+    ReadRequest, ReadResponse, ResumeKeyResponse, SessionId, SessionSetupRequest,
+    SessionSetupResponse, SetInfoRequest, SetInfoResponse, TreeConnectRequest, TreeConnectResponse,
+    TreeDisconnectRequest, TreeDisconnectResponse, TreeId, WriteRequest, WriteResponse,
 };
 use smolder_proto::smb::status::NtStatus;
-use tracing::{Instrument, trace, trace_span};
+use tracing::{trace, trace_span, Instrument};
 
 use crate::auth::AuthProvider;
 use crate::error::CoreError;
-use crate::transport::SmbTransport;
+use crate::policy::{OperationTimeouts, ResourceLimits, SecurityPolicy};
+use crate::transport::{SmbTransport, TransportIdentity};
 
 mod helpers;
 mod state;
@@ -31,21 +33,50 @@ mod state;
 use self::helpers::*;
 use self::state::RequestContext;
 pub use self::state::{
-    Authenticated, CompoundRequest, CompoundResponse, Connected, DurableHandle,
-    DurableOpenOptions, Negotiated, PreauthIntegrityState, ResilientHandle, SigningState,
-    TreeConnected,
+    Authenticated, CompoundRequest, CompoundResponse, Connected, DurableHandle, DurableOpenOptions,
+    Negotiated, PreauthIntegrityState, ResilientHandle, SecretBytes, SigningState, TreeConnected,
 };
 
 /// A typestate SMB connection over an abstract transport.
-#[derive(Debug)]
+///
+/// # Cancellation safety
+///
+/// Every transport write and read has an internal deadline. Once a write can have started, the
+/// connection is marked poisoned until the correlated response has been completely validated.
+/// Dropping/cancelling an in-flight request therefore leaves the connection poisoned; callers must
+/// discard it rather than issue another request that could consume a stale response.
 pub struct Connection<T, State> {
     transport: T,
     next_message_id: u64,
     available_credits: u32,
     state: State,
+    physical_connection_id: [u8; 16],
+    authentication_generation: u64,
+    transport_identity: TransportIdentity,
+    security_policy: SecurityPolicy,
+    resource_limits: ResourceLimits,
+    operation_timeouts: OperationTimeouts,
+    poisoned: bool,
 }
 
-#[derive(Debug)]
+impl<T, State> fmt::Debug for Connection<T, State> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Connection")
+            .field("next_message_id", &self.next_message_id)
+            .field("available_credits", &self.available_credits)
+            .field("physical_connection_id", &self.physical_connection_id)
+            .field("authentication_generation", &self.authentication_generation)
+            .field("transport_identity", &self.transport_identity)
+            .field("security_policy", &self.security_policy)
+            .field("resource_limits", &self.resource_limits)
+            .field("operation_timeouts", &self.operation_timeouts)
+            .field("poisoned", &self.poisoned)
+            .field("state", &std::any::type_name::<State>())
+            .finish_non_exhaustive()
+    }
+}
+
 struct TransactionFrames {
     header: Header,
     request_packet: Vec<u8>,
@@ -63,17 +94,120 @@ impl TransactionFrames {
     }
 }
 
+fn validate_authentication_token_size(
+    token: &[u8],
+    maximum: usize,
+    resource: &'static str,
+) -> Result<(), CoreError> {
+    if token.len() > maximum {
+        return Err(CoreError::ResourceLimit {
+            resource,
+            requested: token.len() as u64,
+            maximum: maximum as u64,
+        });
+    }
+    Ok(())
+}
 
-impl<T> Connection<T, Connected> {
-    /// Creates a new SMB connection over the provided transport.
+fn validate_response_identity(
+    header: &Header,
+    command: Command,
+    context: &RequestContext,
+) -> Result<(), CoreError> {
+    if !header.flags.contains(HeaderFlags::SERVER_TO_REDIR) {
+        return Err(CoreError::InvalidResponse(
+            "SMB response did not set the server-to-client direction flag",
+        ));
+    }
+
+    match command {
+        Command::Negotiate => {
+            if header.session_id != SessionId(0) || header.tree_id != TreeId(0) {
+                return Err(CoreError::InvalidResponse(
+                    "negotiate response used a session or tree identity",
+                ));
+            }
+        }
+        Command::SessionSetup => {
+            if context.session_id != SessionId(0) && header.session_id != context.session_id {
+                return Err(CoreError::InvalidResponse(
+                    "session setup response did not match the active session identity",
+                ));
+            }
+            if !header.flags.contains(HeaderFlags::ASYNC_COMMAND) && header.tree_id != TreeId(0) {
+                return Err(CoreError::InvalidResponse(
+                    "session setup response used an unexpected tree identity",
+                ));
+            }
+        }
+        Command::TreeConnect => {
+            if header.session_id != context.session_id {
+                return Err(CoreError::InvalidResponse(
+                    "tree connect response did not match the active session identity",
+                ));
+            }
+        }
+        _ => {
+            if header.session_id != context.session_id {
+                return Err(CoreError::InvalidResponse(
+                    "SMB response did not match the active session identity",
+                ));
+            }
+            if !header.flags.contains(HeaderFlags::ASYNC_COMMAND)
+                && header.tree_id != context.tree_id
+            {
+                return Err(CoreError::InvalidResponse(
+                    "SMB response did not match the active tree identity",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+impl<T> Connection<T, Connected>
+where
+    T: SmbTransport,
+{
+    /// Creates a new SMB connection over the provided physical transport.
     #[must_use]
     pub fn new(transport: T) -> Self {
+        let transport_identity = transport.transport_identity();
         Self {
             transport,
             next_message_id: 0,
             available_credits: 1,
             state: Connected,
+            physical_connection_id: random(),
+            authentication_generation: 0,
+            transport_identity,
+            security_policy: SecurityPolicy::default(),
+            resource_limits: ResourceLimits::default(),
+            operation_timeouts: OperationTimeouts::default(),
+            poisoned: false,
         }
+    }
+
+    /// Replaces the local security policy enforced during negotiation and authentication.
+    #[must_use]
+    pub fn with_security_policy(mut self, security_policy: SecurityPolicy) -> Self {
+        self.security_policy = security_policy;
+        self
+    }
+
+    /// Replaces explicit limits for remote-controlled sizes and counts.
+    #[must_use]
+    pub fn with_resource_limits(mut self, resource_limits: ResourceLimits) -> Self {
+        self.resource_limits = resource_limits;
+        self
+    }
+
+    /// Replaces internal connect/request deadline policy for this connection.
+    #[must_use]
+    pub fn with_operation_timeouts(mut self, operation_timeouts: OperationTimeouts) -> Self {
+        self.operation_timeouts = operation_timeouts;
+        self
     }
 }
 
@@ -84,7 +218,60 @@ impl<T, State> Connection<T, State> {
         &self.state
     }
 
+    /// Returns whether cancellation or an I/O/protocol failure made this connection unusable.
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// Explicitly invalidates this physical connection so no later SMB request can reuse it.
+    ///
+    /// Higher-level wrappers use this when synchronous destruction cannot perform an asynchronous
+    /// remote-handle close. The transport must then be discarded rather than returned to a pool.
+    pub fn invalidate(&mut self) {
+        self.poisoned = true;
+    }
+
+    /// Returns the identifier unique to this physical connection.
+    #[must_use]
+    pub fn physical_connection_id(&self) -> [u8; 16] {
+        self.physical_connection_id
+    }
+
+    /// Returns the active authentication generation (`0` before authentication).
+    #[must_use]
+    pub fn authentication_generation(&self) -> u64 {
+        self.authentication_generation
+    }
+
+    /// Returns the trusted physical-transport identity.
+    #[must_use]
+    pub fn transport_identity(&self) -> TransportIdentity {
+        self.transport_identity
+    }
+
+    /// Returns the configured local security policy.
+    #[must_use]
+    pub fn security_policy(&self) -> SecurityPolicy {
+        self.security_policy
+    }
+
+    /// Returns configured resource limits.
+    #[must_use]
+    pub fn resource_limits(&self) -> ResourceLimits {
+        self.resource_limits
+    }
+
+    /// Returns configured operation deadlines.
+    #[must_use]
+    pub fn operation_timeouts(&self) -> OperationTimeouts {
+        self.operation_timeouts
+    }
+
     /// Consumes the connection and returns the inner transport.
+    ///
+    /// A transport extracted from a poisoned connection must be closed/discarded, not reused for
+    /// SMB framing, because it may contain a partial request or unread response.
     #[must_use]
     pub fn into_transport(self) -> T {
         self.transport
@@ -100,6 +287,7 @@ where
         mut self,
         request: &NegotiateRequest,
     ) -> Result<Connection<T, Negotiated>, CoreError> {
+        validate_negotiate_offer(request, self.transport_identity, self.security_policy)?;
         let transaction = self
             .transact_framed(
                 Command::Negotiate,
@@ -109,6 +297,12 @@ where
             )
             .await?;
         let response = NegotiateResponse::decode(transaction.body())?;
+        let selections = validate_negotiate_selection(
+            request,
+            &response,
+            self.transport_identity,
+            self.security_policy,
+        )?;
         let preauth_integrity = negotiate_preauth_integrity_state(
             request,
             &response,
@@ -128,11 +322,23 @@ where
             next_message_id: self.next_message_id,
             available_credits: self.available_credits,
             state: Negotiated {
+                offer: request.clone(),
                 response,
+                transport_identity: self.transport_identity,
+                selected_cipher: selections.cipher,
+                transport_security_accepted: selections.transport_security_accepted,
+                physical_connection_id: self.physical_connection_id,
                 client_signing_mode: request.security_mode,
                 preauth_integrity,
                 compression,
             },
+            physical_connection_id: self.physical_connection_id,
+            authentication_generation: self.authentication_generation,
+            transport_identity: self.transport_identity,
+            security_policy: self.security_policy,
+            resource_limits: self.resource_limits,
+            operation_timeouts: self.operation_timeouts,
+            poisoned: self.poisoned,
         })
     }
 }
@@ -150,12 +356,17 @@ where
         A: AuthProvider,
     {
         let client_signing_mode = self.state.client_signing_mode;
-        let mut preauth_integrity = self.state.preauth_integrity.take();
+        let mut preauth_integrity = self.state.preauth_integrity.clone();
         let security_mode = session_setup_security_mode(client_signing_mode);
         let mut session_id = SessionId(0);
         let mut next_token = auth_provider.initial_token(&self.state.response)?;
 
         loop {
+            validate_authentication_token_size(
+                &next_token,
+                self.resource_limits.max_authentication_token_size,
+                "outbound authentication token",
+            )?;
             let request = SessionSetupRequest {
                 flags: 0,
                 security_mode,
@@ -177,6 +388,11 @@ where
                 )
                 .await?;
             let response = SessionSetupResponse::decode(transaction.body())?;
+            validate_authentication_token_size(
+                &response.security_buffer,
+                self.resource_limits.max_authentication_token_size,
+                "inbound authentication token",
+            )?;
             let header = transaction.header;
             let success = header.status == NtStatus::SUCCESS.to_u32();
             update_session_setup_preauth(
@@ -199,17 +415,41 @@ where
 
             session_id = header.session_id;
             if success {
-                let raw_response_session_key = auth_provider.session_key().map(ToOwned::to_owned);
-                let response_session_key =
-                    derive_smb_session_key(raw_response_session_key.as_deref());
+                // The final token can establish the mechanism key (notably for Kerberos), so it
+                // must be consumed before SMB 3.1.1 proof verification and typestate promotion.
+                auth_provider.finish(&response.security_buffer)?;
+                let raw_session_key = match auth_provider.session_key() {
+                    Some(key) => {
+                        if key.is_empty() {
+                            return Err(CoreError::InvalidResponse(
+                                "authentication provider returned an empty session key",
+                            ));
+                        }
+                        if key.len() > self.resource_limits.max_authentication_key_size {
+                            return Err(CoreError::ResourceLimit {
+                                resource: "authentication session key",
+                                requested: key.len() as u64,
+                                maximum: self.resource_limits.max_authentication_key_size as u64,
+                            });
+                        }
+                        Some(SecretBytes::new(crate::bounded::copy_bytes(
+                            key,
+                            "authentication session key",
+                        )?))
+                    }
+                    None => None,
+                };
+                let session_key =
+                    derive_smb_session_key(raw_session_key.as_deref())?.map(SecretBytes::new);
                 let signing_required = session_signing_required(
                     client_signing_mode,
                     self.state.response.security_mode,
                     response.session_flags,
-                );
-                let response_signing = derive_signing_state(
+                    self.security_policy,
+                )?;
+                let signing = derive_signing_state(
                     self.state.response.dialect_revision,
-                    response_session_key.as_deref(),
+                    session_key.as_deref(),
                     preauth_integrity.as_ref(),
                 )?;
                 verify_final_session_setup_response(
@@ -217,44 +457,79 @@ where
                     &header,
                     &transaction.response_packet,
                     signing_required,
-                    response_signing.as_deref(),
+                    signing.as_deref(),
                 )?;
-                auth_provider.finish(&response.security_buffer)?;
-                let raw_session_key = auth_provider.session_key().map(ToOwned::to_owned);
-                let session_key = derive_smb_session_key(raw_session_key.as_deref());
-                let signing = derive_signing_state(
-                    self.state.response.dialect_revision,
-                    session_key.as_deref(),
-                    preauth_integrity.as_ref(),
-                )?;
+                let encryption_required = session_encryption_required(
+                    self.state.transport_security_accepted,
+                    response.session_flags,
+                    self.security_policy,
+                );
                 let encryption = derive_encryption_state(
-                    &self.state.response,
+                    self.state.response.dialect_revision,
+                    self.state.selected_cipher,
+                    self.state.transport_security_accepted,
                     raw_session_key.as_deref(),
                     preauth_integrity.as_ref(),
+                )?;
+                if signing_required && signing.is_none() {
+                    return Err(CoreError::InvalidResponse(
+                        "authenticated session requires signing but no signing key was established",
+                    ));
+                }
+                if encryption_required && encryption.is_none() {
+                    return Err(CoreError::InvalidResponse(
+                        "authenticated session requires SMB encryption but no encryption key was established",
+                    ));
+                }
+                // Key derivation and final-signature verification use the transcript immediately
+                // before the successful response. Once verified, retain the complete transcript
+                // (including that response) in this authentication generation.
+                if let Some(transcript) = preauth_integrity.as_mut() {
+                    transcript.update(&transaction.response_packet)?;
+                }
+                let next_generation = self.authentication_generation.checked_add(1).ok_or(
+                    CoreError::InvalidInput("authentication generation counter exhausted"),
                 )?;
                 let Connection {
                     transport,
                     next_message_id,
                     available_credits,
                     state,
+                    physical_connection_id,
+                    authentication_generation: _,
+                    transport_identity,
+                    security_policy,
+                    resource_limits,
+                    operation_timeouts,
+                    poisoned,
                 } = self;
                 let Negotiated {
+                    offer,
                     response: negotiated,
+                    transport_identity: negotiated_transport_identity,
+                    selected_cipher,
+                    transport_security_accepted,
+                    physical_connection_id: negotiated_connection_id,
                     client_signing_mode,
+                    preauth_integrity: negotiate_preauth_integrity,
                     compression,
-                    ..
                 } = state;
-                let encryption_required =
-                    session_encryption_required(&negotiated, response.session_flags)?;
                 return Ok(Connection {
                     transport,
                     next_message_id,
                     available_credits,
                     state: Authenticated {
+                        offer,
                         negotiated,
+                        transport_identity: negotiated_transport_identity,
+                        selected_cipher,
+                        transport_security_accepted,
+                        physical_connection_id: negotiated_connection_id,
+                        authentication_generation: next_generation,
                         client_signing_mode,
                         session: response,
                         session_id,
+                        negotiate_preauth_integrity,
                         preauth_integrity,
                         session_key,
                         signing_required,
@@ -263,6 +538,13 @@ where
                         encryption,
                         compression,
                     },
+                    physical_connection_id,
+                    authentication_generation: next_generation,
+                    transport_identity,
+                    security_policy,
+                    resource_limits,
+                    operation_timeouts,
+                    poisoned,
                 });
             }
 
@@ -270,85 +552,18 @@ where
         }
     }
 
-    /// Performs `SESSION_SETUP` and transitions into the authenticated state.
+    /// Rejects raw `SESSION_SETUP` promotion without an authentication provider.
+    ///
+    /// A raw token exchange cannot prove that the final mechanism token was accepted or expose the
+    /// derived key needed to verify the final SMB signature. Use [`Connection::authenticate`],
+    /// which performs both checks before constructing [`Authenticated`].
     pub async fn session_setup(
-        mut self,
-        request: &SessionSetupRequest,
+        self,
+        _request: &SessionSetupRequest,
     ) -> Result<Connection<T, Authenticated>, CoreError> {
-        let client_signing_mode = self.state.client_signing_mode;
-        let mut preauth_integrity = self.state.preauth_integrity.take();
-        let transaction = self
-            .transact_framed(
-                Command::SessionSetup,
-                request.encode(),
-                RequestContext::unsigned(SessionId(0), TreeId(0))
-                    .with_compression(self.state.compression.clone()),
-                &[0],
-            )
-            .await?;
-        let response = SessionSetupResponse::decode(transaction.body())?;
-        let header = transaction.header;
-        let success = header.status == NtStatus::SUCCESS.to_u32();
-        update_session_setup_preauth(
-            &mut preauth_integrity,
-            &transaction.request_packet,
-            &transaction.response_packet,
-            success,
-        )?;
-
-        if header.session_id == SessionId(0) {
-            return Err(CoreError::InvalidResponse(
-                "session setup response must assign a session id",
-            ));
-        }
-        verify_final_session_setup_response(
-            self.state.response.dialect_revision,
-            &header,
-            &transaction.response_packet,
-            request
-                .security_mode
-                .contains(SessionSetupSecurityMode::SIGNING_REQUIRED),
-            None,
-        )?;
-        let signing_required = session_signing_required(
-            client_signing_mode,
-            self.state.response.security_mode,
-            response.session_flags,
-        );
-        let encryption =
-            derive_encryption_state(&self.state.response, None, preauth_integrity.as_ref())?;
-        let Connection {
-            transport,
-            next_message_id,
-            available_credits,
-            state,
-        } = self;
-        let Negotiated {
-            response: negotiated,
-            client_signing_mode,
-            compression,
-            ..
-        } = state;
-        let encryption_required = session_encryption_required(&negotiated, response.session_flags)?;
-
-        Ok(Connection {
-            transport,
-            next_message_id,
-            available_credits,
-            state: Authenticated {
-                negotiated,
-                client_signing_mode,
-                session: response,
-                session_id: header.session_id,
-                preauth_integrity,
-                session_key: None,
-                signing_required,
-                signing: None,
-                encryption_required,
-                encryption,
-                compression,
-            },
-        })
+        Err(CoreError::InvalidInput(
+            "raw session setup cannot construct authenticated typestate; use authenticate",
+        ))
     }
 }
 
@@ -409,11 +624,23 @@ where
             next_message_id,
             available_credits,
             state,
+            physical_connection_id,
+            authentication_generation,
+            transport_identity,
+            security_policy,
+            resource_limits,
+            operation_timeouts,
+            poisoned,
         } = self;
         let Authenticated {
+            offer,
             negotiated: response,
+            transport_identity: negotiated_transport_identity,
+            selected_cipher,
+            transport_security_accepted,
+            physical_connection_id: negotiated_connection_id,
             client_signing_mode,
-            preauth_integrity,
+            negotiate_preauth_integrity,
             compression,
             ..
         } = state;
@@ -423,11 +650,23 @@ where
             next_message_id,
             available_credits,
             state: Negotiated {
+                offer,
                 response,
+                transport_identity: negotiated_transport_identity,
+                selected_cipher,
+                transport_security_accepted,
+                physical_connection_id: negotiated_connection_id,
                 client_signing_mode,
-                preauth_integrity,
+                preauth_integrity: negotiate_preauth_integrity,
                 compression,
             },
+            physical_connection_id,
+            authentication_generation,
+            transport_identity,
+            security_policy,
+            resource_limits,
+            operation_timeouts,
+            poisoned,
         })
     }
 
@@ -457,12 +696,26 @@ where
             next_message_id,
             available_credits,
             state,
+            physical_connection_id,
+            authentication_generation,
+            transport_identity,
+            security_policy,
+            resource_limits,
+            operation_timeouts,
+            poisoned,
         } = self;
         let Authenticated {
+            offer,
             negotiated,
+            transport_identity: negotiated_transport_identity,
+            selected_cipher,
+            transport_security_accepted,
+            physical_connection_id: negotiated_connection_id,
+            authentication_generation: state_authentication_generation,
             client_signing_mode,
             session,
             session_id,
+            negotiate_preauth_integrity,
             preauth_integrity,
             session_key,
             signing_required,
@@ -471,20 +724,31 @@ where
             encryption,
             compression,
         } = state;
-        let encryption_required =
-            tree_encryption_required(&negotiated, session.session_flags, response.share_flags)?;
+        let encryption_required = tree_encryption_required(
+            transport_security_accepted,
+            session.session_flags,
+            response.share_flags,
+            security_policy,
+        );
 
         Ok(Connection {
             transport,
             next_message_id,
             available_credits,
             state: TreeConnected {
+                offer,
                 negotiated,
+                transport_identity: negotiated_transport_identity,
+                selected_cipher,
+                transport_security_accepted,
+                physical_connection_id: negotiated_connection_id,
+                authentication_generation: state_authentication_generation,
                 client_signing_mode,
                 session,
                 tree: response,
                 session_id,
                 tree_id: header.tree_id,
+                negotiate_preauth_integrity,
                 preauth_integrity,
                 session_key,
                 signing_required,
@@ -493,6 +757,13 @@ where
                 encryption,
                 compression,
             },
+            physical_connection_id,
+            authentication_generation,
+            transport_identity,
+            security_policy,
+            resource_limits,
+            operation_timeouts,
+            poisoned,
         })
     }
 }
@@ -527,12 +798,26 @@ where
             next_message_id,
             available_credits,
             state,
+            physical_connection_id,
+            authentication_generation,
+            transport_identity,
+            security_policy,
+            resource_limits,
+            operation_timeouts,
+            poisoned,
         } = self;
         let TreeConnected {
+            offer,
             negotiated,
+            transport_identity: negotiated_transport_identity,
+            selected_cipher,
+            transport_security_accepted,
+            physical_connection_id: negotiated_connection_id,
+            authentication_generation: state_authentication_generation,
             client_signing_mode,
             session,
             session_id,
+            negotiate_preauth_integrity,
             preauth_integrity,
             session_key,
             signing_required,
@@ -541,17 +826,28 @@ where
             compression,
             ..
         } = state;
-        let encryption_required = session_encryption_required(&negotiated, session.session_flags)?;
+        let encryption_required = session_encryption_required(
+            transport_security_accepted,
+            session.session_flags,
+            security_policy,
+        );
 
         Ok(Connection {
             transport,
             next_message_id,
             available_credits,
             state: Authenticated {
+                offer,
                 negotiated,
+                transport_identity: negotiated_transport_identity,
+                selected_cipher,
+                transport_security_accepted,
+                physical_connection_id: negotiated_connection_id,
+                authentication_generation: state_authentication_generation,
                 client_signing_mode,
                 session,
                 session_id,
+                negotiate_preauth_integrity,
                 preauth_integrity,
                 session_key,
                 signing_required,
@@ -560,6 +856,13 @@ where
                 encryption,
                 compression,
             },
+            physical_connection_id,
+            authentication_generation,
+            transport_identity,
+            security_policy,
+            resource_limits,
+            operation_timeouts,
+            poisoned,
         })
     }
 
@@ -587,12 +890,19 @@ where
         let durable_request =
             durable_create_request(self.state.negotiated.dialect_revision, request, &options)?;
         let response = self.create(&durable_request).await?;
-        build_durable_handle(
+        let file_id = response.file_id;
+        match build_durable_handle(
             self.state.negotiated.dialect_revision,
             request,
             response,
             &options,
-        )
+        ) {
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                let _ = self.close(&CloseRequest { flags: 0, file_id }).await;
+                Err(error)
+            }
+        }
     }
 
     /// Replays a previously captured durable open against the current session/tree.
@@ -613,7 +923,14 @@ where
     ) -> Result<(DurableHandle, Option<ResilientHandle>), CoreError> {
         let reopened = self.reconnect_durable(handle).await?;
         if let Some(timeout) = handle.resilient_timeout() {
-            let resilient = self.request_resiliency(reopened.file_id(), timeout).await?;
+            let file_id = reopened.file_id();
+            let resilient = match self.request_resiliency(file_id, timeout).await {
+                Ok(resilient) => resilient,
+                Err(error) => {
+                    let _ = self.close(&CloseRequest { flags: 0, file_id }).await;
+                    return Err(error);
+                }
+            };
             return Ok((reopened.with_resilient_timeout(timeout), Some(resilient)));
         }
         Ok((reopened, None))
@@ -691,6 +1008,11 @@ where
                 ReadResponse::decode,
             )
             .await?;
+        if response.data.len() > request.length as usize {
+            return Err(CoreError::InvalidResponse(
+                "SMB read response exceeded the requested byte count",
+            ));
+        }
         Ok(response)
     }
 
@@ -706,6 +1028,11 @@ where
                 WriteResponse::decode,
             )
             .await?;
+        if response.count as usize > request.data.len() {
+            return Err(CoreError::InvalidResponse(
+                "SMB write response exceeded the requested byte count",
+            ));
+        }
         Ok(response)
     }
 
@@ -862,12 +1189,43 @@ where
         requests: &[CompoundRequest],
         context: RequestContext,
     ) -> Result<Vec<CompoundResponse>, CoreError> {
+        if self.poisoned {
+            return Err(CoreError::ConnectionPoisoned);
+        }
         let request_packets = self.build_compound_request_packets(requests, &context)?;
-        let payload = request_packets
-            .iter()
-            .flat_map(|packet| packet.iter().copied())
-            .collect::<Vec<_>>();
+        let payload_len = request_packets.iter().try_fold(0usize, |total, packet| {
+            total
+                .checked_add(packet.len())
+                .ok_or(CoreError::InvalidInput(
+                    "compound SMB request size overflowed",
+                ))
+        })?;
+        if payload_len > self.resource_limits.max_transport_message {
+            return Err(CoreError::ResourceLimit {
+                resource: "compound SMB request",
+                requested: payload_len as u64,
+                maximum: self.resource_limits.max_transport_message as u64,
+            });
+        }
+        let mut payload = Vec::new();
+        payload
+            .try_reserve_exact(payload_len)
+            .map_err(|_| CoreError::AllocationFailed("compound SMB request"))?;
+        for packet in &request_packets {
+            payload.extend_from_slice(packet);
+        }
         let message = encode_transport_payload(&payload, &context)?;
+        if message.len() > self.resource_limits.max_transport_message {
+            return Err(CoreError::ResourceLimit {
+                resource: "compound SMB request",
+                requested: message.len() as u64,
+                maximum: self.resource_limits.max_transport_message as u64,
+            });
+        }
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.operation_timeouts.request)
+            .ok_or(CoreError::InvalidInput("SMB request deadline overflowed"))?;
+        self.commit_message_ids(requests.len())?;
         let first_command = requests[0].command;
         let last_command = requests[requests.len() - 1].command;
 
@@ -877,28 +1235,44 @@ where
             request_count = requests.len(),
             "sending compound smb request"
         );
-        self.transport
-            .send_message(&message)
-            .instrument(trace_span!(
-                "smb_send_compound",
-                first_command = ?first_command,
-                last_command = ?last_command,
-                request_count = requests.len()
-            ))
-            .await?;
+        self.poisoned = true;
+        tokio::time::timeout_at(
+            deadline,
+            self.transport
+                .send_message(&message)
+                .instrument(trace_span!(
+                    "smb_send_compound",
+                    first_command = ?first_command,
+                    last_command = ?last_command,
+                    request_count = requests.len()
+                )),
+        )
+        .await
+        .map_err(|_| CoreError::Timeout("compound SMB request write"))??;
 
-        let response_message = self
-            .transport
-            .recv_message()
-            .instrument(trace_span!(
+        let response_message = tokio::time::timeout_at(
+            deadline,
+            self.transport.recv_message().instrument(trace_span!(
                 "smb_recv_compound",
                 first_command = ?first_command,
                 last_command = ?last_command,
                 request_count = requests.len()
-            ))
-            .await?;
-        let (response_payload, encrypted_response) =
-            decode_transport_payload(&response_message, &context)?;
+            )),
+        )
+        .await
+        .map_err(|_| CoreError::Timeout("compound SMB response read"))??;
+        if response_message.len() > self.resource_limits.max_transport_message {
+            return Err(CoreError::ResourceLimit {
+                resource: "SMB transport message",
+                requested: response_message.len() as u64,
+                maximum: self.resource_limits.max_transport_message as u64,
+            });
+        }
+        let (response_payload, encrypted_response) = decode_transport_payload(
+            &response_message,
+            &context,
+            self.resource_limits.max_transport_message,
+        )?;
         let response_packets = split_compound_packets(&response_payload)?;
         if response_packets.len() != requests.len() {
             return Err(CoreError::InvalidResponse(
@@ -906,8 +1280,12 @@ where
             ));
         }
 
-        let mut responses = Vec::with_capacity(requests.len());
+        let mut responses = Vec::new();
+        responses
+            .try_reserve_exact(requests.len())
+            .map_err(|_| CoreError::AllocationFailed("compound SMB responses"))?;
         let mut granted_credits = 0u32;
+        let mut unexpected_status = None;
         for ((request, request_packet), response_packet) in requests
             .iter()
             .zip(request_packets.iter())
@@ -915,6 +1293,9 @@ where
         {
             let request_header = Header::decode(&request_packet[..Header::LEN])?;
             let response_header = Header::decode(&response_packet[..Header::LEN])?;
+            validate_response_identity(&response_header, request.command, &context)?;
+            // MS-SMB2 requires clients to ignore CreditCharge in responses. Credit grants are
+            // accounted independently through CreditRequestResponse below.
             if response_header.command != request.command {
                 return Err(CoreError::UnexpectedCommand {
                     expected: request.command,
@@ -936,23 +1317,34 @@ where
             if !encrypted_response {
                 verify_response_signature(&response_header, response_packet, &context)?;
             }
-            if !request.accepted_statuses.contains(&response_header.status) {
-                return Err(CoreError::UnexpectedStatus {
-                    command: request.command,
-                    status: response_header.status,
-                });
+            if !request.accepted_statuses.contains(&response_header.status)
+                && unexpected_status.is_none()
+            {
+                // Keep validating every element before allowing connection reuse. A server must not
+                // be able to mask a mismatched identity, message id, signature, or credit grant in
+                // a later compound element by returning an earlier terminal status.
+                unexpected_status = Some((request.command, response_header.status));
             }
             granted_credits = granted_credits
                 .checked_add(u32::from(response_header.credit_request_response))
                 .ok_or(CoreError::InvalidResponse(
                     "server granted too many SMB credits",
                 ))?;
+            let response_body = &response_packet[Header::LEN..];
+            let mut body = Vec::new();
+            body.try_reserve_exact(response_body.len())
+                .map_err(|_| CoreError::AllocationFailed("compound SMB response body"))?;
+            body.extend_from_slice(response_body);
             responses.push(CompoundResponse {
                 header: response_header,
-                body: response_packet[Header::LEN..].to_vec(),
+                body,
             });
         }
         self.apply_credit_grant(granted_credits)?;
+        self.poisoned = false;
+        if let Some((command, status)) = unexpected_status {
+            return Err(CoreError::UnexpectedStatus { command, status });
+        }
         Ok(responses)
     }
 
@@ -998,6 +1390,9 @@ where
         context: RequestContext,
         accepted_statuses: &[u32],
     ) -> Result<TransactionFrames, CoreError> {
+        if self.poisoned {
+            return Err(CoreError::ConnectionPoisoned);
+        }
         if context.should_encrypt() && context.encryption.is_none() {
             return Err(CoreError::InvalidInput(
                 "session requires encryption but no encryption key is available",
@@ -1027,24 +1422,61 @@ where
         {
             signing.sign_packet(&mut packet)?;
         }
+        if packet.len() > self.resource_limits.max_transport_message {
+            return Err(CoreError::ResourceLimit {
+                resource: "SMB request message",
+                requested: packet.len() as u64,
+                maximum: self.resource_limits.max_transport_message as u64,
+            });
+        }
         let message = encode_transport_payload(&packet, &context)?;
+        if message.len() > self.resource_limits.max_transport_message {
+            return Err(CoreError::ResourceLimit {
+                resource: "SMB request message",
+                requested: message.len() as u64,
+                maximum: self.resource_limits.max_transport_message as u64,
+            });
+        }
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.operation_timeouts.request)
+            .ok_or(CoreError::InvalidInput("SMB request deadline overflowed"))?;
         self.commit_message_ids(1)?;
-
+        // From this point onward cancellation can leave a partial write or unread response.
+        self.poisoned = true;
         trace!(?command, message_id = message_id.0, "sending smb request");
-        self.transport
-            .send_message(&message)
-            .instrument(trace_span!("smb_send", ?command, message_id = message_id.0))
-            .await?;
+        tokio::time::timeout_at(
+            deadline,
+            self.transport
+                .send_message(&message)
+                .instrument(trace_span!("smb_send", ?command, message_id = message_id.0)),
+        )
+        .await
+        .map_err(|_| CoreError::Timeout("SMB request write"))??;
 
         let mut pending_async_id = None;
         loop {
-            let response_message = self
-                .transport
-                .recv_message()
-                .instrument(trace_span!("smb_recv", ?command, message_id = message_id.0))
-                .await?;
-            let (response_payload, encrypted_response) =
-                decode_transport_payload(&response_message, &context)?;
+            let response_message = tokio::time::timeout_at(
+                deadline,
+                self.transport.recv_message().instrument(trace_span!(
+                    "smb_recv",
+                    ?command,
+                    message_id = message_id.0
+                )),
+            )
+            .await
+            .map_err(|_| CoreError::Timeout("SMB response read"))??;
+            if response_message.len() > self.resource_limits.max_transport_message {
+                return Err(CoreError::ResourceLimit {
+                    resource: "SMB transport message",
+                    requested: response_message.len() as u64,
+                    maximum: self.resource_limits.max_transport_message as u64,
+                });
+            }
+            let (response_payload, encrypted_response) = decode_transport_payload(
+                &response_message,
+                &context,
+                self.resource_limits.max_transport_message,
+            )?;
             if response_payload.len() < Header::LEN {
                 return Err(CoreError::InvalidResponse(
                     "response shorter than SMB2 header",
@@ -1052,6 +1484,9 @@ where
             }
 
             let response_header = Header::decode(&response_payload[..Header::LEN])?;
+            validate_response_identity(&response_header, command, &context)?;
+            // CreditCharge is server advisory data in a response and MUST be ignored by clients;
+            // the grant in CreditRequestResponse remains independently validated and applied.
             if response_header.command != command {
                 return Err(CoreError::UnexpectedCommand {
                     expected: command,
@@ -1063,9 +1498,17 @@ where
                     "response message id did not match the request",
                 ));
             }
+            if command != Command::SessionSetup && !encrypted_response {
+                verify_response_signature(&response_header, &response_payload, &context)?;
+            }
 
             if response_header.status == NtStatus::PENDING.to_u32() {
                 let async_id = validate_pending_response(&response_header)?;
+                if pending_async_id.is_some_and(|active| active != async_id) {
+                    return Err(CoreError::InvalidResponse(
+                        "interim async response changed the active async id",
+                    ));
+                }
                 self.apply_credit_grant(u32::from(response_header.credit_request_response))?;
                 pending_async_id = Some(async_id);
                 trace!(
@@ -1079,12 +1522,16 @@ where
 
             if let Some(async_id) = pending_async_id {
                 validate_async_final_response(&response_header, async_id)?;
+            } else if response_header.flags.contains(HeaderFlags::ASYNC_COMMAND) {
+                return Err(CoreError::InvalidResponse(
+                    "final async response had no correlated interim response",
+                ));
             }
 
-            if command != Command::SessionSetup && !encrypted_response {
-                verify_response_signature(&response_header, &response_payload, &context)?;
-            }
             self.apply_credit_grant(u32::from(response_header.credit_request_response))?;
+            // The complete correlated response is drained and validated; later body/status errors
+            // cannot make the next request consume stale framing.
+            self.poisoned = false;
             if !accepted_statuses.contains(&response_header.status) {
                 return Err(CoreError::UnexpectedStatus {
                     command,
@@ -1103,10 +1550,20 @@ where
     fn preview_message_ids(&self, count: usize) -> Result<Vec<MessageId>, CoreError> {
         let count = self.validate_request_count(count)?;
         let start = self.next_message_id;
-
-        Ok((0..count)
-            .map(|offset| MessageId(start + u64::from(offset)))
-            .collect())
+        let mut message_ids = Vec::new();
+        message_ids
+            .try_reserve_exact(count as usize)
+            .map_err(|_| CoreError::AllocationFailed("SMB message id reservation"))?;
+        for offset in 0..count {
+            let message_id =
+                start
+                    .checked_add(u64::from(offset))
+                    .ok_or(CoreError::InvalidInput(
+                        "message id space exhausted for SMB request dispatch",
+                    ))?;
+            message_ids.push(MessageId(message_id));
+        }
+        Ok(message_ids)
     }
 
     fn commit_message_ids(&mut self, count: usize) -> Result<(), CoreError> {
@@ -1139,12 +1596,20 @@ where
     }
 
     fn apply_credit_grant(&mut self, granted: u32) -> Result<(), CoreError> {
-        self.available_credits =
+        let available =
             self.available_credits
                 .checked_add(granted)
                 .ok_or(CoreError::InvalidResponse(
                     "server granted too many SMB credits",
                 ))?;
+        if available > self.resource_limits.max_credits {
+            return Err(CoreError::ResourceLimit {
+                resource: "SMB credits",
+                requested: u64::from(available),
+                maximum: u64::from(self.resource_limits.max_credits),
+            });
+        }
+        self.available_credits = available;
         Ok(())
     }
 
@@ -1212,7 +1677,9 @@ where
             let packet_len = if index + 1 == requests.len() {
                 base_len
             } else {
-                align_to_8(base_len)
+                align_to_8(base_len).ok_or(CoreError::InvalidInput(
+                    "compound request alignment overflowed",
+                ))?
             };
             if index + 1 < requests.len() {
                 header.next_command = u32::try_from(packet_len).map_err(|_| {
@@ -1236,7 +1703,6 @@ where
             }
             packets.push(packet);
         }
-        self.commit_message_ids(requests.len())?;
 
         Ok(packets)
     }
@@ -1248,10 +1714,12 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
+    use tokio::sync::Notify;
+
     use async_trait::async_trait;
     use smolder_proto::smb::compression::{
-        COMPRESSION_TRANSFORM_PROTOCOL_ID, CompressionAlgorithm, CompressionCapabilityFlags,
-        CompressionFlags, CompressionTransformHeader,
+        CompressionAlgorithm, CompressionCapabilityFlags, CompressionFlags,
+        CompressionTransformHeader, COMPRESSION_TRANSFORM_PROTOCOL_ID,
     };
     use smolder_proto::smb::netbios::SessionMessage;
     use smolder_proto::smb::smb2::{
@@ -1273,9 +1741,10 @@ mod tests {
     use crate::auth::{AuthError, AuthProvider};
     use crate::client::Connection;
     use crate::compression::CompressionState;
-    use crate::crypto::{EncryptionState, derive_encryption_keys};
+    use crate::crypto::{derive_encryption_keys, EncryptionState};
     use crate::error::CoreError;
-    use crate::transport::Transport;
+    use crate::policy::{ConfidentialityPolicy, GuestFallbackPolicy, SecurityPolicy};
+    use crate::transport::{Transport, TransportIdentity};
 
     #[derive(Debug)]
     struct ScriptedTransport {
@@ -1292,12 +1761,20 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct BlockingReceiveTransport {
+        inner: ScriptedTransport,
+        receive_count: usize,
+        block_at: usize,
+        blocked: Arc<Notify>,
+    }
+
     fn smb311_response_with_transport_security() -> NegotiateResponse {
         NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb311,
             server_guid: [0; 16],
-            capabilities: GlobalCapabilities::ENCRYPTION,
+            capabilities: GlobalCapabilities::empty(),
             max_transact_size: 0x100000,
             max_read_size: 0x100000,
             max_write_size: 0x100000,
@@ -1314,17 +1791,24 @@ mod tests {
 
     #[test]
     fn transport_security_disables_smb_encryption_requirement() {
-        let negotiated = smb311_response_with_transport_security();
-        let required = super::session_encryption_required(&negotiated, SessionFlags::ENCRYPT_DATA)
-            .expect("transport security should decode");
+        let required = super::session_encryption_required(
+            true,
+            SessionFlags::ENCRYPT_DATA,
+            SecurityPolicy::interoperable(),
+        );
         assert!(!required);
     }
 
     #[test]
     fn transport_security_suppresses_derived_encryption_state() {
-        let negotiated = smb311_response_with_transport_security();
-        let encryption = super::derive_encryption_state(&negotiated, Some(&[0x11; 32]), None)
-            .expect("transport security should decode");
+        let encryption = super::derive_encryption_state(
+            Dialect::Smb311,
+            Some(CipherId::Aes128Gcm),
+            true,
+            Some(&[0x11; 32]),
+            None,
+        )
+        .expect("transport security should decode");
         assert!(encryption.is_none());
     }
 
@@ -1333,19 +1817,291 @@ mod tests {
         let mut negotiated = smb311_response_with_transport_security();
         negotiated
             .negotiate_contexts
+            .insert(0, preauth_context(b"server"));
+        negotiated
+            .negotiate_contexts
             .push(NegotiateContext::transport_capabilities(
                 TransportCapabilities {
                     flags: TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY,
                 },
             ));
 
-        let error = super::transport_level_security_accepted(&negotiated)
-            .expect_err("duplicate transport contexts should be rejected");
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::empty(),
+            client_guid: [0; 16],
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![
+                preauth_context(b"client"),
+                NegotiateContext::transport_capabilities(TransportCapabilities {
+                    flags: TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY,
+                }),
+            ],
+        };
+        let error = super::validate_negotiate_selection(
+            &request,
+            &negotiated,
+            TransportIdentity::authenticated_quic(),
+            SecurityPolicy::interoperable(),
+        )
+        .expect_err("duplicate transport contexts should be rejected");
         assert!(matches!(
             error,
             CoreError::InvalidResponse(
-                "SMB 3.1.1 negotiate response contained multiple transport-capabilities contexts"
+                "SMB 3.1.1 negotiate response contained multiple transport contexts"
             )
+        ));
+    }
+
+    #[test]
+    fn unsigned_pending_response_defers_required_signature_to_the_final_response() {
+        let context = super::RequestContext::new(SessionId(44), TreeId(0), true, None);
+        let mut header = Header::new(Command::Read, MessageId(3));
+        header.flags = HeaderFlags::SERVER_TO_REDIR | HeaderFlags::ASYNC_COMMAND;
+        header.status = NtStatus::PENDING.to_u32();
+        header.session_id = SessionId(44);
+        header.async_id = Some(AsyncId(99));
+        let pending_packet = header.encode();
+
+        super::verify_response_signature(&header, &pending_packet, &context)
+            .expect("STATUS_PENDING must defer signature verification");
+
+        header.status = NtStatus::SUCCESS.to_u32();
+        let final_packet = header.encode();
+        let error = super::verify_response_signature(&header, &final_packet, &context)
+            .expect_err("the correlated final response must still satisfy required signing");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse("session requires signed SMB responses")
+        ));
+    }
+
+    #[test]
+    fn response_identity_rejects_wrong_direction_session_and_tree() {
+        let context = super::RequestContext::unsigned(SessionId(11), TreeId(7));
+        let mut header = Header::new(Command::Echo, MessageId(3));
+        header.session_id = SessionId(11);
+        header.tree_id = TreeId(7);
+        assert!(matches!(
+            super::validate_response_identity(&header, Command::Echo, &context),
+            Err(CoreError::InvalidResponse(
+                "SMB response did not set the server-to-client direction flag"
+            ))
+        ));
+
+        header.flags = HeaderFlags::SERVER_TO_REDIR;
+        header.session_id = SessionId(12);
+        assert!(matches!(
+            super::validate_response_identity(&header, Command::Echo, &context),
+            Err(CoreError::InvalidResponse(
+                "SMB response did not match the active session identity"
+            ))
+        ));
+
+        header.session_id = SessionId(11);
+        header.tree_id = TreeId(8);
+        assert!(matches!(
+            super::validate_response_identity(&header, Command::Echo, &context),
+            Err(CoreError::InvalidResponse(
+                "SMB response did not match the active tree identity"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_dialect_downgrade_outside_immutable_offer() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::empty(),
+            client_guid: [0; 16],
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client")],
+        };
+        let mut response = smb311_response_with_transport_security();
+        response.dialect_revision = Dialect::Smb210;
+        response.negotiate_contexts.clear();
+
+        let error = super::validate_negotiate_selection(
+            &request,
+            &response,
+            TransportIdentity::unauthenticated(crate::transport::TransportProtocol::Tcp),
+            SecurityPolicy::interoperable(),
+        )
+        .expect_err("server-selected SMB 2.1 was not offered");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "server selected an SMB dialect that the client did not offer"
+            )
+        ));
+    }
+
+    #[test]
+    fn rejects_unoffered_cipher_selection() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::ENCRYPTION,
+            client_guid: [0; 16],
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![
+                preauth_context(b"client"),
+                encryption_context(CipherId::Aes128Gcm),
+            ],
+        };
+        let response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![
+                preauth_context(b"server"),
+                encryption_context(CipherId::Aes256Gcm),
+            ],
+            server_guid: [0; 16],
+            capabilities: GlobalCapabilities::ENCRYPTION,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 0,
+            server_start_time: 0,
+            security_buffer: Vec::new(),
+        };
+
+        let error = super::validate_negotiate_selection(
+            &request,
+            &response,
+            TransportIdentity::unauthenticated(crate::transport::TransportProtocol::Tcp),
+            SecurityPolicy::interoperable(),
+        )
+        .expect_err("unoffered AES-256-GCM must be rejected");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "server selected an encryption cipher that the client did not offer"
+            )
+        ));
+    }
+
+    #[test]
+    fn accepts_smb311_cipher_context_without_legacy_encryption_capability() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::ENCRYPTION,
+            client_guid: [0; 16],
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![
+                preauth_context(b"client"),
+                encryption_context(CipherId::Aes128Gcm),
+            ],
+        };
+        let response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![
+                preauth_context(b"server"),
+                encryption_context(CipherId::Aes128Gcm),
+            ],
+            server_guid: [0; 16],
+            capabilities: GlobalCapabilities::empty(),
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 0,
+            server_start_time: 0,
+            security_buffer: Vec::new(),
+        };
+
+        let selections = super::validate_negotiate_selection(
+            &request,
+            &response,
+            TransportIdentity::unauthenticated(crate::transport::TransportProtocol::Tcp),
+            SecurityPolicy::interoperable(),
+        )
+        .expect("the SMB 3.1.1 encryption context is the authoritative cipher selection");
+        assert_eq!(selections.cipher, Some(CipherId::Aes128Gcm));
+    }
+
+    #[test]
+    fn rejects_unoffered_compression_algorithm() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::empty(),
+            client_guid: [0; 16],
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![
+                preauth_context(b"client"),
+                compression_context(CompressionAlgorithm::Lznt1),
+            ],
+        };
+        let response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![
+                preauth_context(b"server"),
+                compression_context(CompressionAlgorithm::Lz77),
+            ],
+            server_guid: [0; 16],
+            capabilities: GlobalCapabilities::empty(),
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 0,
+            server_start_time: 0,
+            security_buffer: Vec::new(),
+        };
+
+        let error = super::negotiate_compression_state(&request, &response)
+            .expect_err("unoffered LZ77 must be rejected");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "server selected a compression algorithm that was not offered by the client"
+            )
+        ));
+    }
+
+    #[test]
+    fn rejects_unoffered_or_untrusted_transport_security() {
+        let mut response = smb311_response_with_transport_security();
+        response
+            .negotiate_contexts
+            .insert(0, preauth_context(b"server"));
+        let request_without_transport = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::empty(),
+            client_guid: [0; 16],
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client")],
+        };
+        assert!(matches!(
+            super::validate_negotiate_selection(
+                &request_without_transport,
+                &response,
+                TransportIdentity::unauthenticated(crate::transport::TransportProtocol::Tcp),
+                SecurityPolicy::interoperable(),
+            ),
+            Err(CoreError::InvalidResponse(
+                "server returned a negotiate context that the client did not offer"
+            ))
+        ));
+
+        let request_with_transport = NegotiateRequest {
+            negotiate_contexts: vec![
+                preauth_context(b"client"),
+                NegotiateContext::transport_capabilities(TransportCapabilities {
+                    flags: TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY,
+                }),
+            ],
+            ..request_without_transport
+        };
+        assert!(matches!(
+            super::validate_negotiate_selection(
+                &request_with_transport,
+                &response,
+                TransportIdentity::unauthenticated(crate::transport::TransportProtocol::Tcp),
+                SecurityPolicy::interoperable(),
+            ),
+            Err(CoreError::InvalidInput(
+                "transport-security negotiation requires authenticated QUIC transport identity"
+            ))
         ));
     }
 
@@ -1360,6 +2116,24 @@ mod tests {
             self.reads.pop_front().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no scripted response")
             })
+        }
+    }
+
+    #[async_trait]
+    impl Transport for BlockingReceiveTransport {
+        async fn send(&mut self, frame: &[u8]) -> std::io::Result<()> {
+            self.inner.send(frame).await
+        }
+
+        async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
+            let current = self.receive_count;
+            self.receive_count += 1;
+            if current == self.block_at {
+                self.blocked.notify_one();
+                std::future::pending().await
+            } else {
+                self.inner.recv().await
+            }
         }
     }
 
@@ -1390,6 +2164,23 @@ mod tests {
         let packet = response_packet_with_credits(
             command, status, message_id, session_id, tree_id, credits, body,
         );
+        SessionMessage::new(packet)
+            .encode()
+            .expect("response should frame")
+    }
+
+    fn response_frame_without_credit_charge_echo(
+        command: Command,
+        status: u32,
+        message_id: u64,
+        session_id: u64,
+        tree_id: u32,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
+        let mut packet = response_packet(command, status, message_id, session_id, tree_id, body);
+        let mut header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
+        header.credit_charge.0 = 0;
+        packet[..Header::LEN].copy_from_slice(&header.encode());
         SessionMessage::new(packet)
             .encode()
             .expect("response should frame")
@@ -1540,20 +2331,42 @@ mod tests {
         signing.sign_packet(packet).expect("response should sign");
     }
 
-    fn compound_response_frame(
-        elements: Vec<(Command, u32, u64, u64, u32, u16, Vec<u8>)>,
+    fn signed_response_frame(
+        signing: &super::SigningState,
+        command: Command,
+        status: u32,
+        message_id: u64,
+        session_id: u64,
+        tree_id: u32,
+        body: Vec<u8>,
     ) -> Vec<u8> {
+        let mut packet = response_packet(command, status, message_id, session_id, tree_id, body);
+        sign_response_packet(signing, &mut packet);
+        SessionMessage::new(packet)
+            .encode()
+            .expect("signed response should frame")
+    }
+
+    type CompoundResponseElement = (Command, u32, u64, u64, u32, u16, u16, Vec<u8>);
+
+    fn compound_response_frame(elements: Vec<CompoundResponseElement>) -> Vec<u8> {
         let mut payload = Vec::new();
         let total = elements.len();
-        for (index, (command, status, message_id, session_id, tree_id, credits, body)) in
-            elements.into_iter().enumerate()
+        for (
+            index,
+            (command, status, message_id, session_id, tree_id, credits, credit_charge, body),
+        ) in elements.into_iter().enumerate()
         {
             let mut packet = response_packet_with_credits(
                 command, status, message_id, session_id, tree_id, credits, body,
             );
+            let mut header = Header::decode(&packet[..Header::LEN]).expect("header should decode");
+            header.credit_charge.0 = credit_charge;
+            packet[..Header::LEN].copy_from_slice(&header.encode());
             let is_last = index + 1 == total;
             if !is_last {
-                let packet_len = super::align_to_8(packet.len());
+                let packet_len =
+                    super::align_to_8(packet.len()).expect("test packet alignment should fit");
                 let mut header =
                     Header::decode(&packet[..Header::LEN]).expect("header should decode");
                 header.next_command = u32::try_from(packet_len).expect("packet length should fit");
@@ -1629,12 +2442,13 @@ mod tests {
     fn smb_session_key_uses_first_16_bytes_and_zero_pads_short_keys() {
         let full_key: Vec<u8> = (0u8..32).collect();
         assert_eq!(
-            super::derive_smb_session_key(Some(&full_key)),
+            super::derive_smb_session_key(Some(&full_key)).expect("SMB session key should derive"),
             Some((0u8..16).collect())
         );
 
         assert_eq!(
-            super::derive_smb_session_key(Some(&[0x41, 0x42, 0x43])),
+            super::derive_smb_session_key(Some(&[0x41, 0x42, 0x43]))
+                .expect("short SMB session key should derive"),
             Some(vec![
                 0x41, 0x42, 0x43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ])
@@ -1720,7 +2534,8 @@ mod tests {
         decompress_transform_payload(&frame.payload)
     }
 
-    fn compressed_response_frame(
+    fn signed_compressed_response_frame(
+        signing: &super::SigningState,
         command: Command,
         status: u32,
         message_id: u64,
@@ -1728,7 +2543,8 @@ mod tests {
         tree_id: u32,
         body: Vec<u8>,
     ) -> Vec<u8> {
-        let packet = response_packet(command, status, message_id, session_id, tree_id, body);
+        let mut packet = response_packet(command, status, message_id, session_id, tree_id, body);
+        sign_response_packet(signing, &mut packet);
         let mut compressed = Vec::new();
         lznt1_compress(&packet, &mut compressed);
         SessionMessage::new(
@@ -1742,7 +2558,7 @@ mod tests {
             .encode(),
         )
         .encode()
-        .expect("compressed response should frame")
+        .expect("signed compressed response should frame")
     }
 
     fn smb311_encryption_state(
@@ -1798,7 +2614,6 @@ mod tests {
         Arc::new(EncryptionState::new(Dialect::Smb311, keys))
     }
 
-    #[derive(Debug)]
     struct MockAuthProvider {
         initial_token: Vec<u8>,
         challenge_token: Vec<u8>,
@@ -1824,16 +2639,678 @@ mod tests {
         }
 
         fn session_key(&self) -> Option<&[u8]> {
-            self.session_key.as_deref()
+            self.finished
+                .then_some(self.session_key.as_deref())
+                .flatten()
         }
+    }
+
+    struct PassthroughAuthProvider {
+        initial_token: Vec<u8>,
+    }
+
+    impl PassthroughAuthProvider {
+        fn from_request(request: &SessionSetupRequest) -> Self {
+            Self {
+                initial_token: request.security_buffer.clone(),
+            }
+        }
+    }
+
+    impl AuthProvider for PassthroughAuthProvider {
+        fn initial_token(&mut self, _negotiate: &NegotiateResponse) -> Result<Vec<u8>, AuthError> {
+            Ok(self.initial_token.clone())
+        }
+
+        fn next_token(&mut self, _incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
+            Err(AuthError::InvalidState(
+                "passthrough test provider does not support challenge tokens",
+            ))
+        }
+
+        fn finish(&mut self, incoming: &[u8]) -> Result<(), AuthError> {
+            if incoming.is_empty() || incoming == [0xa1, 0x01] {
+                Ok(())
+            } else {
+                Err(AuthError::InvalidToken(
+                    "passthrough test provider rejected the final token",
+                ))
+            }
+        }
+    }
+
+    fn smb311_auth_fixture(
+        tamper_final_signature: bool,
+    ) -> (ScriptedTransport, NegotiateRequest, MockAuthProvider) {
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-auth-0001",
+            dialects: vec![Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client-auth-salt")],
+        };
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb311,
+            negotiate_contexts: vec![preauth_context(b"server-auth-salt")],
+            server_guid: *b"server-auth-0001",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: Vec::new(),
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x01, 0x02],
+            previous_session_id: 0,
+        };
+        let signing = smb311_signing_state(
+            &negotiate_request,
+            &negotiate_response,
+            &session_request,
+            &[0x55; 16],
+        );
+        let mut final_packet = response_packet(
+            Command::SessionSetup,
+            NtStatus::SUCCESS.to_u32(),
+            1,
+            77,
+            0,
+            SessionSetupResponse {
+                session_flags: SessionFlags::empty(),
+                security_buffer: Vec::new(),
+            }
+            .encode(),
+        );
+        sign_response_packet(&signing, &mut final_packet);
+        if tamper_final_signature {
+            final_packet[Header::SIGNATURE_RANGE.start] ^= 0x80;
+        }
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                negotiate_response.encode(),
+            ),
+            SessionMessage::new(final_packet)
+                .encode()
+                .expect("final response should frame"),
+        ]);
+        let provider = MockAuthProvider {
+            initial_token: session_request.security_buffer,
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: Some(vec![0x55; 16]),
+            finished: false,
+        };
+        (transport, negotiate_request, provider)
+    }
+
+    #[tokio::test]
+    async fn delayed_authentication_key_accepts_valid_final_smb311_signature() {
+        let (transport, request, mut provider) = smb311_auth_fixture(false);
+        assert!(provider.session_key().is_none());
+
+        let connection = Connection::new(transport)
+            .negotiate(&request)
+            .await
+            .expect("SMB 3.1.1 negotiate should succeed")
+            .authenticate(&mut provider)
+            .await
+            .expect("valid final proof should authenticate");
+
+        assert!(provider.finished);
+        assert_eq!(connection.authentication_generation(), 1);
+        assert_eq!(connection.session_key(), Some(&[0x55; 16][..]));
+        assert_eq!(
+            format!("{:?}", connection.state().session_key),
+            "Some(<redacted secret bytes>)"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_final_smb311_response_without_a_key_is_rejected() {
+        let (transport, request, _) = smb311_auth_fixture(false);
+        let error = Connection::new(transport)
+            .negotiate(&request)
+            .await
+            .expect("SMB 3.1.1 negotiate should succeed")
+            .authenticate(&mut PassthroughAuthProvider {
+                initial_token: vec![0x01, 0x02],
+            })
+            .await
+            .expect_err("a signature is not proof without the mechanism key");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "signed final session setup response had no derived signing key"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn signed_final_pre_smb311_response_without_a_key_is_rejected() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-sign-0002",
+            dialects: vec![Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let mut final_packet = response_packet(
+            Command::SessionSetup,
+            0,
+            1,
+            89,
+            0,
+            SessionSetupResponse {
+                session_flags: SessionFlags::empty(),
+                security_buffer: Vec::new(),
+            }
+            .encode(),
+        );
+        let mut final_header =
+            Header::decode(&final_packet[..Header::LEN]).expect("final header should decode");
+        final_header.flags |= HeaderFlags::SIGNED;
+        final_packet[..Header::LEN].copy_from_slice(&final_header.encode());
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                0,
+                0,
+                0,
+                0,
+                NegotiateResponse {
+                    security_mode: SigningMode::ENABLED,
+                    dialect_revision: Dialect::Smb302,
+                    negotiate_contexts: Vec::new(),
+                    server_guid: *b"server-sign-0002",
+                    capabilities: GlobalCapabilities::LARGE_MTU,
+                    max_transact_size: 65_536,
+                    max_read_size: 65_536,
+                    max_write_size: 65_536,
+                    system_time: 0,
+                    server_start_time: 0,
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            SessionMessage::new(final_packet)
+                .encode()
+                .expect("final response should frame"),
+        ]);
+
+        let error = Connection::new(transport)
+            .negotiate(&request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut PassthroughAuthProvider {
+                initial_token: vec![1],
+            })
+            .await
+            .expect_err("a signed final response without a key must fail for every dialect");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "signed final session setup response had no derived signing key"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn delayed_authentication_key_rejects_invalid_final_smb311_signature() {
+        let (transport, request, mut provider) = smb311_auth_fixture(true);
+        assert!(provider.session_key().is_none());
+
+        let error = Connection::new(transport)
+            .negotiate(&request)
+            .await
+            .expect("SMB 3.1.1 negotiate should succeed")
+            .authenticate(&mut provider)
+            .await
+            .expect_err("invalid final proof must not construct Authenticated");
+
+        assert!(
+            provider.finished,
+            "finish must run before delayed-key proof"
+        );
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "SMB response signature did not match the derived signing key"
+            )
+        ));
+    }
+
+    fn smb302_guest_fixture() -> (ScriptedTransport, NegotiateRequest) {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guest-001",
+            dialects: vec![Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                0,
+                0,
+                0,
+                0,
+                NegotiateResponse {
+                    security_mode: SigningMode::ENABLED,
+                    dialect_revision: Dialect::Smb302,
+                    negotiate_contexts: Vec::new(),
+                    server_guid: *b"server-guest-001",
+                    capabilities: GlobalCapabilities::LARGE_MTU,
+                    max_transact_size: 65_536,
+                    max_read_size: 65_536,
+                    max_write_size: 65_536,
+                    system_time: 1,
+                    server_start_time: 1,
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                0,
+                1,
+                88,
+                0,
+                SessionSetupResponse {
+                    session_flags: SessionFlags::IS_GUEST,
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+        ]);
+        (transport, request)
+    }
+
+    #[tokio::test]
+    async fn credentialed_guest_fallback_is_denied_unless_explicitly_opted_in() {
+        let (transport, request) = smb302_guest_fixture();
+        let error = Connection::new(transport)
+            .negotiate(&request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut PassthroughAuthProvider {
+                initial_token: vec![1],
+            })
+            .await
+            .expect_err("default credentialed policy must reject guest fallback");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "credentialed authentication fell back to a guest or null SMB session"
+            )
+        ));
+
+        let (transport, request) = smb302_guest_fixture();
+        let connection = Connection::new(transport)
+            .with_security_policy(
+                SecurityPolicy::interoperable().with_guest_fallback(GuestFallbackPolicy::Allow),
+            )
+            .negotiate(&request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut PassthroughAuthProvider {
+                initial_token: vec![1],
+            })
+            .await
+            .expect("generic-library policy may explicitly allow guest fallback");
+        assert!(connection
+            .state()
+            .session
+            .session_flags
+            .contains(SessionFlags::IS_GUEST));
+    }
+
+    #[tokio::test]
+    async fn required_signing_without_a_key_is_rejected() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::REQUIRED,
+            capabilities: GlobalCapabilities::empty(),
+            client_guid: *b"client-sign-0001",
+            dialects: vec![Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                0,
+                0,
+                0,
+                0,
+                NegotiateResponse {
+                    security_mode: SigningMode::REQUIRED,
+                    dialect_revision: Dialect::Smb302,
+                    negotiate_contexts: Vec::new(),
+                    server_guid: *b"server-sign-0001",
+                    capabilities: GlobalCapabilities::empty(),
+                    max_transact_size: 65_536,
+                    max_read_size: 65_536,
+                    max_write_size: 65_536,
+                    system_time: 0,
+                    server_start_time: 0,
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                0,
+                1,
+                91,
+                0,
+                SessionSetupResponse {
+                    session_flags: SessionFlags::empty(),
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+        ]);
+
+        let error = Connection::new(transport)
+            .with_security_policy(SecurityPolicy::credentialed())
+            .negotiate(&request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut PassthroughAuthProvider {
+                initial_token: vec![1],
+            })
+            .await
+            .expect_err("required signing without a mechanism key must fail");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "authenticated session requires signing but no signing key was established"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn required_encryption_without_a_key_is_rejected() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::ENCRYPTION,
+            client_guid: *b"client-crypt-001",
+            dialects: vec![Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                0,
+                0,
+                0,
+                0,
+                NegotiateResponse {
+                    security_mode: SigningMode::ENABLED,
+                    dialect_revision: Dialect::Smb302,
+                    negotiate_contexts: Vec::new(),
+                    server_guid: *b"server-crypt-001",
+                    capabilities: GlobalCapabilities::ENCRYPTION,
+                    max_transact_size: 65_536,
+                    max_read_size: 65_536,
+                    max_write_size: 65_536,
+                    system_time: 0,
+                    server_start_time: 0,
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                0,
+                1,
+                92,
+                0,
+                SessionSetupResponse {
+                    session_flags: SessionFlags::empty(),
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+        ]);
+
+        let error = Connection::new(transport)
+            .with_security_policy(
+                SecurityPolicy::interoperable()
+                    .with_confidentiality(ConfidentialityPolicy::RequireSmbEncryption),
+            )
+            .negotiate(&request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut PassthroughAuthProvider {
+                initial_token: vec![1],
+            })
+            .await
+            .expect_err("required encryption without a mechanism key must fail");
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "authenticated session requires SMB encryption but no encryption key was established"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_session_setup_cannot_promote_authenticated_typestate() {
+        let (transport, request) = smb302_guest_fixture();
+        let negotiated = Connection::new(transport)
+            .negotiate(&request)
+            .await
+            .expect("negotiate should succeed");
+        let error = negotiated
+            .session_setup(&SessionSetupRequest {
+                flags: 0,
+                security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+                capabilities: 0,
+                channel: 0,
+                security_buffer: vec![1],
+                previous_session_id: 0,
+            })
+            .await
+            .expect_err("raw tokens cannot prove final authentication");
+        assert!(matches!(
+            error,
+            CoreError::InvalidInput(
+                "raw session setup cannot construct authenticated typestate; use authenticate"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn reauthentication_advances_generation_and_replaces_session_identity_and_key() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::empty(),
+            client_guid: *b"client-reauth-01",
+            dialects: vec![Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame(
+                Command::Negotiate,
+                0,
+                0,
+                0,
+                0,
+                NegotiateResponse {
+                    security_mode: SigningMode::ENABLED,
+                    dialect_revision: Dialect::Smb302,
+                    negotiate_contexts: Vec::new(),
+                    server_guid: *b"server-reauth-01",
+                    capabilities: GlobalCapabilities::empty(),
+                    max_transact_size: 65_536,
+                    max_read_size: 65_536,
+                    max_write_size: 65_536,
+                    system_time: 0,
+                    server_start_time: 0,
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                0,
+                1,
+                11,
+                0,
+                SessionSetupResponse {
+                    session_flags: SessionFlags::empty(),
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+            response_frame(Command::Logoff, 0, 2, 11, 0, LogoffResponse.encode()),
+            response_frame(
+                Command::SessionSetup,
+                0,
+                3,
+                22,
+                0,
+                SessionSetupResponse {
+                    session_flags: SessionFlags::empty(),
+                    security_buffer: Vec::new(),
+                }
+                .encode(),
+            ),
+        ]);
+        let mut first = MockAuthProvider {
+            initial_token: vec![1],
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: Some(vec![0x11; 16]),
+            finished: false,
+        };
+        let authenticated = Connection::new(transport)
+            .negotiate(&request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut first)
+            .await
+            .expect("first authentication should succeed");
+        let physical_id = authenticated.physical_connection_id();
+        assert_eq!(authenticated.authentication_generation(), 1);
+        assert_eq!(authenticated.session_id(), SessionId(11));
+        assert_eq!(authenticated.session_key(), Some(&[0x11; 16][..]));
+
+        let negotiated = authenticated.logoff().await.expect("logoff should succeed");
+        assert_eq!(negotiated.authentication_generation(), 1);
+        let mut second = MockAuthProvider {
+            initial_token: vec![2],
+            challenge_token: Vec::new(),
+            final_token: Vec::new(),
+            session_key: Some(vec![0x22; 16]),
+            finished: false,
+        };
+        let reauthenticated = negotiated
+            .authenticate(&mut second)
+            .await
+            .expect("second authentication should succeed");
+
+        assert_eq!(reauthenticated.physical_connection_id(), physical_id);
+        assert_eq!(reauthenticated.authentication_generation(), 2);
+        assert_eq!(reauthenticated.session_id(), SessionId(22));
+        assert_eq!(reauthenticated.session_key(), Some(&[0x22; 16][..]));
+        assert_eq!(reauthenticated.state().offer, request);
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_request_write_poisons_connection_and_prevents_reuse() {
+        let request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::empty(),
+            client_guid: *b"client-cancel-01",
+            dialects: vec![Dialect::Smb302],
+            negotiate_contexts: Vec::new(),
+        };
+        let blocked = Arc::new(Notify::new());
+        let transport = BlockingReceiveTransport {
+            inner: ScriptedTransport::new(vec![
+                response_frame(
+                    Command::Negotiate,
+                    0,
+                    0,
+                    0,
+                    0,
+                    NegotiateResponse {
+                        security_mode: SigningMode::ENABLED,
+                        dialect_revision: Dialect::Smb302,
+                        negotiate_contexts: Vec::new(),
+                        server_guid: *b"server-cancel-01",
+                        capabilities: GlobalCapabilities::empty(),
+                        max_transact_size: 65_536,
+                        max_read_size: 65_536,
+                        max_write_size: 65_536,
+                        system_time: 0,
+                        server_start_time: 0,
+                        security_buffer: Vec::new(),
+                    }
+                    .encode(),
+                ),
+                response_frame(
+                    Command::SessionSetup,
+                    0,
+                    1,
+                    93,
+                    0,
+                    SessionSetupResponse {
+                        session_flags: SessionFlags::empty(),
+                        security_buffer: Vec::new(),
+                    }
+                    .encode(),
+                ),
+            ]),
+            receive_count: 0,
+            block_at: 2,
+            blocked: Arc::clone(&blocked),
+        };
+        let mut connection = Connection::new(transport)
+            .negotiate(&request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut PassthroughAuthProvider {
+                initial_token: vec![1],
+            })
+            .await
+            .expect("authentication should succeed");
+
+        let mut in_flight = Box::pin(connection.echo());
+        tokio::select! {
+            () = blocked.notified() => {}
+            result = &mut in_flight => panic!("echo unexpectedly completed: {result:?}"),
+        }
+        drop(in_flight);
+
+        assert!(connection.is_poisoned());
+        assert!(matches!(
+            connection.echo().await,
+            Err(CoreError::ConnectionPoisoned)
+        ));
+        let transport = connection.into_transport();
+        assert_eq!(transport.inner.writes.len(), 3);
     }
 
     #[tokio::test]
     async fn typestate_flow_carries_session_and_tree_ids() {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
-            dialect_revision: Dialect::Smb311,
-            negotiate_contexts: vec![preauth_context(b"server-salt-0001")],
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
             server_guid: *b"server-guid-0001",
             capabilities: GlobalCapabilities::DFS | GlobalCapabilities::LARGE_MTU,
             max_transact_size: 65_536,
@@ -1994,7 +3471,7 @@ mod tests {
             .await
             .expect("negotiate should succeed");
         let connection = connection
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
             .await
             .expect("session setup should succeed");
         let mut connection = connection
@@ -2035,7 +3512,7 @@ mod tests {
         assert_eq!(close.end_of_file, 128);
         assert_eq!(
             connection.state().response.dialect_revision,
-            Dialect::Smb311
+            Dialect::Smb302
         );
 
         let transport = connection.into_transport();
@@ -2192,7 +3669,7 @@ mod tests {
             .expect("authenticate should succeed");
 
         assert_eq!(connection.state().session_id, SessionId(77));
-        assert_eq!(connection.state().session_key, Some(vec![0x55; 16]));
+        assert_eq!(connection.session_key(), Some(&[0x55; 16][..]));
         assert!(auth_provider.finished);
 
         let transport = connection.into_transport();
@@ -2217,8 +3694,8 @@ mod tests {
     async fn ioctl_queries_network_interfaces_on_tree_connection() {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
-            dialect_revision: Dialect::Smb311,
-            negotiate_contexts: vec![preauth_context(b"server-salt-0001")],
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
             server_guid: *b"server-guid-0001",
             capabilities: GlobalCapabilities::DFS | GlobalCapabilities::LARGE_MTU,
             max_transact_size: 65_536,
@@ -2313,7 +3790,7 @@ mod tests {
             .negotiate(&negotiate_request)
             .await
             .expect("negotiate should succeed")
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
             .await
             .expect("session setup should succeed")
             .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
@@ -2346,8 +3823,8 @@ mod tests {
     async fn ioctl_requests_resume_key_for_open_file() {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
-            dialect_revision: Dialect::Smb311,
-            negotiate_contexts: vec![preauth_context(b"server-salt-0001")],
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
             server_guid: *b"server-guid-0001",
             capabilities: GlobalCapabilities::DFS | GlobalCapabilities::LARGE_MTU,
             max_transact_size: 65_536,
@@ -2455,7 +3932,7 @@ mod tests {
             .negotiate(&negotiate_request)
             .await
             .expect("negotiate should succeed")
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
             .await
             .expect("session setup should succeed")
             .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
@@ -2491,8 +3968,8 @@ mod tests {
     async fn compound_raw_uses_consecutive_message_ids_and_related_flag() {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
-            dialect_revision: Dialect::Smb311,
-            negotiate_contexts: vec![preauth_context(b"server-salt-0100")],
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
             server_guid: *b"server-guid-0100",
             capabilities: GlobalCapabilities::LARGE_MTU,
             max_transact_size: 65_536,
@@ -2552,6 +4029,7 @@ mod tests {
                     55,
                     9,
                     1,
+                    0,
                     WriteResponse { count: 5 }.encode(),
                 ),
                 (
@@ -2561,6 +4039,7 @@ mod tests {
                     55,
                     9,
                     1,
+                    0,
                     FlushResponse.encode(),
                 ),
             ]),
@@ -2584,7 +4063,7 @@ mod tests {
             .negotiate(&negotiate_request)
             .await
             .expect("negotiate should succeed")
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
             .await
             .expect("session setup should succeed")
             .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
@@ -2612,6 +4091,7 @@ mod tests {
         assert_eq!(
             headers[0].next_command as usize,
             super::align_to_8(Header::LEN + write_body.len())
+                .expect("test packet alignment should fit")
         );
         assert!(!headers[0].flags.contains(HeaderFlags::RELATED_OPERATIONS));
         assert_eq!(headers[1].message_id, MessageId(4));
@@ -2622,11 +4102,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compound_terminal_status_does_not_mask_a_later_identity_mismatch() {
+        let negotiate_response = NegotiateResponse {
+            security_mode: SigningMode::ENABLED,
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
+            server_guid: *b"server-guid-0102",
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            max_transact_size: 65_536,
+            max_read_size: 65_536,
+            max_write_size: 65_536,
+            system_time: 1,
+            server_start_time: 1,
+            security_buffer: vec![0x60, 0x03],
+        };
+        let session_response = SessionSetupResponse {
+            session_flags: SessionFlags::empty(),
+            security_buffer: vec![0xa1, 0x01],
+        };
+        let tree_response = TreeConnectResponse {
+            share_type: ShareType::Disk,
+            share_flags: ShareFlags::empty(),
+            capabilities: TreeCapabilities::empty(),
+            maximal_access: 0x0012_019f,
+        };
+        let file_id = FileId {
+            persistent: 0x55,
+            volatile: 0x66,
+        };
+        let transport = ScriptedTransport::new(vec![
+            response_frame_with_credits(
+                Command::Negotiate,
+                NtStatus::SUCCESS.to_u32(),
+                0,
+                0,
+                0,
+                32,
+                negotiate_response.encode(),
+            ),
+            response_frame(
+                Command::SessionSetup,
+                NtStatus::SUCCESS.to_u32(),
+                1,
+                55,
+                0,
+                session_response.encode(),
+            ),
+            response_frame(
+                Command::TreeConnect,
+                NtStatus::SUCCESS.to_u32(),
+                2,
+                55,
+                9,
+                tree_response.encode(),
+            ),
+            compound_response_frame(vec![
+                (
+                    Command::Write,
+                    NtStatus::ACCESS_DENIED.to_u32(),
+                    3,
+                    55,
+                    9,
+                    1,
+                    0,
+                    Vec::new(),
+                ),
+                (
+                    Command::Flush,
+                    NtStatus::SUCCESS.to_u32(),
+                    99,
+                    55,
+                    9,
+                    1,
+                    0,
+                    FlushResponse.encode(),
+                ),
+            ]),
+        ]);
+        let negotiate_request = NegotiateRequest {
+            security_mode: SigningMode::ENABLED,
+            capabilities: GlobalCapabilities::LARGE_MTU,
+            client_guid: *b"client-guid-0102",
+            dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
+            negotiate_contexts: vec![preauth_context(b"client-salt-0102")],
+        };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x60, 0x48],
+            previous_session_id: 0,
+        };
+        let mut connection = Connection::new(transport)
+            .negotiate(&negotiate_request)
+            .await
+            .expect("negotiate should succeed")
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
+            .await
+            .expect("session setup should succeed")
+            .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
+            .await
+            .expect("tree connect should succeed");
+
+        let error = connection
+            .compound_raw(&[
+                super::CompoundRequest::new(
+                    Command::Write,
+                    WriteRequest::for_file(file_id, 0, b"hello".to_vec()).encode(),
+                ),
+                super::CompoundRequest::related(
+                    Command::Flush,
+                    FlushRequest::for_file(file_id).encode(),
+                ),
+            ])
+            .await
+            .expect_err("the later compound identity mismatch must not be masked");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidResponse(
+                "compound response message id did not match the request element"
+            )
+        ));
+        assert!(connection.is_poisoned());
+    }
+
+    #[tokio::test]
     async fn compound_raw_requires_enough_credits_for_the_chain() {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
-            dialect_revision: Dialect::Smb311,
-            negotiate_contexts: vec![preauth_context(b"server-salt-0101")],
+            dialect_revision: Dialect::Smb302,
+            negotiate_contexts: Vec::new(),
             server_guid: *b"server-guid-0101",
             capabilities: GlobalCapabilities::LARGE_MTU,
             max_transact_size: 65_536,
@@ -2694,7 +4301,7 @@ mod tests {
         .negotiate(&negotiate_request)
         .await
         .expect("negotiate should succeed")
-        .session_setup(&session_request)
+        .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
         .await
         .expect("session setup should succeed")
         .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
@@ -2824,7 +4431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_echo_uses_session_context() {
+    async fn authenticated_echo_ignores_response_credit_charge_and_uses_session_context() {
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb302,
@@ -2859,7 +4466,7 @@ mod tests {
                 0,
                 session_response.encode(),
             ),
-            response_frame(
+            response_frame_without_credit_charge_echo(
                 Command::Echo,
                 NtStatus::SUCCESS.to_u32(),
                 2,
@@ -2887,7 +4494,7 @@ mod tests {
             })
             .await
             .expect("negotiate should succeed")
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
             .await
             .expect("session setup should succeed");
 
@@ -2897,6 +4504,7 @@ mod tests {
         let transport = connection.into_transport();
         let header = outbound_header(&transport.writes[2]);
         assert_eq!(header.command, Command::Echo);
+        assert_eq!(header.credit_charge.0, 1);
         assert_eq!(header.session_id, SessionId(44));
         assert_eq!(header.tree_id, TreeId(0));
     }
@@ -2911,12 +4519,12 @@ mod tests {
             capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
             client_guid: *b"client-guid-enc1",
             dialects: vec![Dialect::Smb210, Dialect::Smb302],
-            negotiate_contexts: vec![encryption_context(CipherId::Aes128Ccm)],
+            negotiate_contexts: Vec::new(),
         };
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb302,
-            negotiate_contexts: vec![encryption_context(CipherId::Aes128Ccm)],
+            negotiate_contexts: Vec::new(),
             server_guid: *b"server-guid-enc1",
             capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
             max_transact_size: 65_536,
@@ -2995,6 +4603,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_accepts_compressed_session_setup_response_when_negotiated() {
+        let session_key = [0x45; 16];
         let negotiate_request = NegotiateRequest {
             security_mode: SigningMode::ENABLED,
             capabilities: GlobalCapabilities::LARGE_MTU,
@@ -3025,6 +4634,20 @@ mod tests {
             session_flags: SessionFlags::empty(),
             security_buffer: Vec::new(),
         };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x01, 0x02],
+            previous_session_id: 0,
+        };
+        let signing = smb311_signing_state(
+            &negotiate_request,
+            &negotiate_response,
+            &session_request,
+            &session_key,
+        );
         let transport = ScriptedTransport::new(vec![
             response_frame(
                 Command::Negotiate,
@@ -3034,7 +4657,8 @@ mod tests {
                 0,
                 negotiate_response.encode(),
             ),
-            compressed_response_frame(
+            signed_compressed_response_frame(
+                &signing,
                 Command::SessionSetup,
                 NtStatus::SUCCESS.to_u32(),
                 1,
@@ -3045,10 +4669,10 @@ mod tests {
         ]);
 
         let mut auth_provider = MockAuthProvider {
-            initial_token: vec![0x01, 0x02],
+            initial_token: session_request.security_buffer.clone(),
             challenge_token: Vec::new(),
             final_token: Vec::new(),
-            session_key: None,
+            session_key: Some(session_key.to_vec()),
             finished: false,
         };
 
@@ -3120,6 +4744,12 @@ mod tests {
             CipherId::Aes128Gcm,
         );
         let server_encryption = peer_encryption_state(client_encryption.as_ref());
+        let signing = smb311_signing_state(
+            &negotiate_request,
+            &negotiate_response,
+            &session_request,
+            &session_key,
+        );
         let session_response = SessionSetupResponse {
             session_flags: SessionFlags::ENCRYPT_DATA,
             security_buffer: Vec::new(),
@@ -3139,7 +4769,8 @@ mod tests {
                 0,
                 negotiate_response.encode(),
             ),
-            response_frame(
+            signed_response_frame(
+                &signing,
                 Command::SessionSetup,
                 NtStatus::SUCCESS.to_u32(),
                 1,
@@ -3222,6 +4853,20 @@ mod tests {
             session_flags: SessionFlags::empty(),
             security_buffer: Vec::new(),
         };
+        let session_request = SessionSetupRequest {
+            flags: 0,
+            security_mode: SessionSetupSecurityMode::SIGNING_ENABLED,
+            capabilities: 0,
+            channel: 0,
+            security_buffer: vec![0x01, 0x02],
+            previous_session_id: 0,
+        };
+        let signing = smb311_signing_state(
+            &negotiate_request,
+            &negotiate_response,
+            &session_request,
+            &[0x44; 16],
+        );
         let tree_response = TreeConnectResponse {
             share_type: ShareType::Disk,
             share_flags: ShareFlags::empty(),
@@ -3238,7 +4883,8 @@ mod tests {
                 0,
                 negotiate_response.encode(),
             ),
-            response_frame(
+            signed_response_frame(
+                &signing,
                 Command::SessionSetup,
                 NtStatus::SUCCESS.to_u32(),
                 1,
@@ -3264,7 +4910,7 @@ mod tests {
             ),
         ]);
         let mut auth_provider = MockAuthProvider {
-            initial_token: vec![0x01, 0x02],
+            initial_token: session_request.security_buffer.clone(),
             challenge_token: Vec::new(),
             final_token: Vec::new(),
             session_key: Some(vec![0x44; 16]),
@@ -3352,6 +4998,12 @@ mod tests {
             CipherId::Aes128Gcm,
         );
         let server_encryption = peer_encryption_state(client_encryption.as_ref());
+        let signing = smb311_signing_state(
+            &negotiate_request,
+            &negotiate_response,
+            &session_request,
+            &session_key,
+        );
         let session_response = SessionSetupResponse {
             session_flags: SessionFlags::ENCRYPT_DATA,
             security_buffer: Vec::new(),
@@ -3366,7 +5018,8 @@ mod tests {
                 0,
                 negotiate_response.encode(),
             ),
-            response_frame(
+            signed_response_frame(
+                &signing,
                 Command::SessionSetup,
                 NtStatus::SUCCESS.to_u32(),
                 1,
@@ -3440,12 +5093,12 @@ mod tests {
             capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
             client_guid: *b"client-guid-enc2",
             dialects: vec![Dialect::Smb210, Dialect::Smb302],
-            negotiate_contexts: vec![encryption_context(CipherId::Aes128Ccm)],
+            negotiate_contexts: Vec::new(),
         };
         let negotiate_response = NegotiateResponse {
             security_mode: SigningMode::ENABLED,
             dialect_revision: Dialect::Smb302,
-            negotiate_contexts: vec![encryption_context(CipherId::Aes128Ccm)],
+            negotiate_contexts: Vec::new(),
             server_guid: *b"server-guid-enc2",
             capabilities: GlobalCapabilities::LARGE_MTU | GlobalCapabilities::ENCRYPTION,
             max_transact_size: 65_536,
@@ -3620,7 +5273,7 @@ mod tests {
             })
             .await
             .expect("negotiate should succeed")
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
             .await
             .expect("session setup should succeed")
             .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
@@ -3740,7 +5393,7 @@ mod tests {
             })
             .await
             .expect("negotiate should succeed")
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
             .await
             .expect("session setup should succeed")
             .tree_connect(&TreeConnectRequest::from_unc(r"\\server\share"))
@@ -4078,7 +5731,7 @@ mod tests {
             .await
             .expect("negotiate should succeed");
         let connection = connection
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider::from_request(&session_request))
             .await
             .expect("session setup should succeed");
         let mut connection = connection

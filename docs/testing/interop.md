@@ -77,13 +77,16 @@ export SMOLDER_SAMBA_USERNAME=smolder
 export SMOLDER_SAMBA_PASSWORD=smolderpass
 ```
 
-Start the local fixtures with:
+Build and start the local fixtures with deterministic readiness checks:
 
 ```bash
 scripts/prepare-samba-fixture.sh
-docker compose -f docker/samba/compose.yaml up -d samba samba-netbios
-docker compose -f docker/samba/compose.yaml up -d samba-global-encryption
+scripts/start-samba-fixture.sh
 ```
+
+The startup command returns only after Direct TCP, NetBIOS, encrypted SMB, and
+winbind-backed Builtin `Administrators` SAMR probes are healthy. It does not
+retry a failed interoperability test.
 
 ## Current Matrix
 
@@ -157,7 +160,7 @@ Add `--remote-exec` to include `smbexec` / `psexec` Windows smoke commands.
 - GitHub Actions runs the Samba-backed subset through `scripts/run-interop.sh --samba --core --tools`.
 - GitHub Actions can also run the Windows gate through the self-hosted `interop-windows-self-hosted.yml` workflow when a runner labeled `smolder-windows-gate` is available.
 - Tiny11 / Windows still depends on the local VM fixture, local credentials, and the current VirtualBox port-forward setup.
-- The standalone Samba RPC fixture is local-only today and currently proves typed `lsarpc` policy queries plus the deeper standalone `samr` flow: bind, domain enumeration, `SamrOpenDomain`, user enumeration, `SamrOpenUser`, and `SamrQueryInformationUser` account-name lookup.
+- The hosted Samba workflow includes the standalone RPC fixture and proves typed `lsarpc` policy queries plus the deeper standalone `samr` flow: bind, domain enumeration, `SamrOpenDomain`, user and Builtin alias enumeration, `SamrOpenUser`, `SamrOpenAlias`, and typed user/alias information queries.
 - The SMB over QUIC lane is manual today and can be proven either against a dedicated Windows Server target through [run-windows-quic-interop.sh](https://github.com/M00NLIG7/smolder/blob/main/scripts/run-windows-quic-interop.sh) or against the UTM-backed Linux Samba path in [samba-quic-utm.md](https://github.com/M00NLIG7/smolder/blob/main/docs/testing/samba-quic-utm.md).
 
 ## Core Commands
@@ -170,7 +173,7 @@ Baseline SMB session/file path:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test windows_interop -- --nocapture
+cargo test -p smolder-smb-core --test windows_interop -- --ignored --nocapture
 ```
 
 Durable reconnect:
@@ -179,7 +182,7 @@ Durable reconnect:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test windows_reconnect -- --nocapture
+cargo test -p smolder-smb-core --test windows_reconnect -- --ignored --nocapture
 ```
 
 Encrypted file I/O:
@@ -189,7 +192,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-smb-core --test windows_encryption -- --nocapture
+cargo test -p smolder-smb-core --test windows_encryption -- --ignored --nocapture
 ```
 
 Named-pipe interop:
@@ -199,7 +202,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 cargo test -p smolder-smb-core --test named_pipe_interop \
-  exchanges_srvsvc_bind_over_windows_named_pipe_when_configured -- --nocapture
+  exchanges_srvsvc_bind_over_windows_named_pipe_when_configured -- --ignored --nocapture
 ```
 
 RPC interop:
@@ -208,7 +211,7 @@ RPC interop:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test rpc_interop -- --nocapture
+cargo test -p smolder-smb-core --test rpc_interop -- --ignored --nocapture
 ```
 
 Encrypted `IPC$` / RPC interop:
@@ -217,7 +220,7 @@ Encrypted `IPC$` / RPC interop:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder-smb-core --test windows_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test windows_rpc_encryption -- --ignored --nocapture
 ```
 
 Kerberos over Windows AD member SMB:
@@ -238,7 +241,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder-smb-core --test samba_negotiate -- --nocapture
+cargo test -p smolder-smb-core --test samba_negotiate -- --ignored --nocapture
 ```
 
 Encrypted file I/O:
@@ -249,7 +252,7 @@ SMOLDER_SAMBA_PORT=1445 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder-smb-core --test samba_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_encryption -- --ignored --nocapture
 ```
 
 Kerberos over Samba AD member SMB:
@@ -266,7 +269,7 @@ SMOLDER_SAMBA_PORT=1446 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 cargo test -p smolder-smb-core --test named_pipe_interop \
-  exchanges_srvsvc_bind_over_samba_named_pipe_when_configured -- --nocapture
+  exchanges_srvsvc_bind_over_samba_named_pipe_when_configured -- --ignored --nocapture
 ```
 
 Encrypted `srvsvc` RPC call:
@@ -276,7 +279,7 @@ SMOLDER_SAMBA_HOST=127.0.0.1 \
 SMOLDER_SAMBA_PORT=1446 \
 SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
-cargo test -p smolder-smb-core --test samba_rpc_encryption -- --nocapture
+cargo test -p smolder-smb-core --test samba_rpc_encryption -- --ignored --nocapture
 ```
 
 ## Tools Commands
@@ -290,7 +293,7 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_ENCRYPTED_SHARE=SMOLDERENC \
-cargo test -p smolder --test windows_encryption -- --nocapture
+cargo test -p smolder --test windows_encryption -- --ignored --nocapture
 ```
 
 Reconnect helper:
@@ -299,7 +302,7 @@ Reconnect helper:
 SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
-cargo test -p smolder --test windows_reconnect -- --nocapture
+cargo test -p smolder --test windows_reconnect -- --ignored --nocapture
 ```
 
 DFS path resolution:
@@ -309,14 +312,17 @@ SMOLDER_WINDOWS_HOST=127.0.0.1 \
 SMOLDER_WINDOWS_USERNAME='<windows-username>' \
 SMOLDER_WINDOWS_PASSWORD='<windows-password>' \
 SMOLDER_WINDOWS_DFS_ROOT='\\\\127.0.0.1\\your-dfs-root' \
-cargo test -p smolder --test windows_dfs -- --nocapture
+cargo test -p smolder --test windows_dfs -- --ignored --nocapture
 ```
 
 Remote execution smoke checks:
 
 ```bash
-target/debug/smolder smbexec smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
-target/debug/smolder psexec smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password "$SMOLDER_WINDOWS_PASSWORD"
+# Password is supplied on protected stdin, never a process argument.
+printf '%s' "$SMOLDER_WINDOWS_PASSWORD" | target/debug/smolder smbexec \
+  smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password-stdin
+printf '%s' "$SMOLDER_WINDOWS_PASSWORD" | target/debug/smolder psexec \
+  smb://127.0.0.1:1445 --command whoami --username "$SMOLDER_WINDOWS_USERNAME" --password-stdin
 ```
 
 ### Samba
@@ -330,7 +336,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder --test samba_high_level -- --nocapture
+cargo test -p smolder --test samba_high_level -- --ignored --nocapture
 ```
 
 CLI smoke:
@@ -342,7 +348,7 @@ SMOLDER_SAMBA_USERNAME=smolder \
 SMOLDER_SAMBA_PASSWORD=smolderpass \
 SMOLDER_SAMBA_SHARE=share \
 SMOLDER_SAMBA_DOMAIN=WORKGROUP \
-cargo test -p smolder --test cli_smoke -- --nocapture --test-threads=1
+cargo test -p smolder --test cli_smoke -- --ignored --nocapture --test-threads=1
 ```
 
 ## Expected Policy Boundaries

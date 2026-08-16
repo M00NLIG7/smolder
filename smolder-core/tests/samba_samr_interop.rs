@@ -5,6 +5,9 @@ use smolder_proto::smb::smb2::Command;
 use smolder_proto::smb::status::NtStatus;
 use tokio::sync::Mutex;
 
+mod common;
+use common::required_secret;
+
 const SAMR_PIPE_CANDIDATES: &[&str] = &["samr", "lsarpc"];
 const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
@@ -32,7 +35,7 @@ impl SambaSamrConfig {
                 .unwrap_or(445),
             username: optional_env("SMOLDER_SAMBA_AD_USERNAME")
                 .unwrap_or_else(|| "smolder".to_owned()),
-            password: optional_env("SMOLDER_SAMBA_AD_PASSWORD")
+            password: required_secret("SMOLDER_SAMBA_AD_PASSWORD")
                 .unwrap_or_else(|| "Passw0rd!".to_owned()),
             domain: optional_env("SMOLDER_SAMBA_AD_DOMAIN").or_else(|| Some("LAB".to_owned())),
             workstation: optional_env("SMOLDER_SAMBA_AD_WORKSTATION"),
@@ -57,6 +60,7 @@ fn samba_lock() -> &'static Mutex<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn enumerates_samba_ad_samr_domains_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaSamrConfig::from_env() else {
@@ -185,7 +189,9 @@ async fn enumerates_samba_ad_samr_domains_when_configured() {
         Err(CoreError::RemoteOperation { code, .. })
             if code == STATUS_ACCESS_DENIED || code == STATUS_NOT_SUPPORTED =>
         {
-            eprintln!("skipping Samba AD alias member enumeration: alias membership is not available");
+            eprintln!(
+                "skipping Samba AD alias member enumeration: alias membership is not available"
+            );
             let builtin = alias
                 .close()
                 .await

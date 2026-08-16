@@ -1,9 +1,7 @@
 mod common;
 
 use common::{unique_path_in_dir, windows_lock, WindowsNtlmConfig, WindowsShareConfig};
-use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected,
-};
+use smolder_core::prelude::{Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected};
 use smolder_proto::smb::smb2::{
     CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect, EchoResponse,
     EncryptionCapabilities, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,
@@ -31,8 +29,10 @@ fn negotiate_request() -> NegotiateRequest {
     }
 }
 
-async fn authenticated_tree_connection(
-) -> Option<(WindowsShareConfig, Connection<TokioTcpTransport, TreeConnected>)> {
+async fn authenticated_tree_connection() -> Option<(
+    WindowsShareConfig,
+    Connection<TokioTcpTransport, TreeConnected>,
+)> {
     let Some(config) = WindowsShareConfig::from_env() else {
         eprintln!(
             "skipping live Windows interop test: SMOLDER_WINDOWS_HOST, SMOLDER_WINDOWS_USERNAME, and SMOLDER_WINDOWS_PASSWORD must be set"
@@ -65,6 +65,7 @@ async fn authenticated_tree_connection(
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn negotiates_with_windows_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some(config) = WindowsNtlmConfig::from_env() else {
@@ -89,6 +90,7 @@ async fn negotiates_with_windows_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn authenticates_and_connects_tree_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((_config, connection)) = authenticated_tree_connection().await else {
@@ -102,6 +104,7 @@ async fn authenticates_and_connects_tree_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn echoes_after_authentication_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((_config, mut connection)) = authenticated_tree_connection().await else {
@@ -117,6 +120,7 @@ async fn echoes_after_authentication_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn creates_writes_reads_and_closes_file_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((config, mut connection)) = authenticated_tree_connection().await else {
@@ -162,6 +166,7 @@ async fn creates_writes_reads_and_closes_file_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn flushes_disconnects_and_logs_off_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((config, mut connection)) = authenticated_tree_connection().await else {

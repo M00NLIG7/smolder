@@ -6,7 +6,7 @@ use smolder_tools::prelude::{LeaseRequest, OpenOptions, Share, SmbDirectoryEntry
 use tokio::time::sleep;
 
 mod common;
-use common::{samba_lock, SambaConfig, temp_path, unique_name};
+use common::{samba_lock, temp_path, unique_name, SambaConfig};
 
 async fn connected_share() -> Option<(SambaConfig, Share)> {
     let Some(config) = SambaConfig::from_env() else {
@@ -40,6 +40,7 @@ async fn wait_for_listing_entry(
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn writes_and_reads_with_high_level_api_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut share)) = connected_share().await else {
@@ -62,6 +63,7 @@ async fn writes_and_reads_with_high_level_api_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn removes_files_from_fresh_connection_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut share)) = connected_share().await else {
@@ -88,6 +90,7 @@ async fn removes_files_from_fresh_connection_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn puts_and_gets_local_files_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut share)) = connected_share().await else {
@@ -120,6 +123,7 @@ async fn puts_and_gets_local_files_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn lists_stats_renames_and_removes_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut share)) = connected_share().await else {
@@ -150,16 +154,12 @@ async fn lists_stats_renames_and_removes_when_configured() {
         .await
         .expect("rename should succeed");
     let renamed_listing = wait_for_listing_entry(&mut share, &renamed_path, true).await;
-    assert!(
-        !renamed_listing
-            .iter()
-            .any(|entry| entry.name == original_path)
-    );
-    assert!(
-        renamed_listing
-            .iter()
-            .any(|entry| entry.name == renamed_path)
-    );
+    assert!(!renamed_listing
+        .iter()
+        .any(|entry| entry.name == original_path));
+    assert!(renamed_listing
+        .iter()
+        .any(|entry| entry.name == renamed_path));
 
     share
         .remove(&renamed_path)
@@ -170,6 +170,7 @@ async fn lists_stats_renames_and_removes_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn flushes_disconnects_and_logs_off_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut share)) = connected_share().await else {
@@ -203,6 +204,7 @@ async fn flushes_disconnects_and_logs_off_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn opens_file_with_lease_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some((_config, mut share)) = connected_share().await else {
@@ -255,6 +257,7 @@ async fn opens_file_with_lease_when_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn writes_and_reads_with_required_encryption_when_configured() {
     let _guard = samba_lock().lock().await;
     let Some(config) = SambaConfig::encrypted_share_from_env() else {

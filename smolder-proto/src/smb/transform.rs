@@ -66,29 +66,54 @@ impl TransformHeader {
             });
         }
 
-        Ok(Self {
-            signature: packet[4..20].try_into().map_err(|_| ProtocolError::UnexpectedEof {
-                field: "signature",
-            })?,
-            nonce: packet[20..36].try_into().map_err(|_| ProtocolError::UnexpectedEof {
-                field: "nonce",
-            })?,
-            original_message_size: u32::from_le_bytes(
-                packet[36..40].try_into().map_err(|_| ProtocolError::UnexpectedEof {
+        let original_message_size =
+            u32::from_le_bytes(packet[36..40].try_into().map_err(|_| {
+                ProtocolError::UnexpectedEof {
                     field: "original_message_size",
-                })?,
-            ),
+                }
+            })?);
+        if packet[40..42] != [0, 0] {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "transform reserved field must be zero",
+            });
+        }
+        let encrypted = &packet[TRANSFORM_HEADER_LEN..];
+        if usize::try_from(original_message_size).ok() != Some(encrypted.len()) {
+            return Err(ProtocolError::InvalidField {
+                field: "original_message_size",
+                reason: "transform original size must match ciphertext length",
+            });
+        }
+        let mut encrypted_message = Vec::new();
+        encrypted_message
+            .try_reserve_exact(encrypted.len())
+            .map_err(|_| ProtocolError::SizeLimitExceeded {
+                field: "encrypted_message",
+            })?;
+        encrypted_message.extend_from_slice(encrypted);
+
+        Ok(Self {
+            signature: packet[4..20]
+                .try_into()
+                .map_err(|_| ProtocolError::UnexpectedEof { field: "signature" })?,
+            nonce: packet[20..36]
+                .try_into()
+                .map_err(|_| ProtocolError::UnexpectedEof { field: "nonce" })?,
+            original_message_size,
             flags_or_algorithm: TransformValue(u16::from_le_bytes(
-                packet[42..44].try_into().map_err(|_| ProtocolError::UnexpectedEof {
-                    field: "flags_or_algorithm",
-                })?,
+                packet[42..44]
+                    .try_into()
+                    .map_err(|_| ProtocolError::UnexpectedEof {
+                        field: "flags_or_algorithm",
+                    })?,
             )),
-            session_id: u64::from_le_bytes(
-                packet[44..52].try_into().map_err(|_| ProtocolError::UnexpectedEof {
+            session_id: u64::from_le_bytes(packet[44..52].try_into().map_err(|_| {
+                ProtocolError::UnexpectedEof {
                     field: "session_id",
-                })?,
-            ),
-            encrypted_message: packet[TRANSFORM_HEADER_LEN..].to_vec(),
+                }
+            })?),
+            encrypted_message,
         })
     }
 }
@@ -102,7 +127,7 @@ mod tests {
         let packet = TransformHeader {
             signature: [0x11; 16],
             nonce: [0x22; 16],
-            original_message_size: 0x0102_0304,
+            original_message_size: 4,
             flags_or_algorithm: TransformValue::ENCRYPTED,
             session_id: 0x1122_3344_5566_7788,
             encrypted_message: vec![0xaa, 0xbb, 0xcc, 0xdd],

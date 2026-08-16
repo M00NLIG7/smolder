@@ -4,7 +4,10 @@ use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
 
 use super::create::FileId;
-use super::{check_fixed_structure_size, get_u16, get_u32, get_u64, slice_from_offset, HEADER_LEN};
+use super::{
+    check_fixed_structure_size, copy_bytes, get_u16, get_u32, get_u64, slice_from_offset,
+    HEADER_LEN,
+};
 use crate::smb::ProtocolError;
 
 bitflags! {
@@ -112,7 +115,12 @@ impl ChangeNotifyRequest {
                     reason: "unknown completion filter bits set",
                 },
             )?;
-        let _reserved = get_u32(&mut input, "reserved")?;
+        if get_u32(&mut input, "reserved")? != 0 {
+            return Err(ProtocolError::InvalidField {
+                field: "reserved",
+                reason: "must be zero",
+            });
+        }
         Ok(Self {
             flags,
             output_buffer_length,
@@ -155,13 +163,15 @@ impl ChangeNotifyResponse {
         let output_buffer = if output_buffer_offset == 0 || output_buffer_length == 0 {
             Vec::new()
         } else {
-            slice_from_offset(
-                body,
-                output_buffer_offset,
-                output_buffer_length,
+            copy_bytes(
+                slice_from_offset(
+                    body,
+                    output_buffer_offset,
+                    output_buffer_length,
+                    "output_buffer",
+                )?,
                 "output_buffer",
             )?
-            .to_vec()
         };
         Ok(Self { output_buffer })
     }

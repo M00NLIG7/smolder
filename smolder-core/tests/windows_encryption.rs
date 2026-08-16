@@ -1,9 +1,7 @@
 mod common;
 
 use common::{unique_path_in_dir, windows_lock, WindowsShareConfig};
-use smolder_core::prelude::{
-    Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected,
-};
+use smolder_core::prelude::{Connection, NtlmAuthenticator, TokioTcpTransport, TreeConnected};
 use smolder_proto::smb::smb2::{
     CipherId, CloseRequest, CreateDisposition, CreateOptions, CreateRequest, Dialect,
     EncryptionCapabilities, FlushRequest, GlobalCapabilities, NegotiateContext, NegotiateRequest,
@@ -67,6 +65,7 @@ async fn authenticated_tree_connection() -> Option<(
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn creates_writes_reads_and_closes_file_over_encrypted_tree_when_configured() {
     let _guard = windows_lock().lock().await;
     let Some((config, mut connection)) = authenticated_tree_connection().await else {

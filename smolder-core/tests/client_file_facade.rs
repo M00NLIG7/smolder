@@ -1,6 +1,9 @@
 use smolder_core::auth::NtlmCredentials;
 use smolder_core::facade::Client;
 
+mod common;
+use common::required_secret;
+
 const DEFAULT_SHARE: &str = "share";
 const DEFAULT_PATH: &str = "smolder-client-file-facade.txt";
 
@@ -13,6 +16,7 @@ fn optional_env(name: &str) -> Option<String> {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn client_file_facade_roundtrip_when_configured() {
     let Some(host) = required_env("SMOLDER_FACADE_HOST") else {
         eprintln!("skipping client file facade interop: SMOLDER_FACADE_HOST not set");
@@ -22,7 +26,7 @@ async fn client_file_facade_roundtrip_when_configured() {
         eprintln!("skipping client file facade interop: SMOLDER_FACADE_USERNAME not set");
         return;
     };
-    let Some(password) = required_env("SMOLDER_FACADE_PASSWORD") else {
+    let Some(password) = required_secret("SMOLDER_FACADE_PASSWORD") else {
         eprintln!("skipping client file facade interop: SMOLDER_FACADE_PASSWORD not set");
         return;
     };

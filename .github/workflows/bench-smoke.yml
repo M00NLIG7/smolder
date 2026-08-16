@@ -12,17 +12,17 @@ permissions:
 
 jobs:
   bench-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
 
       - name: Check proto benches
-        run: cargo check --benches -p smolder-proto
+        run: cargo +1.85.0 check --locked --benches -p smolder-proto
 
       - name: Check core benches
-        run: cargo check --benches -p smolder-smb-core
+        run: cargo +1.85.0 check --locked --benches -p smolder-smb-core

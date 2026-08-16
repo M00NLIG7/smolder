@@ -157,6 +157,15 @@ fn slice_from_offset32<'a>(
     Ok(&body[start..end])
 }
 
+fn copy_bytes(input: &[u8], field: &'static str) -> Result<Vec<u8>, ProtocolError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(input.len())
+        .map_err(|_| ProtocolError::SizeLimitExceeded { field })?;
+    output.extend_from_slice(input);
+    Ok(output)
+}
+
 fn put_padding(buffer: &mut Vec<u8>, alignment: usize) {
     let remainder = buffer.len() % alignment;
     if remainder != 0 {
@@ -222,12 +231,26 @@ pub fn utf16le_string(input: &[u8]) -> Result<String, ProtocolError> {
         });
     }
 
-    let utf16 = input
+    let unit_count = input.len() / 2;
+    let maximum_utf8_len = unit_count
+        .checked_mul(3)
+        .ok_or(ProtocolError::SizeLimitExceeded {
+            field: "utf16le_string",
+        })?;
+    let mut decoded = String::new();
+    decoded
+        .try_reserve_exact(maximum_utf8_len)
+        .map_err(|_| ProtocolError::SizeLimitExceeded {
+            field: "utf16le_string",
+        })?;
+    let units = input
         .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
-    String::from_utf16(&utf16).map_err(|_| ProtocolError::InvalidField {
-        field: "utf16le_string",
-        reason: "invalid UTF-16LE sequence",
-    })
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+    for character in char::decode_utf16(units) {
+        decoded.push(character.map_err(|_| ProtocolError::InvalidField {
+            field: "utf16le_string",
+            reason: "invalid UTF-16LE sequence",
+        })?);
+    }
+    Ok(decoded)
 }

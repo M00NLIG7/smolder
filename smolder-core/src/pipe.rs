@@ -5,7 +5,6 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::BytesMut;
 use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -19,14 +18,17 @@ use smolder_proto::smb::smb2::{
 };
 use smolder_proto::smb::status::NtStatus;
 
-#[cfg(feature = "kerberos-api")]
+#[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
 use crate::auth::{KerberosAuthenticator, KerberosCredentials, KerberosTarget};
 use crate::auth::{NtlmAuthenticator, NtlmCredentials};
 use crate::client::{Authenticated, Connection, TreeConnected};
 use crate::error::CoreError;
+use crate::policy::{OperationTimeouts, ResourceLimits, SecurityPolicy};
 #[cfg(feature = "quic")]
 use crate::transport::QuicTransport;
-use crate::transport::{SmbTransport, TokioTcpTransport, TransportProtocol, TransportTarget};
+use crate::transport::{
+    SmbTransport, TokioTcpTransport, TransportIdentity, TransportProtocol, TransportTarget,
+};
 
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
@@ -45,12 +47,15 @@ pub struct SmbSessionConfig {
     dialects: Vec<Dialect>,
     client_guid: [u8; 16],
     compression: Option<CompressionCapabilities>,
+    security_policy: SecurityPolicy,
+    resource_limits: ResourceLimits,
+    operation_timeouts: OperationTimeouts,
 }
 
 #[derive(Debug, Clone)]
 enum SessionAuth {
     Ntlm(NtlmCredentials),
-    #[cfg(feature = "kerberos-api")]
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     Kerberos {
         credentials: KerberosCredentials,
         target: KerberosTarget,
@@ -64,18 +69,30 @@ impl SmbSessionConfig {
         Self {
             target: TransportTarget::tcp(server),
             auth: SessionAuth::Ntlm(credentials),
-            signing_mode: SigningMode::ENABLED,
+            signing_mode: SigningMode::ENABLED | SigningMode::REQUIRED,
             capabilities: GlobalCapabilities::LARGE_MTU
                 | GlobalCapabilities::LEASING
                 | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
             compression: None,
+            security_policy: SecurityPolicy::credentialed(),
+            resource_limits: ResourceLimits::default(),
+            operation_timeouts: OperationTimeouts::default(),
         }
     }
 
+    /// Creates a Pandora-compatible strict SMB 3.1.1 configuration.
+    #[must_use]
+    pub fn pandora(server: impl Into<String>, credentials: NtlmCredentials) -> Self {
+        Self::new(server, credentials)
+            .with_security_policy(SecurityPolicy::pandora())
+            .with_dialects(vec![Dialect::Smb311])
+            .with_signing_mode(SigningMode::ENABLED | SigningMode::REQUIRED)
+    }
+
     /// Creates a new Kerberos-authenticated session configuration with SMB2/3 defaults.
-    #[cfg(feature = "kerberos-api")]
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     #[must_use]
     pub fn kerberos(
         server: impl Into<String>,
@@ -88,13 +105,16 @@ impl SmbSessionConfig {
                 credentials,
                 target,
             },
-            signing_mode: SigningMode::ENABLED,
+            signing_mode: SigningMode::ENABLED | SigningMode::REQUIRED,
             capabilities: GlobalCapabilities::LARGE_MTU
                 | GlobalCapabilities::LEASING
                 | GlobalCapabilities::ENCRYPTION,
             dialects: vec![Dialect::Smb210, Dialect::Smb302, Dialect::Smb311],
             client_guid: random(),
             compression: None,
+            security_policy: SecurityPolicy::credentialed(),
+            resource_limits: ResourceLimits::default(),
+            operation_timeouts: OperationTimeouts::default(),
         }
     }
 
@@ -157,6 +177,27 @@ impl SmbSessionConfig {
             compression_algorithms,
             flags: CompressionCapabilityFlags::empty(),
         });
+        self
+    }
+
+    /// Replaces the local security policy.
+    #[must_use]
+    pub fn with_security_policy(mut self, security_policy: SecurityPolicy) -> Self {
+        self.security_policy = security_policy;
+        self
+    }
+
+    /// Replaces explicit limits for remote-controlled sizes and counts.
+    #[must_use]
+    pub fn with_resource_limits(mut self, resource_limits: ResourceLimits) -> Self {
+        self.resource_limits = resource_limits;
+        self
+    }
+
+    /// Replaces internal connect and request deadlines.
+    #[must_use]
+    pub fn with_operation_timeouts(mut self, operation_timeouts: OperationTimeouts) -> Self {
+        self.operation_timeouts = operation_timeouts;
         self
     }
 
@@ -225,6 +266,24 @@ impl SmbSessionConfig {
     pub fn compression_capabilities(&self) -> Option<&CompressionCapabilities> {
         self.compression.as_ref()
     }
+
+    /// Returns the local security policy.
+    #[must_use]
+    pub fn security_policy(&self) -> SecurityPolicy {
+        self.security_policy
+    }
+
+    /// Returns remote-resource limits.
+    #[must_use]
+    pub fn resource_limits(&self) -> ResourceLimits {
+        self.resource_limits
+    }
+
+    /// Returns internal operation deadlines.
+    #[must_use]
+    pub fn operation_timeouts(&self) -> OperationTimeouts {
+        self.operation_timeouts
+    }
 }
 
 /// Access mask preset used when opening a named pipe.
@@ -243,7 +302,8 @@ pub struct NamedPipe<T = TokioTcpTransport> {
     connection: Option<Connection<T, TreeConnected>>,
     file_id: FileId,
     fragment_size: u32,
-    read_buffer: BytesMut,
+    read_buffer: Vec<u8>,
+    rpc_pdu_buffer: Vec<u8>,
     write_buffer: Vec<u8>,
     pending_read: Option<PendingRead<T>>,
     pending_write: Option<PendingWrite<T>>,
@@ -282,6 +342,7 @@ impl<T> std::fmt::Debug for NamedPipe<T> {
             .field("file_id", &self.file_id)
             .field("fragment_size", &self.fragment_size)
             .field("read_buffer_len", &self.read_buffer.len())
+            .field("rpc_pdu_buffer_len", &self.rpc_pdu_buffer.len())
             .field("write_buffer_capacity", &self.write_buffer.capacity())
             .field("eof", &self.eof)
             .field("closed", &self.closed)
@@ -291,6 +352,14 @@ impl<T> std::fmt::Debug for NamedPipe<T> {
 
 impl<T> Unpin for NamedPipe<T> {}
 
+impl<T> NamedPipe<T> {
+    pub(crate) fn invalidate_connection(&mut self) {
+        if let Some(connection) = self.connection.as_mut() {
+            connection.invalidate();
+        }
+    }
+}
+
 impl NamedPipe<TokioTcpTransport> {
     /// Connects to the target share and opens the named pipe with the requested access mode.
     pub async fn connect(
@@ -299,9 +368,12 @@ impl NamedPipe<TokioTcpTransport> {
         pipe_name: &str,
         access: PipeAccess,
     ) -> Result<Self, CoreError> {
-        let transport =
-            TokioTcpTransport::connect((config.transport_target().connect_host(), config.port()))
-                .await?;
+        let transport = TokioTcpTransport::connect_with_timeout(
+            (config.transport_target().connect_host(), config.port()),
+            config.operation_timeouts.connect,
+        )
+        .await?
+        .with_max_message_size(config.resource_limits.max_transport_message);
         Self::connect_with_transport(transport, config, share, pipe_name, access).await
     }
 }
@@ -315,7 +387,12 @@ impl NamedPipe<QuicTransport> {
         pipe_name: &str,
         access: PipeAccess,
     ) -> Result<Self, CoreError> {
-        let transport = QuicTransport::connect(config.transport_target()).await?;
+        let transport = QuicTransport::connect_with_timeout(
+            config.transport_target(),
+            config.operation_timeouts.connect,
+        )
+        .await?
+        .with_max_message_size(config.resource_limits.max_transport_message);
         Self::connect_with_transport(transport, config, share, pipe_name, access).await
     }
 }
@@ -368,22 +445,36 @@ where
         request.share_access = ShareAccess::READ | ShareAccess::WRITE;
         request.file_attributes = FileAttributes::NORMAL;
         request.create_options = CreateOptions::NON_DIRECTORY_FILE;
-        let response = connection.create(&request).await?;
         let fragment_size = connection
             .state()
             .negotiated
             .max_transact_size
             .min(connection.state().negotiated.max_read_size)
             .min(connection.state().negotiated.max_write_size)
-            .min(u32::from(u16::MAX))
-            .max(1024);
+            .min(u32::from(u16::MAX));
+        if fragment_size == 0 {
+            return Err(CoreError::InvalidResponse(
+                "server negotiated a zero-sized named-pipe transfer limit",
+            ));
+        }
+        let capacity = fragment_size as usize;
+        let mut read_buffer = Vec::new();
+        read_buffer
+            .try_reserve_exact(capacity)
+            .map_err(|_| CoreError::AllocationFailed("named-pipe read buffer"))?;
+        let mut write_buffer = Vec::new();
+        write_buffer
+            .try_reserve_exact(capacity)
+            .map_err(|_| CoreError::AllocationFailed("named-pipe write buffer"))?;
+        let response = connection.create(&request).await?;
 
         Ok(Self {
             connection: Some(connection),
             file_id: response.file_id,
             fragment_size,
-            read_buffer: BytesMut::with_capacity(fragment_size as usize),
-            write_buffer: Vec::with_capacity(fragment_size as usize),
+            read_buffer,
+            rpc_pdu_buffer: Vec::new(),
+            write_buffer,
             pending_read: None,
             pending_write: None,
             pending_flush: None,
@@ -402,6 +493,15 @@ where
     #[must_use]
     pub fn fragment_size(&self) -> u32 {
         self.fragment_size
+    }
+
+    /// Returns the remote-resource limits inherited from the physical SMB connection.
+    #[must_use]
+    pub fn resource_limits(&self) -> ResourceLimits {
+        self.connection
+            .as_ref()
+            .expect("named pipe connection is present outside pending async I/O")
+            .resource_limits()
     }
 
     fn connection_mut(&mut self) -> &mut Connection<T, TreeConnected> {
@@ -444,12 +544,14 @@ where
             let request =
                 WriteRequest::for_file(self.file_id, 0, bytes[offset..chunk_end].to_vec());
             let response = self.connection_mut().write(&request).await?;
-            if response.count == 0 {
+            let written = usize::try_from(response.count)
+                .map_err(|_| CoreError::InvalidResponse("named pipe write count exceeded usize"))?;
+            if written == 0 || written > chunk_end - offset {
                 return Err(CoreError::InvalidResponse(
-                    "named pipe write returned zero bytes",
+                    "named pipe write returned an invalid byte count",
                 ));
             }
-            offset = chunk_end;
+            offset += written;
         }
         let file_id = self.file_id;
         if let Err(error) = self
@@ -476,8 +578,7 @@ where
             ));
         }
         if !self.read_buffer.is_empty() {
-            let len = self.read_buffer.len();
-            return Ok(Some(self.read_buffer.split_to(len).to_vec()));
+            return Ok(Some(std::mem::take(&mut self.read_buffer)));
         }
         if self.eof {
             return Ok(None);
@@ -504,29 +605,51 @@ where
         Ok(Some(response.data))
     }
 
-    /// Reads one length-delimited DCE/RPC PDU from the pipe.
+    /// Reads one length-delimited DCE/RPC fragment from the pipe.
+    ///
+    /// Bytes following the fragment remain buffered for the next call, so a single SMB pipe read
+    /// may safely carry multiple coalesced RPC PDUs.
     pub async fn read_pdu(&mut self) -> Result<Vec<u8>, CoreError> {
-        let mut buffer = Vec::new();
-        let expected_len = loop {
-            let file_id = self.file_id;
-            let fragment_size = self.fragment_size;
-            let response = self
-                .connection_mut()
-                .read(&ReadRequest::for_file(file_id, 0, fragment_size))
-                .await?;
-            if response.data.is_empty() {
-                return Err(CoreError::InvalidResponse(
-                    "named pipe read returned no data",
-                ));
-            }
-            buffer.extend_from_slice(&response.data);
-            if buffer.len() >= 10 {
-                let frag_len = u16::from_le_bytes([buffer[8], buffer[9]]) as usize;
-                break frag_len;
-            }
-        };
+        const RPC_COMMON_HEADER_LEN: usize = 16;
 
-        while buffer.len() < expected_len {
+        loop {
+            if self.rpc_pdu_buffer.len() >= RPC_COMMON_HEADER_LEN {
+                let fragment_len = usize::from(u16::from_le_bytes([
+                    self.rpc_pdu_buffer[8],
+                    self.rpc_pdu_buffer[9],
+                ]));
+                if fragment_len < RPC_COMMON_HEADER_LEN {
+                    return Err(CoreError::InvalidResponse(
+                        "rpc fragment length was shorter than the common header",
+                    ));
+                }
+                let maximum = self
+                    .connection
+                    .as_ref()
+                    .expect("connection is present outside pending async I/O")
+                    .resource_limits()
+                    .max_rpc_stub_size
+                    .saturating_add(RPC_COMMON_HEADER_LEN)
+                    .min(usize::from(u16::MAX));
+                if fragment_len > maximum {
+                    return Err(CoreError::ResourceLimit {
+                        resource: "DCE/RPC fragment",
+                        requested: fragment_len as u64,
+                        maximum: maximum as u64,
+                    });
+                }
+                if self.rpc_pdu_buffer.len() >= fragment_len {
+                    let trailing_len = self.rpc_pdu_buffer.len() - fragment_len;
+                    let mut trailing = Vec::new();
+                    trailing
+                        .try_reserve_exact(trailing_len)
+                        .map_err(|_| CoreError::AllocationFailed("DCE/RPC trailing PDU buffer"))?;
+                    trailing.extend_from_slice(&self.rpc_pdu_buffer[fragment_len..]);
+                    self.rpc_pdu_buffer.truncate(fragment_len);
+                    return Ok(std::mem::replace(&mut self.rpc_pdu_buffer, trailing));
+                }
+            }
+
             let file_id = self.file_id;
             let fragment_size = self.fragment_size;
             let response = self
@@ -538,10 +661,11 @@ where
                     "named pipe response ended before rpc fragment was complete",
                 ));
             }
-            buffer.extend_from_slice(&response.data);
+            self.rpc_pdu_buffer
+                .try_reserve(response.data.len())
+                .map_err(|_| CoreError::AllocationFailed("DCE/RPC receive buffer"))?;
+            self.rpc_pdu_buffer.extend_from_slice(&response.data);
         }
-        buffer.truncate(expected_len);
-        Ok(buffer)
     }
 
     /// Writes one request PDU and then reads one response PDU.
@@ -552,20 +676,66 @@ where
 
     /// Reads the next newline-terminated UTF-8 control line from the pipe.
     pub async fn read_line(&mut self, buffer: &mut Vec<u8>) -> Result<Option<String>, CoreError> {
+        let maximum = self.resource_limits().max_control_line_size;
         loop {
             if let Some(newline_index) = buffer.iter().position(|byte| *byte == b'\n') {
-                let line = buffer.drain(..=newline_index).collect::<Vec<_>>();
-                let text = String::from_utf8_lossy(&line).trim().to_string();
+                let line_len = newline_index + 1;
+                if line_len > maximum {
+                    return Err(CoreError::ResourceLimit {
+                        resource: "named-pipe control line",
+                        requested: line_len as u64,
+                        maximum: maximum as u64,
+                    });
+                }
+                let line = std::str::from_utf8(&buffer[..line_len]).map_err(|_| {
+                    CoreError::InvalidResponse("named-pipe control line was not valid UTF-8")
+                })?;
+                let line = line.trim();
+                let mut text = String::new();
+                text.try_reserve_exact(line.len())
+                    .map_err(|_| CoreError::AllocationFailed("named-pipe control line"))?;
+                text.push_str(line);
+                buffer.drain(..line_len);
                 return Ok(Some(text));
+            }
+            if buffer.len() > maximum {
+                return Err(CoreError::ResourceLimit {
+                    resource: "named-pipe control line",
+                    requested: buffer.len() as u64,
+                    maximum: maximum as u64,
+                });
             }
 
             match self.read_chunk().await? {
-                Some(bytes) => buffer.extend_from_slice(&bytes),
+                Some(bytes) => {
+                    let next_line_bytes = bytes
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .map_or(bytes.len(), |index| index + 1);
+                    let prospective_line_len = buffer.len().checked_add(next_line_bytes).ok_or(
+                        CoreError::ResourceLimit {
+                            resource: "named-pipe control line",
+                            requested: u64::MAX,
+                            maximum: maximum as u64,
+                        },
+                    )?;
+                    if prospective_line_len > maximum {
+                        return Err(CoreError::ResourceLimit {
+                            resource: "named-pipe control line",
+                            requested: prospective_line_len as u64,
+                            maximum: maximum as u64,
+                        });
+                    }
+                    buffer
+                        .try_reserve(bytes.len())
+                        .map_err(|_| CoreError::AllocationFailed("named-pipe control line"))?;
+                    buffer.extend_from_slice(&bytes);
+                }
                 None if buffer.is_empty() => return Ok(None),
                 None => {
                     return Err(CoreError::InvalidResponse(
                         "interactive control pipe closed with a truncated line",
-                    ))
+                    ));
                 }
             }
         }
@@ -605,7 +775,14 @@ where
                 self.pending_read = None;
                 self.restore_connection(connection);
                 match result? {
-                    Some(bytes) => self.read_buffer.extend_from_slice(&bytes),
+                    Some(bytes) => {
+                        if self.read_buffer.try_reserve(bytes.len()).is_err() {
+                            return Poll::Ready(Err(CoreError::AllocationFailed(
+                                "named-pipe async read buffer",
+                            )));
+                        }
+                        self.read_buffer.extend_from_slice(&bytes);
+                    }
                     None => self.eof = true,
                 }
                 Poll::Ready(Ok(()))
@@ -712,8 +889,8 @@ where
 
             if !this.read_buffer.is_empty() {
                 let to_copy = buf.remaining().min(this.read_buffer.len());
-                let chunk = this.read_buffer.split_to(to_copy);
-                buf.put_slice(&chunk);
+                buf.put_slice(&this.read_buffer[..to_copy]);
+                this.read_buffer.drain(..to_copy);
                 return Poll::Ready(Ok(()));
             }
 
@@ -792,10 +969,12 @@ where
             let request_buffer = staged;
             let request = WriteRequest::for_file(file_id, 0, request_buffer.clone());
             let result = connection.write(&request).await.and_then(|response| {
-                let written = response.count as usize;
-                if written == 0 {
+                let written = usize::try_from(response.count).map_err(|_| {
+                    CoreError::InvalidResponse("named pipe write count exceeded usize")
+                })?;
+                if written == 0 || written > request_buffer.len() {
                     Err(CoreError::InvalidResponse(
-                        "named pipe write returned zero bytes",
+                        "named pipe write returned an invalid byte count",
                     ))
                 } else {
                     Ok(written)
@@ -865,15 +1044,21 @@ pub async fn connect_session(
 ) -> Result<Connection<TokioTcpTransport, Authenticated>, CoreError> {
     match config.transport_protocol() {
         TransportProtocol::Tcp => {
-            let transport = TokioTcpTransport::connect((
-                config.transport_target().connect_host(),
-                config.port(),
-            ))
-            .await?;
+            let transport = TokioTcpTransport::connect_with_timeout(
+                (config.transport_target().connect_host(), config.port()),
+                config.operation_timeouts.connect,
+            )
+            .await?
+            .with_max_message_size(config.resource_limits.max_transport_message);
             connect_session_with_transport(transport, config).await
         }
         TransportProtocol::Netbios => {
-            let transport = TokioTcpTransport::connect_netbios(config.transport_target()).await?;
+            let transport = TokioTcpTransport::connect_netbios_with_timeout(
+                config.transport_target(),
+                config.operation_timeouts.connect,
+            )
+            .await?
+            .with_max_message_size(config.resource_limits.max_transport_message);
             connect_session_with_transport(transport, config).await
         }
         TransportProtocol::Quic => Err(CoreError::Unsupported(
@@ -887,7 +1072,12 @@ pub async fn connect_session(
 pub async fn connect_session_quic(
     config: &SmbSessionConfig,
 ) -> Result<Connection<QuicTransport, Authenticated>, CoreError> {
-    let transport = QuicTransport::connect(config.transport_target()).await?;
+    let transport = QuicTransport::connect_with_timeout(
+        config.transport_target(),
+        config.operation_timeouts.connect,
+    )
+    .await?
+    .with_max_message_size(config.resource_limits.max_transport_message);
     connect_session_with_transport(transport, config).await
 }
 
@@ -899,6 +1089,14 @@ pub async fn connect_session_with_transport<T>(
 where
     T: SmbTransport + Send,
 {
+    let transport_identity = transport.transport_identity();
+    if let Some(actual_protocol) = transport_identity.protocol() {
+        if actual_protocol != config.transport_protocol() {
+            return Err(CoreError::InvalidInput(
+                "configured transport protocol did not match the physical transport identity",
+            ));
+        }
+    }
     let request = NegotiateRequest {
         security_mode: config.signing_mode,
         capabilities: config.capabilities,
@@ -907,17 +1105,22 @@ where
             &config.dialects,
             config.capabilities,
             config.compression.as_ref(),
-            config.transport_protocol(),
+            transport_identity,
         ),
         dialects: config.dialects.clone(),
     };
-    let connection = Connection::new(transport).negotiate(&request).await?;
+    let connection = Connection::new(transport)
+        .with_security_policy(config.security_policy)
+        .with_resource_limits(config.resource_limits)
+        .with_operation_timeouts(config.operation_timeouts)
+        .negotiate(&request)
+        .await?;
     match config.auth.clone() {
         SessionAuth::Ntlm(credentials) => {
             let mut auth = NtlmAuthenticator::new(credentials);
             connection.authenticate(&mut auth).await
         }
-        #[cfg(feature = "kerberos-api")]
+        #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
         SessionAuth::Kerberos {
             credentials,
             target,
@@ -935,15 +1138,21 @@ pub async fn connect_tree(
 ) -> Result<Connection<TokioTcpTransport, TreeConnected>, CoreError> {
     match config.transport_protocol() {
         TransportProtocol::Tcp => {
-            let transport = TokioTcpTransport::connect((
-                config.transport_target().connect_host(),
-                config.port(),
-            ))
-            .await?;
+            let transport = TokioTcpTransport::connect_with_timeout(
+                (config.transport_target().connect_host(), config.port()),
+                config.operation_timeouts.connect,
+            )
+            .await?
+            .with_max_message_size(config.resource_limits.max_transport_message);
             connect_tree_with_transport(transport, config, share).await
         }
         TransportProtocol::Netbios => {
-            let transport = TokioTcpTransport::connect_netbios(config.transport_target()).await?;
+            let transport = TokioTcpTransport::connect_netbios_with_timeout(
+                config.transport_target(),
+                config.operation_timeouts.connect,
+            )
+            .await?
+            .with_max_message_size(config.resource_limits.max_transport_message);
             connect_tree_with_transport(transport, config, share).await
         }
         TransportProtocol::Quic => Err(CoreError::Unsupported(
@@ -958,7 +1167,12 @@ pub async fn connect_tree_quic(
     config: &SmbSessionConfig,
     share: &str,
 ) -> Result<Connection<QuicTransport, TreeConnected>, CoreError> {
-    let transport = QuicTransport::connect(config.transport_target()).await?;
+    let transport = QuicTransport::connect_with_timeout(
+        config.transport_target(),
+        config.operation_timeouts.connect,
+    )
+    .await?
+    .with_max_message_size(config.resource_limits.max_transport_message);
     connect_tree_with_transport(transport, config, share).await
 }
 
@@ -982,7 +1196,7 @@ fn default_negotiate_contexts(
     dialects: &[Dialect],
     capabilities: GlobalCapabilities,
     compression: Option<&CompressionCapabilities>,
-    transport_protocol: TransportProtocol,
+    transport_identity: TransportIdentity,
 ) -> Vec<NegotiateContext> {
     if !dialects.contains(&Dialect::Smb311) {
         return Vec::new();
@@ -1006,7 +1220,7 @@ fn default_negotiate_contexts(
             compression.clone(),
         ));
     }
-    if transport_protocol == TransportProtocol::Quic {
+    if transport_identity.is_authenticated_quic() {
         contexts.push(NegotiateContext::transport_capabilities(
             TransportCapabilities {
                 flags: TransportCapabilityFlags::ACCEPT_TRANSPORT_LEVEL_SECURITY,
@@ -1047,12 +1261,12 @@ mod tests {
     use smolder_proto::smb::status::NtStatus;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::auth::NtlmCredentials;
-    #[cfg(feature = "kerberos-api")]
+    use crate::auth::{AuthError, AuthProvider, NtlmCredentials};
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     use crate::auth::{KerberosCredentials, KerberosTarget};
     use crate::client::{Connection, TreeConnected};
     use crate::error::CoreError;
-    use crate::transport::{Transport, TransportProtocol, TransportTarget};
+    use crate::transport::{Transport, TransportIdentity, TransportProtocol, TransportTarget};
 
     use super::{NamedPipe, PipeAccess, SmbSessionConfig};
 
@@ -1080,7 +1294,7 @@ mod tests {
             &config.dialects,
             config.capabilities,
             None,
-            config.transport_protocol(),
+            TransportIdentity::unauthenticated(config.transport_protocol()),
         );
         assert_eq!(contexts.len(), 2);
         assert!(contexts[0]
@@ -1110,7 +1324,7 @@ mod tests {
             &config.dialects,
             config.capabilities,
             config.compression_capabilities(),
-            config.transport_protocol(),
+            TransportIdentity::unauthenticated(config.transport_protocol()),
         );
         let compression = contexts[2]
             .as_compression_capabilities()
@@ -1177,7 +1391,7 @@ mod tests {
             &config.dialects,
             config.capabilities,
             config.compression_capabilities(),
-            config.transport_protocol(),
+            TransportIdentity::authenticated_quic(),
         );
 
         let transport = contexts
@@ -1203,7 +1417,7 @@ mod tests {
             &config.dialects,
             config.capabilities,
             config.compression_capabilities(),
-            config.transport_protocol(),
+            TransportIdentity::unauthenticated(config.transport_protocol()),
         );
 
         assert!(contexts.iter().all(|context| {
@@ -1228,11 +1442,11 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "kerberos-api")]
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     fn test_kerberos_credentials() -> KerberosCredentials {
         #[cfg(feature = "kerberos-sspi")]
         {
-            return KerberosCredentials::new("user@LAB.EXAMPLE", "pass");
+            KerberosCredentials::new("user@LAB.EXAMPLE", "pass")
         }
 
         #[cfg(all(not(feature = "kerberos-sspi"), unix, feature = "kerberos-gssapi"))]
@@ -1241,7 +1455,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "kerberos-api")]
+    #[cfg(any(feature = "kerberos-sspi", feature = "kerberos-gssapi"))]
     #[test]
     fn kerberos_smb_session_config_stores_kerberos_auth() {
         let config = SmbSessionConfig::kerberos(
@@ -1252,6 +1466,20 @@ mod tests {
 
         assert!(matches!(config.auth, super::SessionAuth::Kerberos { .. }));
         assert!(config.capabilities.contains(GlobalCapabilities::ENCRYPTION));
+    }
+
+    struct PassthroughAuthProvider(Vec<u8>);
+
+    impl AuthProvider for PassthroughAuthProvider {
+        fn initial_token(&mut self, _negotiate: &NegotiateResponse) -> Result<Vec<u8>, AuthError> {
+            Ok(self.0.clone())
+        }
+
+        fn next_token(&mut self, _incoming: &[u8]) -> Result<Vec<u8>, AuthError> {
+            Err(AuthError::InvalidState(
+                "passthrough test provider does not support challenge tokens",
+            ))
+        }
     }
 
     #[async_trait]
@@ -1277,6 +1505,7 @@ mod tests {
         body: Vec<u8>,
     ) -> Vec<u8> {
         let mut header = Header::new(command, MessageId(message_id));
+        header.flags |= smolder_proto::smb::smb2::HeaderFlags::SERVER_TO_REDIR;
         header.status = status;
         header.session_id = smolder_proto::smb::smb2::SessionId(session_id);
         header.tree_id = TreeId(tree_id);
@@ -1880,7 +2109,9 @@ mod tests {
             .await
             .expect("negotiate should succeed");
         let connection = connection
-            .session_setup(&session_request)
+            .authenticate(&mut PassthroughAuthProvider(
+                session_request.security_buffer.clone(),
+            ))
             .await
             .expect("session setup should succeed");
         connection

@@ -28,6 +28,7 @@ server itself exposes the expected RPC surface with `rpcclient`:
 
 - `lsaquery`
 - `enumdomusers`
+- `enumalsgroups builtin`, including RID `544` (`Administrators`)
 
 That keeps the fixture honest. If those preflight commands fail, the environment
 is wrong before the Rust tests even start.
@@ -42,9 +43,11 @@ scripts/run-samba-rpc-interop.sh
 
 That command:
 
-1. starts the standalone Samba container if needed
-2. runs the `rpcclient` preflight inside `smolder-samba`
-3. runs the live Smolder LSARPC interop test
+1. builds and starts the standalone Samba container through the deterministic
+   readiness gate
+2. provisions winbind-backed Builtin aliases inside the disposable fixture
+3. runs the `rpcclient` preflight inside `smolder-samba`
+4. runs the live Smolder LSARPC and SAMR interoperability tests
 
 ## Current Smolder Gate
 
@@ -71,3 +74,5 @@ Today that test proves:
 - `SamrEnumerateUsersInDomain` against the opened domain
 - `SamrOpenUser` for the fixture user
 - `SamrQueryInformationUser` account-name lookup for that user
+- Builtin alias enumeration with the `Administrators` RID `544` assertion
+- `SamrOpenAlias` and `SamrQueryInformationAlias` metadata decoding

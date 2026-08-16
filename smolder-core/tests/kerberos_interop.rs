@@ -10,6 +10,9 @@ use smolder_proto::smb::smb2::{
     TreeConnectRequest,
 };
 
+mod common;
+use common::required_secret;
+
 fn required_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
@@ -46,7 +49,6 @@ struct KerberosConfig {
     domain: Option<String>,
     workstation: Option<String>,
     realm: Option<String>,
-    kdc_url: Option<String>,
 }
 
 impl KerberosConfig {
@@ -60,19 +62,19 @@ impl KerberosConfig {
                 .or_else(|| required_env("SMOLDER_KERBEROS_HOST"))?,
             target_principal: required_env("SMOLDER_KERBEROS_TARGET_PRINCIPAL"),
             username: required_env("SMOLDER_KERBEROS_USERNAME")?,
-            password: required_env("SMOLDER_KERBEROS_PASSWORD"),
+            password: required_secret("SMOLDER_KERBEROS_PASSWORD"),
             keytab: required_env("SMOLDER_KERBEROS_KEYTAB"),
             share: required_env("SMOLDER_KERBEROS_SHARE").unwrap_or_else(|| "IPC$".to_owned()),
             domain: required_env("SMOLDER_KERBEROS_DOMAIN"),
             workstation: required_env("SMOLDER_KERBEROS_WORKSTATION"),
             realm: required_env("SMOLDER_KERBEROS_REALM"),
-            kdc_url: required_env("SMOLDER_KERBEROS_KDC_URL"),
         })
         .filter(|config| config.password.is_some() || config.keytab.is_some())
     }
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured live SMB fixture"]
 async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
     let Some(config) = KerberosConfig::from_env() else {
         eprintln!(
@@ -98,7 +100,9 @@ async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
         #[cfg(feature = "kerberos-sspi")]
         (None, Some(password)) => KerberosCredentials::new(config.username, password),
         #[cfg(not(feature = "kerberos-sspi"))]
-        (None, Some(_)) => panic!("SMOLDER_KERBEROS_PASSWORD requires the kerberos or kerberos-sspi feature"),
+        (None, Some(_)) => {
+            panic!("SMOLDER_KERBEROS_PASSWORD requires the kerberos or kerberos-sspi feature")
+        }
         (None, None) => unreachable!("config construction requires password or keytab"),
     };
     if let Some(domain) = config.domain {
@@ -107,10 +111,6 @@ async fn authenticates_and_connects_tree_with_kerberos_when_configured() {
     if let Some(workstation) = config.workstation {
         credentials = credentials.with_workstation(workstation);
     }
-    if let Some(kdc_url) = config.kdc_url {
-        credentials = credentials.with_kdc_url(kdc_url);
-    }
-
     let mut target = KerberosTarget::for_smb_host(config.target_host.clone());
     if let Some(principal) = config.target_principal {
         target = target.with_principal(principal);

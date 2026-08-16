@@ -8,11 +8,17 @@ services:
       SERVER_NAME: ${SERVER_NAME:-files.lab.example}
       WORKGROUP: ${WORKGROUP:-WORKGROUP}
       USERNAME: ${USERNAME:-smolder}
-      PASSWORD: ${PASSWORD:-smolderpass}
+      PASSWORD_FILE: /run/secrets/smb_password
       SHARE_NAME: ${SHARE_NAME:-share}
+    secrets:
+      - smb_password
     ports:
       - "${SMOLDER_SAMBA_QUIC_HOST_SMB_PORT:-1445}:445/tcp"
       - "${SMOLDER_SAMBA_QUIC_HOST_QUIC_PORT:-1443}:443/udp"
     volumes:
       - ./share:/srv/share
       - ./certs:/tls-input:ro
+
+secrets:
+  smb_password:
+    file: ${PASSWORD_FILE:?PASSWORD_FILE must identify a mode-0600 password file}
